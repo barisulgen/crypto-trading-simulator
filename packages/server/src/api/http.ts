@@ -261,6 +261,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
 
   app.get('/ws', { websocket: true }, (socket) => d.hub.add(socket));
 
-  if (d.webDist) await app.register(fastifyStatic, { root: d.webDist, prefix: '/' });
+  // dotfiles: 'deny' - never serve a dotfile (e.g. an editor's .env copy) that lands in web/dist.
+  if (d.webDist) await app.register(fastifyStatic, { root: d.webDist, prefix: '/', dotfiles: 'deny' });
   return app;
 }

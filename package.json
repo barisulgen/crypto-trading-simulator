@@ -6,6 +6,9 @@
     "packages/*"
   ],
   "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,magenta \"tsx watch packages/server/src/main.ts\" \"npm run dev -w @sim/web\"",
+    "build": "npm run build -w @sim/web",
+    "start": "npm run build && tsx packages/server/src/main.ts",
     "test": "npm test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "start:server": "tsx packages/server/src/main.ts",
@@ -13,6 +16,7 @@
     "db:wipe": "tsx packages/server/scripts/wipe.ts"
   },
   "devDependencies": {
+    "concurrently": "10.0.6",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
   }

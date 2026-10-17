@@ -1,0 +1,94 @@
+/*
+ * Design tokens - "harbour night" (dark, default) and "chart paper" (light).
+ * Every colour in the UI comes from these; components use the Tailwind names in @theme below
+ * (bg-canvas, bg-panel, bg-raised, border-line, text-fg, text-muted, text-faint, text-up,
+ * text-down, bg-accent, text-on-accent, bg-up-soft, bg-down-soft, bg-accent-soft).
+ *
+ * Up/down: a blue-leaning teal and a rose red. They differ in hue AND lightness, so they stay
+ * apart for red-green colour blindness; values always carry a +/- sign as well.
+ * Amber is the one loud colour: the TEST DATA band, focus rings, the selected coin, the
+ * primary button. Use it sparingly.
+ */
+@import '@fontsource-variable/archivo/wdth.css';
+
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --ink-canvas: #121b26;
+  --ink-panel: #172231;
+  --ink-raised: #1f2c3d;
+  --ink-line: #2a3a4f;
+  --ink-fg: #e1e8f0;
+  --ink-muted: #8a9ab0;
+  --ink-faint: #5c6b80;
+  --ink-up: #2ec4a6;
+  --ink-down: #f25c78;
+  --ink-accent: #f0b429;
+  --ink-on-accent: #1d1503;
+  --ink-up-soft: rgb(46 196 166 / 0.14);
+  --ink-down-soft: rgb(242 92 120 / 0.14);
+  --ink-accent-soft: rgb(240 180 41 / 0.14);
+  --ink-scrim: rgb(6 10 16 / 0.62);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --ink-canvas: #e9eef4;
+  --ink-panel: #ffffff;
+  --ink-raised: #f1f4f8;
+  --ink-line: #cfd8e3;
+  --ink-fg: #142030;
+  --ink-muted: #526178;
+  --ink-faint: #8391a5;
+  --ink-up: #0b8a73;
+  --ink-down: #cf2f55;
+  --ink-accent: #f0b429;
+  --ink-on-accent: #1d1503;
+  --ink-up-soft: rgb(11 138 115 / 0.1);
+  --ink-down-soft: rgb(207 47 85 / 0.1);
+  --ink-accent-soft: rgb(240 180 41 / 0.2);
+  --ink-scrim: rgb(20 32 48 / 0.4);
+}
+
+@theme inline {
+  --color-canvas: var(--ink-canvas);
+  --color-panel: var(--ink-panel);
+  --color-raised: var(--ink-raised);
+  --color-line: var(--ink-line);
+  --color-fg: var(--ink-fg);
+  --color-muted: var(--ink-muted);
+  --color-faint: var(--ink-faint);
+  --color-up: var(--ink-up);
+  --color-down: var(--ink-down);
+  --color-accent: var(--ink-accent);
+  --color-on-accent: var(--ink-on-accent);
+  --color-up-soft: var(--ink-up-soft);
+  --color-down-soft: var(--ink-down-soft);
+  --color-accent-soft: var(--ink-accent-soft);
+  --color-scrim: var(--ink-scrim);
+}
+
+@theme {
+  --font-sans: 'Archivo Variable', 'Archivo', system-ui, sans-serif;
+
+  /* Type scale (px): 11 / 12 / 13 / 15 / 20 / 28. 13 is the body size of the trade screen. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.05rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.2rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.35rem;
+  --text-lg: 1.25rem;
+  --text-lg--line-height: 1.6rem;
+  --text-xl: 1.75rem;
+  --text-xl--line-height: 2rem;
+
+  /* Under 900 px the trade screen stacks its panels behind tabs; `desk:` is 900 px and up. */
+  --breakpoint-desk: 56.25rem;
+
+  --radius-ctl: 4px;
+  --radius-panel: 6px;
+  --radius-dialog: 10px;
+}

@@ -170,6 +170,7 @@ describe('auth', () => {
   it('LAN mode serves the static web UI without a session, but nothing else', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sim-web-'));
     writeFileSync(join(dir, 'index.html'), '<!doctype html><title>sim</title>');
+    writeFileSync(join(dir, '.env.local'), 'APP_PASSWORD=leaked');
     try {
       const t = await makeApp({ webDist: dir });
       apps.push(t.app);
@@ -177,6 +178,9 @@ describe('auth', () => {
       expect(index.statusCode).toBe(200);
       expect(index.body).toContain('<title>sim</title>');
       expect((await t.app.inject({ method: 'GET', url: '/index.html' })).statusCode).toBe(200);
+      const dotfile = await t.app.inject({ method: 'GET', url: '/.env.local' });
+      expect(dotfile.statusCode).toBe(403);
+      expect(dotfile.body).not.toContain('leaked');
       expect((await t.call('GET', '/%61pi/account')).status).toBe(401);
       // An unknown /api path falls to the static wildcard: a plain 404 from web/dist, no data.
       expect(await t.call('GET', '/api/nothing')).toMatchObject({ status: 404 });

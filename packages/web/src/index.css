@@ -1,0 +1,88 @@
+@import 'tailwindcss';
+@import './styles/theme.css';
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-canvas);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    line-height: var(--text-sm--line-height);
+    /* Slightly narrow by default: more columns fit; numbers line up everywhere. */
+    font-stretch: 94%;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/* The TEST DATA band: amber with hazard-tape ends. */
+.hazard {
+  background-color: var(--color-accent);
+  color: var(--color-on-accent);
+}
+.hazard::before,
+.hazard::after {
+  content: '';
+  width: 2.5rem;
+  align-self: stretch;
+  flex: none;
+  background: repeating-linear-gradient(-45deg, var(--color-on-accent) 0 5px, transparent 5px 10px);
+  opacity: 0.85;
+}
+
+/*
+ * Trade screen grid (desk: 900 px and up). Slots by grid area:
+ *   coins  - CoinList (T13)          chart  - PriceChart (T14)
+ *   book   - OrderBook (T14)         trades - RecentTrades (T14)
+ *   form   - OrderForm (T15)         tabs   - BottomTabs (T15)
+ * Under 900 px every slot is a full-height panel and one is shown at a time (see TradePage).
+ */
+.trade-grid {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+@media (width >= 56.25rem) {
+  .trade-grid {
+    display: grid;
+    gap: 6px;
+    grid-template-columns: 13.5rem minmax(0, 1fr) 16.5rem 18.5rem;
+    grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr) minmax(12rem, 15rem);
+    grid-template-areas:
+      'coins chart book   form'
+      'coins chart trades form'
+      'coins tabs  tabs   form';
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.toast-in {
+  animation: toast-in 160ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast-in {
+    animation: none;
+  }
+}
