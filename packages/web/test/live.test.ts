@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AccountSnapshot, ServerMessage, WireAggTrade } from '../src/lib/api.ts';
+import type { AccountSnapshot, ServerMessage, WireAggTrade, WireOrder } from '../src/lib/api.ts';
 import { initialLiveData, reduce, useLive } from '../src/lib/live.ts';
 import type { LiveData } from '../src/lib/live.ts';
 
@@ -111,6 +111,37 @@ describe('live store reducer', () => {
     s = apply(s, { type: 'notice', kind: 'rejected', level: 'error', text: 'Insufficient funds' }, T0 + 300);
     // The second identical fill is collapsed into one toast but is still a new fill.
     expect(s.fillSeq).toBe(3);
+  });
+
+  it('also bumps fillSeq when open orders or their filled quantities change, not on identical pushes', () => {
+    const order = (id: string, filledQty: string, status = 'open') => ({ id, filledQty, status }) as unknown as WireOrder;
+    let s = initialLiveData();
+    s = apply(s, { type: 'orders', orders: [] });
+    expect(s.fillSeq).toBe(0);
+    s = apply(s, { type: 'orders', orders: [order('a', '0')] });
+    expect(s.fillSeq).toBe(1);
+    s = apply(s, { type: 'orders', orders: [order('a', '0')] });
+    expect(s.fillSeq).toBe(1);
+    s = apply(s, { type: 'orders', orders: [order('a', '0.5', 'partially_filled')] });
+    expect(s.fillSeq).toBe(2);
+    // A resting limit that filled while we were offline: it simply disappears from the open set.
+    s = apply(s, { type: 'orders', orders: [] });
+    expect(s.fillSeq).toBe(3);
+  });
+
+  it('bumps fillSeq when wallet balances change, but not on the 1 s account push with only prices moving', () => {
+    let s = apply(initialLiveData(), { type: 'account', account });
+    expect(s.fillSeq).toBe(0);
+    s = apply(s, { type: 'account', account: { ...account, total: '1001.5', netPnl: '1.5' } });
+    expect(s.fillSeq).toBe(0);
+    const bought: AccountSnapshot = {
+      ...account,
+      balances: { ...account.balances, spot: { USDT: { free: '950', locked: '0' }, BTC: { free: '0.0006', locked: '0' } } },
+    };
+    s = apply(s, { type: 'account', account: bought });
+    expect(s.fillSeq).toBe(1);
+    s = apply(s, { type: 'account', account: { ...bought, total: '999' } });
+    expect(s.fillSeq).toBe(1);
   });
 });
 

@@ -85,4 +85,20 @@ describe('live WebSocket client', () => {
     expect(useLive.getState().conn).toBe('down');
     expect(await delayUntilNextSocket()).toBe(1000);
   });
+
+  it('counts reconnects (not the first connection) so views can reload what they missed', async () => {
+    const { startLive, useLive } = await import('../src/lib/live.ts');
+    startLive();
+    latest().open();
+    expect(useLive.getState().reconnects).toBe(0);
+    latest().close();
+    await delayUntilNextSocket();
+    expect(useLive.getState().reconnects).toBe(0);
+    latest().open();
+    expect(useLive.getState().reconnects).toBe(1);
+    latest().close();
+    await delayUntilNextSocket();
+    latest().open();
+    expect(useLive.getState().reconnects).toBe(2);
+  });
 });

@@ -57,7 +57,11 @@ export interface LiveData {
   orders: WireOrder[];
   notices: Notice[];
   noticeSeq: number;
-  /** Bumped on every fill or partial-fill notice, so views showing fills know to reload them. */
+  /**
+   * Bumped whenever fills may have changed, so views showing fills know to reload them: every
+   * fill or partial-fill notice, a change in the open orders (ids, status, filled quantity) and a
+   * change in wallet balances. Not bumped by the 1 s account push when only prices moved.
+   */
   fillSeq: number;
   selected: Selection;
   interval: Interval;
@@ -71,6 +75,8 @@ export interface LiveState extends LiveData {
   conn: Connection;
   /** LAN password mode and no session: show the login screen. */
   needsLogin: boolean;
+  /** Times our WebSocket opened again after the first connection (views reload what they may have missed). */
+  reconnects: number;
   /** The last order-book price the owner clicked (the order form prefills its limit price); `seq` changes on every click. */
   priceClick: { price: string; seq: number } | null;
   select(symbol: string): void;
@@ -123,6 +129,19 @@ function mergeTrades(current: WireAggTrade[], incoming: WireAggTrade[]): WireAgg
   return [...byId.values()].sort((a, b) => b.id - a.id).slice(0, TRADES_KEPT);
 }
 
+/** Open orders as far as fills are concerned: which ones, their status and filled quantity. */
+function ordersKey(orders: WireOrder[]): string {
+  return orders
+    .map((o) => `${o.id}:${o.status}:${o.filledQty}`)
+    .sort()
+    .join('|');
+}
+
+/** Wallet balances only (prices and totals move every second; balances move on fills, deposits, locks). */
+function balancesKey(a: AccountSnapshot): string {
+  return JSON.stringify(a.balances);
+}
+
 /** What one server message changes. Pure: `now` is the arrival time. */
 export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<LiveData> {
   switch (msg.type) {
@@ -130,10 +149,14 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
       return { tickers: msg.tickers };
     case 'health':
       return { health: msg.health };
-    case 'account':
-      return { account: msg.account };
-    case 'orders':
-      return { orders: msg.orders };
+    case 'account': {
+      const moved = s.account !== null && balancesKey(s.account) !== balancesKey(msg.account);
+      return moved ? { account: msg.account, fillSeq: s.fillSeq + 1 } : { account: msg.account };
+    }
+    case 'orders': {
+      const moved = ordersKey(s.orders) !== ordersKey(msg.orders);
+      return moved ? { orders: msg.orders, fillSeq: s.fillSeq + 1 } : { orders: msg.orders };
+    }
     case 'notice': {
       const notices = addNotice(s, { kind: msg.kind, level: msg.level, text: msg.text }, now);
       const filled = msg.kind === 'fill' || msg.kind === 'partial_fill';
@@ -160,6 +183,7 @@ export const useLive = create<LiveState>()((set) => ({
   meta: null,
   conn: 'connecting',
   needsLogin: false,
+  reconnects: 0,
   priceClick: null,
   select(symbol) {
     set((s) =>
@@ -193,6 +217,8 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null;
 /** When the current socket opened, ms; null while not open. */
 let openedAt: number | null = null;
 let started = false;
+/** Whether any socket has opened yet (the next open is then a reconnect). */
+let everOpened = false;
 
 function subscribe(): void {
   if (socket?.readyState !== WebSocket.OPEN) return;
@@ -241,7 +267,8 @@ function connect(): void {
   ws.onopen = () => {
     opened = true;
     openedAt = Date.now();
-    useLive.setState({ conn: 'open' });
+    useLive.setState((s) => ({ conn: 'open', reconnects: everOpened ? s.reconnects + 1 : s.reconnects }));
+    everOpened = true;
     subscribe();
     const meta = useLive.getState().meta;
     if (!meta || Object.keys(meta.rules).length < meta.symbols.length) void loadMeta();

@@ -131,6 +131,7 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
   const fillSeq = useLive((s) => s.fillSeq);
+  const reconnects = useLive((s) => s.reconnects);
   const fresh = useLive((s) => s.health[symbol]?.fresh !== false);
   const tick = useLive((s) => s.meta?.rules[symbol]?.tickSize);
 
@@ -248,14 +249,16 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
       redraw.current();
     };
 
+    /** The kline the store holds now, if it belongs to this chart (it may be newer than the history). */
+    const withKline = (rows: Candle[]) => {
+      const k = useLive.getState().kline;
+      return k && k.symbol === symbol && k.interval === interval ? (applyKline(rows, k.candle) ?? rows) : rows;
+    };
+
     api.candles(symbol, interval).then(
       (rows) => {
         if (!current) return;
-        let all = mergeCandles([], rows);
-        // A kline that arrived while the history loaded.
-        const k = useLive.getState().kline;
-        if (k && k.symbol === symbol && k.interval === interval) all = applyKline(all, k.candle) ?? all;
-        show(all);
+        show(withKline(mergeCandles([], rows)));
         l.chart.timeScale().scrollToRealTime();
         setStatus('ready');
       },
@@ -266,7 +269,26 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
       },
     );
 
+    // After a reconnect: reload the latest page and merge it in, repairing candles missed while
+    // we were offline. An outage longer than one page leaves a gap, so then start over from it.
+    const repair = () => {
+      api.candles(symbol, interval).then(
+        (rows) => {
+          if (!current || rows.length === 0) return;
+          const latest = mergeCandles([], rows);
+          const last = candles.current.at(-1);
+          const gap = !last || latest[0]!.time > last.time;
+          if (gap) exhausted = false;
+          show(withKline(gap ? latest : mergeCandles(candles.current, latest)));
+          if (!last) l.chart.timeScale().scrollToRealTime();
+          setStatus('ready');
+        },
+        (e: unknown) => console.warn(`Could not reload candles after reconnecting: ${(e as Error).message}`),
+      );
+    };
+
     const unsubscribe = useLive.subscribe((s, prev) => {
+      if (s.reconnects !== prev.reconnects) repair();
       const k = s.kline;
       if (k === prev.kline || !k || k.symbol !== symbol || k.interval !== interval) return;
       const next = applyKline(candles.current, k.candle);
@@ -309,7 +331,8 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
     };
   }, [symbol, interval, attempt]);
 
-  // The owner's fills: on symbol change and after every fill notice (kept on screen while reloading).
+  // The owner's fills: on symbol change, whenever fills may have changed (fillSeq) and after a
+  // reconnect. The previous markers stay on screen while reloading and if a reload fails.
   useEffect(() => {
     let current = true;
     api.fills({ symbol, limit: FILLS_LIMIT }).then(
@@ -318,12 +341,12 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
         fills.current = rows;
         redraw.current();
       },
-      () => {}, // markers are an extra: on failure they stay as they were until the next fill
+      (e: unknown) => console.warn(`Could not load fills for the chart markers: ${(e as Error).message}`),
     );
     return () => {
       current = false;
     };
-  }, [symbol, fillSeq]);
+  }, [symbol, fillSeq, reconnects]);
 
   return (
     <div className="relative min-h-0 flex-1">

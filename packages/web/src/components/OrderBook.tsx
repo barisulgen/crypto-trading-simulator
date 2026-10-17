@@ -78,6 +78,10 @@ export function OrderBook() {
                 <span className="text-fg">${fmtPrice(symbol, view.spread.abs)}</span>
                 <span className="text-muted">{view.spread.pct}%</span>
               </>
+            ) : view.cross ? (
+              <span className="font-semibold text-fg" title="Best bid is at or above best ask">
+                {view.cross === 'locked' ? 'Locked' : 'Crossed'}
+              </span>
             ) : (
               <span className="text-muted">-</span>
             )}

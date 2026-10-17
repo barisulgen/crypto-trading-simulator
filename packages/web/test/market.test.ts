@@ -74,7 +74,25 @@ describe('order book view', () => {
   });
 
   it('has no spread when a side is empty', () => {
-    expect(bookView({ symbol: 'X', bids: [], asks: [{ price: '1', qty: '1' }] }).spread).toBeNull();
+    const v = bookView({ symbol: 'X', bids: [], asks: [{ price: '1', qty: '1' }] });
+    expect(v.spread).toBeNull();
+    expect(v.cross).toBeNull();
+  });
+
+  it('reports a locked book (best bid = best ask) without a spread', () => {
+    const v = bookView({ symbol: 'X', bids: [{ price: '100.00', qty: '1' }], asks: [{ price: '100', qty: '1' }] });
+    expect(v.spread).toBeNull();
+    expect(v.cross).toBe('locked');
+  });
+
+  it('reports a crossed book (best bid above best ask) without a negative spread', () => {
+    const v = bookView({ symbol: 'X', bids: [{ price: '100.02', qty: '1' }], asks: [{ price: '100.01', qty: '1' }] });
+    expect(v.spread).toBeNull();
+    expect(v.cross).toBe('crossed');
+  });
+
+  it('has no crossing on a normal book', () => {
+    expect(bookView({ symbol: 'X', bids: [{ price: '99', qty: '1' }], asks: [{ price: '101', qty: '1' }] }).cross).toBeNull();
   });
 });
 

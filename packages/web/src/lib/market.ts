@@ -54,8 +54,10 @@ export interface BookView {
   asks: DepthRow[];
   /** Best (highest) bid first. */
   bids: DepthRow[];
-  /** Best ask minus best bid, and that as a percentage of the mid price; null if a side is empty. */
+  /** Best ask minus best bid, and that as a percentage of the mid price; null if a side is empty or the book is locked/crossed. */
   spread: { abs: string; pct: string } | null;
+  /** Best bid equal to ('locked') or above ('crossed') the best ask; null on a normal or one-sided book. */
+  cross: 'locked' | 'crossed' | null;
 }
 
 function cumulative(levels: WireLevel[]): Omit<DepthRow, 'depth'>[] {
@@ -76,17 +78,19 @@ function pctScaled(a: bigint, b: bigint, dp: number, round: boolean): bigint {
   return round ? (num * 2n + den) / (den * 2n) : num / den;
 }
 
-function spreadOf(bid: string, ask: string): BookView['spread'] {
+function spreadOf(bid: string, ask: string): Pick<BookView, 'spread' | 'cross'> {
   const s = Math.max(scaleOf(bid), scaleOf(ask));
   const b = scaled(bid, s);
   const a = scaled(ask, s);
-  if (a + b <= 0n) return null;
+  if (b === a) return { spread: null, cross: 'locked' };
+  if (b > a) return { spread: null, cross: 'crossed' };
+  if (a + b <= 0n) return { spread: null, cross: null };
   // Under 1%: keep two significant digits (0.000012%), else 2 decimals.
   const raw = pctScaled(a, b, PCT_MAX_DP, false);
   const firstNonZero = raw.toString().padStart(PCT_MAX_DP, '0').search(/[1-9]/);
   const dp = raw >= 10n ** BigInt(PCT_MAX_DP) || raw === 0n ? 2 : Math.min(PCT_MAX_DP, Math.max(2, firstNonZero + 2));
   const digits = pctScaled(a, b, dp, true).toString().padStart(dp + 1, '0');
-  return { abs: unscaled(a - b, s), pct: `${digits.slice(0, -dp)}.${digits.slice(-dp)}` };
+  return { spread: { abs: unscaled(a - b, s), pct: `${digits.slice(0, -dp)}.${digits.slice(-dp)}` }, cross: null };
 }
 
 export function bookView(book: { symbol: string; bids: WireLevel[]; asks: WireLevel[] }): BookView {
@@ -102,7 +106,7 @@ export function bookView(book: { symbol: string; bids: WireLevel[]; asks: WireLe
   return {
     asks: asks.map(withDepth),
     bids: bids.map(withDepth),
-    spread: bestBid !== undefined && bestAsk !== undefined ? spreadOf(bestBid, bestAsk) : null,
+    ...(bestBid !== undefined && bestAsk !== undefined ? spreadOf(bestBid, bestAsk) : { spread: null, cross: null }),
   };
 }
 
