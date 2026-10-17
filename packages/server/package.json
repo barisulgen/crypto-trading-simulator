@@ -5,12 +5,16 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "feed:smoke": "tsx scripts/feed-smoke.ts"
   },
   "dependencies": {
-    "@sim/engine": "*"
+    "@sim/engine": "*",
+    "ws": "8.22.0"
   },
   "devDependencies": {
-    "@types/node": "26.6.5"
+    "@types/node": "26.6.5",
+    "@types/ws": "8.18.2",
+    "tsx": "4.23.15"
   }
 }

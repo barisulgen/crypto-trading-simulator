@@ -58,8 +58,9 @@ export class FeedHealth {
     const s = this.st(symbol);
     this.lastFrame = now;
     s.lastDepth = now;
-    s.lag = now - (eventTime - this.clockOffset);
-    s.lagging = s.lag > this.cfg.lagMs;
+    // A missing or non-numeric event time can never prove the feed is current.
+    s.lag = Number.isFinite(eventTime) ? now - (eventTime - this.clockOffset) : Number.POSITIVE_INFINITY;
+    s.lagging = !(s.lag <= this.cfg.lagMs);
   }
 
   setBookValid(symbol: string, valid: boolean): void {
@@ -77,7 +78,9 @@ export class FeedHealth {
     if (!this.connected) return 'Disconnected';
     if (now - this.lastFrame > silentMs) return `Connection silent for ${silentMs / 1000}s`;
     if (!s.bookValid) return 'Order book resyncing';
-    if (s.lagging) return `Feed lagging by ${(s.lag / 1000).toFixed(1)}s`;
+    if (s.lagging) {
+      return Number.isFinite(s.lag) ? `Feed lagging by ${(s.lag / 1000).toFixed(1)}s` : 'Feed lagging (invalid event time)';
+    }
     if (now - (s.lastDepth ?? this.connectAt) > noUpdateMs) {
       return `No order-book updates for ${noUpdateMs / 1000}s`;
     }
