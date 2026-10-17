@@ -50,3 +50,14 @@ export interface NormalizedRequest {
   triggerPrice?: Decimal;
   attach?: { stopLoss: Decimal; takeProfit: Decimal };
 }
+
+export interface PriceLevel {
+  price: Decimal;
+  qty: Decimal;
+}
+
+/** bids descending, asks ascending */
+export interface BookSnapshot {
+  bids: PriceLevel[];
+  asks: PriceLevel[];
+}

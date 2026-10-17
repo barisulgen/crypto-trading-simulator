@@ -1,5 +1,5 @@
 import { D } from '../src/decimal.ts';
-import type { SpotRules } from '../src/types.ts';
+import type { BookSnapshot, SpotRules } from '../src/types.ts';
 
 export const btcRules: SpotRules = {
   symbol: 'BTCUSDT',
@@ -24,4 +24,17 @@ export const btcRules: SpotRules = {
   askMultiplierDown: D('0.8'),
   maxNumOrders: 200,
   maxNumAlgoOrders: 5,
+};
+
+export const sampleBook: BookSnapshot = {
+  asks: [
+    { price: D('100.00'), qty: D('0.5') },
+    { price: D('100.10'), qty: D('1.0') },
+    { price: D('100.50'), qty: D('2.0') },
+  ],
+  bids: [
+    { price: D('99.90'), qty: D('0.4') },
+    { price: D('99.80'), qty: D('1.0') },
+    { price: D('99.00'), qty: D('3.0') },
+  ],
 };
