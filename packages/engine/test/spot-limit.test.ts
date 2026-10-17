@@ -167,7 +167,7 @@ describe('buy limit fills only on trade-through', () => {
 
 describe('shared trade volume', () => {
   it('price priority: the higher buy fills first', () => {
-    const { ctx, engine, stored } = setup();
+    const { ctx, engine, bal, stored } = setup();
     const b = rest(engine, limitBuy('99.50', '1'), ctx);
     ctx.now += 1;
     const a = rest(engine, limitBuy('99.60', '1'), ctx);
@@ -178,6 +178,10 @@ describe('shared trade volume', () => {
     ]);
     expect(stored(a).status).toBe('filled');
     expect(stored(b).status).toBe('partially_filled');
+    // 199.1 locked at submit: a spent 99.6, b spent 49.75 of its 99.5; credits net of the maker fee.
+    expect(s(bal('USDT').locked)).toBe('49.75');
+    expect(s(bal('USDT').free)).toBe('800.9');
+    expect(s(bal('BTC').free)).toBe('3.4985');
   });
 
   it('same price: time priority', () => {
@@ -203,6 +207,15 @@ describe('allocateTradeThrough', () => {
     expect(out.map((a) => [a.orderId, s(a.qty)])).toEqual([
       ['x', '0.5'],
       ['y', '0.5'],
+    ]);
+  });
+
+  it('same price: earlier createdAt first, whatever order the caller passes them in', () => {
+    const orders = [order('late', 'buy', '99.5', '1', 2), order('early', 'buy', '99.5', '1', 1)];
+    const out = allocateTradeThrough(orders, trade('99.4', '1.5', true));
+    expect(out.map((a) => [a.orderId, s(a.qty)])).toEqual([
+      ['early', '1'],
+      ['late', '0.5'],
     ]);
   });
 

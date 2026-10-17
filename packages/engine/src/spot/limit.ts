@@ -21,6 +21,7 @@ import {
   emptyPreview,
   makeFill,
   newOrder,
+  noFields,
   openCounts,
   placePending,
   readRequest,
@@ -57,7 +58,7 @@ interface LimitPlan {
  */
 function planLimit(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx): LimitPlan {
   const rules = ctx.market.rules(req.symbol);
-  let fields: RequestFields = { qty: null, quoteQty: null, price: null };
+  let fields = noFields();
   const fail = (why: string): LimitPlan => ({ rules, fields, lockAmount: null, reason: why });
   if (!ctx.market.isFresh(req.symbol)) return fail(`Live data interrupted for ${req.symbol}`);
   const read = readRequest(req, true);
@@ -214,5 +215,6 @@ export function previewLimit(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx
     receive: buy ? qty.minus(feeAmount) : quote.minus(feeAmount),
     exhausted: false,
     rejectReason,
+    note: null,
   };
 }

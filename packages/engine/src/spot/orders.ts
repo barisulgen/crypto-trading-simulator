@@ -1,9 +1,10 @@
-import { D } from '../decimal.ts';
+import { D, floorToStep } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
 import type { WalkResult } from '../book.ts';
 import { spotFee } from '../fees.ts';
 import { InputError, parseAmount } from '../input.ts';
 import type {
+  BookSnapshot,
   EngineCtx,
   EngineEvent,
   Fill,
@@ -16,8 +17,9 @@ import type {
 } from '../types.ts';
 import { credit, lockFunds, releaseFunds, spendFunds } from './state.ts';
 import type { SpotState } from './state.ts';
+import { isStopType } from './triggers.ts';
 
-/** Order lifecycle helpers shared by market and limit orders. */
+/** Order lifecycle helpers shared by market, limit and stop orders. */
 
 /** Statuses of orders that still count against MAX_NUM_ORDERS (in flight included). */
 const LIVE_STATUSES: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled', 'triggered']);
@@ -37,17 +39,25 @@ export interface RequestFields {
   qty: Decimal | null;
   quoteQty: Decimal | null;
   price: Decimal | null;
+  triggerPrice: Decimal | null;
+  attach: { stopLoss: Decimal; takeProfit: Decimal } | null;
+}
+
+export function noFields(): RequestFields {
+  return { qty: null, quoteQty: null, price: null, triggerPrice: null, attach: null };
 }
 
 /**
- * Parse the typed amounts: exactly one of qty/quoteQty, then the limit price when asked for.
+ * Parse the typed amounts: exactly one of qty/quoteQty, then the limit price and the trigger
+ * price when asked for, then an attached pair (buys of market/limit/post-only only).
  * Stops at the first problem (reason set); fields parsed so far are kept for the record.
  */
 export function readRequest(
   req: SpotOrderRequest,
   withPrice: boolean,
+  withTrigger = false,
 ): { fields: RequestFields; reason: string | null } {
-  const fields: RequestFields = { qty: null, quoteQty: null, price: null };
+  const fields = noFields();
   const fail = (reason: string) => ({ fields, reason });
 
   const hasQty = present(req.qty);
@@ -59,12 +69,21 @@ export function readRequest(
       if (!present(req.price)) return fail('Enter a limit price');
       fields.price = parseAmount(req.price!);
     }
+    if (withTrigger) {
+      if (!present(req.triggerPrice)) return fail('Enter a trigger price');
+      fields.triggerPrice = parseAmount(req.triggerPrice!);
+    }
+    if (req.attach) {
+      if (req.side !== 'buy') return fail('Attached stop-loss and take-profit are only for buys');
+      if (isStopType(req.type)) {
+        return fail('Attached stop-loss and take-profit cannot be added to a stop or take-profit order');
+      }
+      fields.attach = { stopLoss: parseAmount(req.attach.stopLoss), takeProfit: parseAmount(req.attach.takeProfit) };
+    }
   } catch (e) {
     if (e instanceof InputError) return fail(e.message);
     throw e;
   }
-  // Attached pairs arrive with Task 6; never accept an order while ignoring part of it.
-  if (req.attach) return fail('Attached stop-loss and take-profit are not supported yet');
   return { fields, reason: null };
 }
 
@@ -77,7 +96,7 @@ export function newOrder(req: SpotOrderRequest, rules: SpotRules, fields: Reques
     qty: fields.qty,
     quoteQty: fields.quoteQty,
     price: fields.price,
-    triggerPrice: null,
+    triggerPrice: fields.triggerPrice,
     status: 'pending',
     filledQty: D(0),
     filledQuote: D(0),
@@ -86,7 +105,7 @@ export function newOrder(req: SpotOrderRequest, rules: SpotRules, fields: Reques
     lockAsset: req.side === 'buy' ? rules.quote : rules.base,
     lockAmount: D(0),
     ocoGroupId: null,
-    attach: null,
+    attach: fields.attach,
     createdAt: ctx.now,
     arrivesAt: null,
     triggeredAt: null,
@@ -157,7 +176,7 @@ export function makeFill(order: SpotOrder, t: FillTerms, ctx: EngineCtx): Fill {
     bestAtSubmit: order.bestAtSubmit,
     slippageUsd: t.slippageUsd,
     driftUsd: t.driftUsd,
-    triggerPrice: null,
+    triggerPrice: order.triggerPrice,
     realizedPnl: null,
     roundTripId: null,
     time: ctx.now,
@@ -222,7 +241,7 @@ export function present(s: string | undefined): boolean {
 }
 
 /** 100–300 ms, uniform. */
-function arrivalDelay(ctx: EngineCtx): number {
+export function arrivalDelay(ctx: EngineCtx): number {
   return 100 + Math.floor(ctx.rng() * 201);
 }
 
@@ -242,5 +261,89 @@ export function emptyPreview(rejectReason: string | null): OrderPreview {
     receive: null,
     exhausted: false,
     rejectReason,
+    note: null,
+  };
+}
+
+// ---- taker execution (market orders and triggered stops) ----
+
+export function marketStep(rules: SpotRules): Decimal {
+  return rules.marketStepSize.isZero() ? rules.stepSize : rules.marketStepSize;
+}
+
+export function marketTarget(o: {
+  qty: Decimal | null;
+  quoteQty: Decimal | null;
+}): { qty: Decimal } | { quote: Decimal } {
+  return o.qty ? { qty: o.qty } : { quote: o.quoteQty! };
+}
+
+/**
+ * Execute an arrived taker order against its walk of `book`: one fill for what the book had.
+ * If the book ran thin the rest is cancelled (thin_book) and the unspent lock released.
+ * The caller has already checked funds.
+ */
+export function fillOrThin(
+  s: SpotState,
+  order: SpotOrder,
+  walk: WalkResult,
+  book: BookSnapshot,
+  rules: SpotRules,
+  ctx: EngineCtx,
+): EngineEvent[] {
+  const thin = walk.exhausted || walk.qty.isZero();
+  const events: EngineEvent[] = [];
+  let current = order;
+  if (walk.qty.gt(0)) {
+    const settled = settleTaker(s, order, walk, rules, thin ? 'partially_filled' : 'filled', ctx);
+    current = settled.order;
+    events.push({ type: 'fill', time: ctx.now, fill: settled.fill, order: current });
+  } else {
+    releaseFunds(s, order.lockAsset, order.lockAmount);
+    current = { ...order, lockAmount: D(0) };
+  }
+
+  if (thin) {
+    current = { ...current, status: 'cancelled' };
+    const levels = order.side === 'buy' ? book.asks : book.bids;
+    const cancelledQty = unfilledQty(order, walk, levels[walk.levelsUsed - 1]?.price ?? null, marketStep(rules));
+    events.push({ type: 'order_cancelled', time: ctx.now, order: current, reason: 'thin_book', cancelledQty });
+  }
+  s.orders.set(current.id, current);
+  return events;
+}
+
+/**
+ * Quantity a thin book left unfilled. For dollar-sized orders the unspent dollars are
+ * converted at the last walked price and floored to the step (0 if nothing was walked).
+ */
+function unfilledQty(order: SpotOrder, walk: WalkResult, lastPrice: Decimal | null, step: Decimal): Decimal {
+  if (order.qty) return order.qty.minus(walk.qty);
+  if (!lastPrice) return D(0);
+  return floorToStep(order.quoteQty!.minus(walk.quote).div(lastPrice), step);
+}
+
+/** Estimate for a taker walk (market orders, and stops as if triggered now), taker fee. */
+export function takerPreview(
+  w: WalkResult | null,
+  side: Side,
+  rules: SpotRules,
+  ctx: EngineCtx,
+  rejectReason: string | null,
+): OrderPreview {
+  if (!w || w.qty.isZero()) return { ...emptyPreview(rejectReason), exhausted: w?.exhausted ?? false };
+  const fee = spotFee(side, w.qty, w.quote, ctx.fees.taker, rules.base, rules.quote);
+  const pct = w.bestPrice ? w.slippageUsd.div(w.bestPrice.mul(w.qty)).mul(100) : null;
+  const buy = side === 'buy';
+  return {
+    estAvgPrice: w.avgPrice,
+    estSlippageUsd: w.slippageUsd,
+    estSlippagePct: pct,
+    fee: { asset: fee.asset, amount: fee.amount, usd: fee.usd },
+    total: buy ? w.quote : w.quote.minus(fee.amount),
+    receive: buy ? w.qty.minus(fee.amount) : w.quote.minus(fee.amount),
+    exhausted: w.exhausted,
+    rejectReason,
+    note: null,
   };
 }

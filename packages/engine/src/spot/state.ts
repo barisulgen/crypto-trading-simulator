@@ -13,6 +13,8 @@ export interface SpotState {
   orders: Map<string, SpotOrder>;
   basis: Record<string, Basis>;
   totalDeposited: Decimal;
+  /** Per symbol, the id of the last AggTrade processed; older or repeated trades are ignored. */
+  lastTradeId: Record<string, number>;
 }
 
 /** Zero spot balances for every asset; the leverage wallet holds USDT only. */
@@ -24,6 +26,7 @@ export function emptySpotState(assets: string[]): SpotState {
     orders: new Map(),
     basis: {},
     totalDeposited: D(0),
+    lastTradeId: {},
   };
 }
 

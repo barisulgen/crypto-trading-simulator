@@ -123,6 +123,10 @@ export interface SpotOrder {
   createdAt: number;
   arrivesAt: number | null;
   triggeredAt: number | null;
+  /**
+   * Best price of the side the order takes, when it was sent to the exchange: at submit, or
+   * for a stop/take-profit at trigger time (so a fill's drift measures trigger → execution).
+   */
   bestAtSubmit: Decimal | null;
   rejectReason: string | null;
 }
@@ -193,4 +197,6 @@ export interface OrderPreview {
   receive: Decimal | null;
   exhausted: boolean;
   rejectReason: string | null;
+  /** Caveat shown with the estimate, e.g. 'Estimate if triggered now' for stops; null if none. */
+  note: string | null;
 }

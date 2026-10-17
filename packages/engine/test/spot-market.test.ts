@@ -370,13 +370,6 @@ describe('request validation', () => {
     );
   });
 
-  it('stop and take-profit types are not supported yet', () => {
-    const { ctx, engine } = setup('1000');
-    expect(rejectReason(engine.submit(buy({ type: 'stop_loss', qty: '1', triggerPrice: '99' }), ctx))).toBe(
-      'Order type not supported yet',
-    );
-  });
-
   it('empty book side at submit → rejected, nothing locked (no zero-lock orders)', () => {
     const { market, ctx, engine, bal } = setup('1000', { btc: '1' });
     market.setBook('BTCUSDT', { asks: [], bids: [] });

@@ -1,8 +1,7 @@
-import { D, floorToStep } from '../decimal.ts';
+import { D } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
 import { walkBook } from '../book.ts';
 import type { WalkResult } from '../book.ts';
-import { spotFee } from '../fees.ts';
 import { validateSpotOrder } from '../rules.ts';
 import type {
   ActionResult,
@@ -15,22 +14,36 @@ import type {
   SpotRules,
   Wallet,
 } from '../types.ts';
-import { arriveLimit, isLimitType, matchTrade, previewLimit, submitLimit } from './limit.ts';
+import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import {
-  emptyPreview,
+  fillOrThin,
+  marketStep,
+  marketTarget,
   newOrder,
+  noFields,
   openCounts,
   placePending,
   readRequest,
   rejectOrder,
   rejectPending,
-  settleTaker,
+  takerPreview,
 } from './orders.ts';
 import type { RequestFields } from './orders.ts';
 import { balanceOf, freeOf, releaseFunds } from './state.ts';
 import type { SpotState } from './state.ts';
-
-const NOT_SUPPORTED = 'Order type not supported yet';
+import {
+  activateAttachedPairs,
+  arriveStop,
+  arriveTriggered,
+  attachOco,
+  cancelStop,
+  executeDue,
+  previewStop,
+  submitStop,
+  triggerStops,
+} from './stops.ts';
+import type { OcoRequest } from './stops.ts';
+import { isStopType } from './triggers.ts';
 
 /** Everything submit and preview work out for a market order before touching state. */
 interface MarketPlan {
@@ -94,42 +107,62 @@ export class SpotEngine {
       case 'limit':
       case 'post_only':
         return submitLimit(this.s, req, ctx);
-      default: {
-        const rules = ctx.market.rules(req.symbol);
-        const order = newOrder(req, rules, { qty: null, quoteQty: null, price: null }, ctx);
-        return rejectOrder(this.s, order, NOT_SUPPORTED, ctx);
-      }
+      case 'stop_loss':
+      case 'take_profit':
+        return submitStop(this.s, req, ctx);
     }
   }
 
   /**
-   * The order reaches the exchange after its delay. A no-op for unknown or non-pending
-   * orders (e.g. cancelled while in flight) and before the order's arrivesAt.
+   * The order reaches the exchange after its delay: a submitted order (pending) or a triggered
+   * stop. A no-op for unknown or other orders (e.g. cancelled while in flight) and before the
+   * order's arrivesAt. A buy that finishes here activates its attached pair.
    */
   arrive(orderId: string, ctx: EngineCtx): EngineEvent[] {
     const order = this.s.orders.get(orderId);
-    if (!order || order.status !== 'pending') return [];
+    if (!order) return [];
+    if (order.status === 'triggered') return arriveTriggered(this.s, order, ctx);
+    if (order.status !== 'pending') return [];
     if (order.arrivesAt !== null && ctx.now < order.arrivesAt) return [];
     switch (order.type) {
       case 'market':
-        return this.arriveMarket(order, ctx);
+        return activateAttachedPairs(this.s, this.arriveMarket(order, ctx), ctx);
       case 'limit':
       case 'post_only':
-        return arriveLimit(this.s, order, ctx);
-      default:
-        return [];
+        return activateAttachedPairs(this.s, arriveLimit(this.s, order, ctx), ctx);
+      case 'stop_loss':
+      case 'take_profit':
+        return arriveStop(this.s, order, ctx);
     }
   }
 
-  /** A real trade on `symbol`: fills resting limit and post-only orders it went through. */
+  /**
+   * A real trade on `symbol`: first triggers the armed stops its price reached, then fills the
+   * resting limit and post-only orders it went through. A trade id at or below the last one
+   * processed for the symbol is a replay and is ignored, so no trade is ever counted twice.
+   */
   onTrade(symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
-    return matchTrade(this.s, symbol, trade, ctx);
+    const lastId = this.s.lastTradeId[symbol];
+    if (lastId !== undefined && trade.id <= lastId) return [];
+    const events = [...triggerStops(this.s, symbol, trade, ctx), ...matchTrade(this.s, symbol, trade, ctx)];
+    this.s.lastTradeId[symbol] = trade.id;
+    return activateAttachedPairs(this.s, events, ctx);
+  }
+
+  /** The symbol's book is fresh again: triggered orders that are due execute against it now. */
+  onFresh(symbol: string, ctx: EngineCtx): EngineEvent[] {
+    return executeDue(this.s, symbol, ctx);
+  }
+
+  /** Attach a linked stop-loss / take-profit pair (both sells) to coins already held. */
+  attachOco(req: OcoRequest, ctx: EngineCtx): EngineEvent[] {
+    return attachOco(this.s, req, ctx);
   }
 
   /**
-   * Cancel by the owner. Pending, open and partially filled limit/post-only orders can be
-   * cancelled (a cancelled pending order never arrives); market orders in flight and
-   * triggered orders are already executing.
+   * Cancel by the owner. Pending, open and partially filled limit/post-only orders and
+   * untriggered stops can be cancelled (a cancelled pending order never arrives; a pair is
+   * cancelled as a whole); market orders in flight and triggered stops are already executing.
    */
   cancel(orderId: string, ctx: EngineCtx): ActionResult {
     const order = this.s.orders.get(orderId);
@@ -137,42 +170,26 @@ export class SpotEngine {
     if (order.status === 'filled' || order.status === 'cancelled' || order.status === 'rejected') {
       return { ok: false, reason: 'Order is not open' };
     }
-    if (order.status === 'triggered' || !isLimitType(order)) {
+    if (order.status === 'triggered' || order.type === 'market') {
       return { ok: false, reason: 'Order is already executing and cannot be cancelled' };
     }
+    if (isStopType(order.type)) return { ok: true, events: cancelStop(this.s, order, ctx) };
     releaseFunds(this.s, order.lockAsset, order.lockAmount);
     const cancelled: SpotOrder = { ...order, status: 'cancelled', lockAmount: D(0) };
     this.s.orders.set(cancelled.id, cancelled);
     const cancelledQty = order.qty!.minus(order.filledQty);
-    return {
-      ok: true,
-      events: [{ type: 'order_cancelled', time: ctx.now, order: cancelled, reason: 'user', cancelledQty }],
-    };
+    const events: EngineEvent[] = [
+      { type: 'order_cancelled', time: ctx.now, order: cancelled, reason: 'user', cancelledQty },
+    ];
+    return { ok: true, events: activateAttachedPairs(this.s, events, ctx) };
   }
 
   /** What submit would do right now, without changing state. */
   preview(req: SpotOrderRequest, ctx: EngineCtx): OrderPreview {
     if (req.type === 'limit' || req.type === 'post_only') return previewLimit(this.s, req, ctx);
-    if (req.type !== 'market') return emptyPreview(NOT_SUPPORTED);
+    if (isStopType(req.type)) return previewStop(this.s, req, ctx);
     const plan = this.planMarket(req, ctx);
-    const w = plan.walk;
-    if (!w || w.qty.isZero()) {
-      return { ...emptyPreview(plan.reason), exhausted: w?.exhausted ?? false };
-    }
-    const { rules } = plan;
-    const fee = spotFee(req.side, w.qty, w.quote, ctx.fees.taker, rules.base, rules.quote);
-    const pct = w.bestPrice ? w.slippageUsd.div(w.bestPrice.mul(w.qty)).mul(100) : null;
-    const buy = req.side === 'buy';
-    return {
-      estAvgPrice: w.avgPrice,
-      estSlippageUsd: w.slippageUsd,
-      estSlippagePct: pct,
-      fee: { asset: fee.asset, amount: fee.amount, usd: fee.usd },
-      total: buy ? w.quote : w.quote.minus(fee.amount),
-      receive: buy ? w.qty.minus(fee.amount) : w.quote.minus(fee.amount),
-      exhausted: w.exhausted,
-      rejectReason: plan.reason,
-    };
+    return takerPreview(plan.walk, req.side, plan.rules, ctx, plan.reason);
   }
 
   // ---- market orders ----
@@ -193,7 +210,7 @@ export class SpotEngine {
     const rules = ctx.market.rules(req.symbol);
     const plan: MarketPlan = {
       rules,
-      fields: { qty: null, quoteQty: null, price: null },
+      fields: noFields(),
       lockAsset: req.side === 'buy' ? rules.quote : rules.base,
       walk: null,
       lockAmount: null,
@@ -248,9 +265,8 @@ export class SpotEngine {
     }
     const rules = ctx.market.rules(order.symbol);
 
-    const step = marketStep(rules);
     const book = ctx.market.book(order.symbol);
-    const walk = walkBook(book, order.side, marketTarget(order), step);
+    const walk = walkBook(book, order.side, marketTarget(order), marketStep(rules));
     const need = order.side === 'buy' ? walk.quote : walk.qty;
     const available = order.lockAmount.plus(freeOf(this.s, 'spot', order.lockAsset));
     if (need.gt(available)) {
@@ -261,44 +277,6 @@ export class SpotEngine {
         ctx,
       );
     }
-
-    const thin = walk.exhausted || walk.qty.isZero();
-    const events: EngineEvent[] = [];
-    let current = order;
-    if (walk.qty.gt(0)) {
-      const settled = settleTaker(this.s, order, walk, rules, thin ? 'partially_filled' : 'filled', ctx);
-      current = settled.order;
-      events.push({ type: 'fill', time: ctx.now, fill: settled.fill, order: current });
-    } else {
-      releaseFunds(this.s, order.lockAsset, order.lockAmount);
-      current = { ...order, lockAmount: D(0) };
-    }
-
-    if (thin) {
-      current = { ...current, status: 'cancelled' };
-      const levels = order.side === 'buy' ? book.asks : book.bids;
-      const cancelledQty = unfilledQty(order, walk, levels[walk.levelsUsed - 1]?.price ?? null, step);
-      events.push({ type: 'order_cancelled', time: ctx.now, order: current, reason: 'thin_book', cancelledQty });
-    }
-    this.s.orders.set(current.id, current);
-    return events;
+    return fillOrThin(this.s, order, walk, book, rules, ctx);
   }
-}
-
-function marketStep(rules: SpotRules): Decimal {
-  return rules.marketStepSize.isZero() ? rules.stepSize : rules.marketStepSize;
-}
-
-function marketTarget(o: { qty: Decimal | null; quoteQty: Decimal | null }): { qty: Decimal } | { quote: Decimal } {
-  return o.qty ? { qty: o.qty } : { quote: o.quoteQty! };
-}
-
-/**
- * Quantity a thin book left unfilled. For dollar-sized orders the unspent dollars are
- * converted at the last walked price and floored to the step (0 if nothing was walked).
- */
-function unfilledQty(order: SpotOrder, walk: WalkResult, lastPrice: Decimal | null, step: Decimal): Decimal {
-  if (order.qty) return order.qty.minus(walk.qty);
-  if (!lastPrice) return D(0);
-  return floorToStep(order.quoteQty!.minus(walk.quote).div(lastPrice), step);
 }

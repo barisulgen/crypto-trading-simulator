@@ -1,0 +1,707 @@
+import { describe, expect, it } from 'vitest';
+import { D } from '../src/decimal.ts';
+import type { Decimal } from '../src/decimal.ts';
+import { SpotEngine } from '../src/spot/engine.ts';
+import { emptySpotState } from '../src/spot/state.ts';
+import { isTriggered } from '../src/spot/triggers.ts';
+import type { AggTrade, EngineCtx, EngineEvent, Fill, SpotOrder, SpotOrderRequest } from '../src/types.ts';
+import { FakeMarket, testCtx } from './fixtures.ts';
+
+const NOW = 1_000_000;
+const EXECUTING = 'Order is already executing and cannot be cancelled';
+const ESTIMATE = 'Estimate if triggered now';
+
+/** sampleBook, last price 99.95, 1000 USDT (unless given) and 2 BTC in the spot wallet. */
+function setup(opts: { usdt?: string; btc?: string } = {}) {
+  const market = new FakeMarket();
+  const ctx = testCtx(market, { now: NOW });
+  const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
+  const usdt = D(opts.usdt ?? '1000');
+  if (usdt.gt(0)) engine.deposit('spot', usdt, ctx);
+  engine.state.balances.spot.BTC!.free = D(opts.btc ?? '2');
+  const bal = (asset: string) => engine.state.balances.spot[asset]!;
+  const stored = (id: string) => engine.state.orders.get(id)!;
+  return { market, ctx, engine, bal, stored };
+}
+
+type StopType = 'stop_loss' | 'take_profit';
+const stop = (side: 'buy' | 'sell', type: StopType, triggerPrice: string, fields: Partial<SpotOrderRequest>) =>
+  ({ symbol: 'BTCUSDT', side, type, triggerPrice, ...fields }) as SpotOrderRequest;
+const sellStop = (trigger: string, qty: string) => stop('sell', 'stop_loss', trigger, { qty });
+const buyStop = (trigger: string, qty: string) => stop('buy', 'stop_loss', trigger, { qty });
+
+let tradeId = 0;
+function trade(price: string, qty = '1', sellerInitiated = true): AggTrade {
+  tradeId += 1;
+  return { id: tradeId, price: D(price), qty: D(qty), sellerInitiated, time: NOW };
+}
+
+function only<T extends EngineEvent['type']>(events: EngineEvent[], type: T): Extract<EngineEvent, { type: T }> {
+  expect(events.map((e) => e.type)).toEqual([type]);
+  return events[0] as Extract<EngineEvent, { type: T }>;
+}
+const placed = (events: EngineEvent[]): SpotOrder => only(events, 'order_placed').order;
+/** The orders of every order_placed event, in order. */
+const placedOrders = (events: EngineEvent[]): SpotOrder[] =>
+  events.flatMap((e) => (e.type === 'order_placed' ? [e.order] : []));
+const reasons = (events: EngineEvent[]): string[] =>
+  events.flatMap((e) => (e.type === 'order_rejected' ? [e.reason] : []));
+const limit = (side: 'buy' | 'sell', price: string, qty: string, extra: Partial<SpotOrderRequest> = {}) =>
+  ({ symbol: 'BTCUSDT', side, type: 'limit', price, qty, ...extra }) as SpotOrderRequest;
+function rejectReason(events: EngineEvent[]): string {
+  const e = only(events, 'order_rejected');
+  expect(e.order.status).toBe('rejected');
+  expect(e.order.rejectReason).toBe(e.reason);
+  return e.reason;
+}
+function fillOf(events: EngineEvent[]): { fill: Fill; order: SpotOrder } {
+  const e = events.find((x) => x.type === 'fill');
+  if (!e || e.type !== 'fill') throw new Error(`no fill event in ${events.map((x) => x.type).join(', ')}`);
+  return { fill: e.fill, order: e.order };
+}
+
+/** Arrive at the order's arrival time (arrive is a no-op before it). */
+function arriveNow(engine: SpotEngine, order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
+  ctx.now = Math.max(ctx.now, order.arrivesAt!);
+  return engine.arrive(order.id, ctx);
+}
+
+/** Submit, arrive and expect the order armed (open, no events); returns the order id. */
+function arm(engine: SpotEngine, r: SpotOrderRequest, ctx: EngineCtx): string {
+  const order = placed(engine.submit(r, ctx));
+  expect(arriveNow(engine, order, ctx)).toEqual([]);
+  expect(engine.state.orders.get(order.id)!.status).toBe('open');
+  return order.id;
+}
+
+/** Arm, then trigger with a trade at `at`; returns the triggered order. */
+function armAndTrigger(engine: SpotEngine, r: SpotOrderRequest, at: string, ctx: EngineCtx): SpotOrder {
+  const id = arm(engine, r, ctx);
+  const e = only(engine.onTrade('BTCUSDT', trade(at), ctx), 'order_triggered');
+  expect(e.order.id).toBe(id);
+  return e.order;
+}
+
+const s = (x: Decimal | null | undefined) => (x == null ? x : x.toString());
+const book = (bids: [string, string][], asks: [string, string][]) => ({
+  bids: bids.map(([p, q]) => ({ price: D(p), qty: D(q) })),
+  asks: asks.map(([p, q]) => ({ price: D(p), qty: D(q) })),
+});
+
+describe('isTriggered', () => {
+  it('sell stop ≤, buy stop ≥, sell take-profit ≥, buy take-profit ≤', () => {
+    const at = (type: StopType, side: 'buy' | 'sell', trigger: string, lasts: string[]) =>
+      lasts.map((last) => isTriggered(type, side, D(trigger), D(last)));
+    expect(at('stop_loss', 'sell', '99', ['99.01', '99', '98'])).toEqual([false, true, true]);
+    expect(at('stop_loss', 'buy', '101', ['100.99', '101', '102'])).toEqual([false, true, true]);
+    expect(at('take_profit', 'sell', '110', ['109.99', '110', '111'])).toEqual([false, true, true]);
+    expect(at('take_profit', 'buy', '90', ['90.01', '90', '89'])).toEqual([false, true, true]);
+  });
+});
+
+describe('placing a stop', () => {
+  it('sell stop_loss trigger 99.00 qty 1 → pending, then open after arrival, BTC 1 locked', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const order = placed(engine.submit(sellStop('99.00', '1'), ctx));
+    expect(order.status).toBe('pending');
+    expect(order.type).toBe('stop_loss');
+    expect(s(order.triggerPrice)).toBe('99');
+    expect(s(order.qty)).toBe('1');
+    expect(order.lockAsset).toBe('BTC');
+    expect(s(order.lockAmount)).toBe('1');
+    expect(order.arrivesAt).toBe(NOW + 100);
+    expect(s(bal('BTC').locked)).toBe('1');
+    expect(s(bal('BTC').free)).toBe('1');
+
+    expect(arriveNow(engine, order, ctx)).toEqual([]);
+    expect(stored(order.id).status).toBe('open');
+    expect(s(stored(order.id).lockAmount)).toBe('1');
+    expect(s(bal('BTC').locked)).toBe('1');
+  });
+
+  it('would trigger now at placement → rejected, nothing locked', () => {
+    const { market, ctx, engine, bal } = setup();
+    market.setLastPrice('BTCUSDT', D('98.90'));
+    expect(rejectReason(engine.submit(sellStop('99.00', '1'), ctx))).toBe(
+      'Stop would trigger immediately (last 98.9, trigger 99)',
+    );
+    expect(rejectReason(engine.submit(stop('sell', 'take_profit', '98.50', { qty: '1' }), ctx))).toBe(
+      'Take-profit would trigger immediately (last 98.9, trigger 98.5)',
+    );
+    expect(s(bal('BTC').locked)).toBe('0');
+  });
+
+  it('would trigger at arrival → rejected like the exchange would, lock released', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const order = placed(engine.submit(sellStop('99.00', '1'), ctx));
+    market.setLastPrice('BTCUSDT', D('98.90'));
+    expect(rejectReason(arriveNow(engine, order, ctx))).toBe('Stop would trigger immediately (last 98.9, trigger 99)');
+    expect(stored(order.id).status).toBe('rejected');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('2');
+  });
+
+  it('stale at submit or at arrival → rejected; last price unavailable → rejected', () => {
+    const { market, ctx, engine, bal } = setup();
+    const order = placed(engine.submit(sellStop('99.00', '1'), ctx));
+    market.setFresh('BTCUSDT', false);
+    expect(rejectReason(engine.submit(sellStop('99.00', '1'), ctx))).toBe('Live data interrupted for BTCUSDT');
+    expect(rejectReason(arriveNow(engine, order, ctx))).toBe('Live data interrupted for BTCUSDT');
+    expect(s(bal('BTC').locked)).toBe('0');
+    market.setFresh('BTCUSDT', true);
+    market.setLastPrice('BTCUSDT', null);
+    expect(rejectReason(engine.submit(sellStop('99.00', '1'), ctx))).toBe('Last price unavailable for BTCUSDT');
+  });
+
+  it('request problems: trigger missing, filters, funds, attach on a stop', () => {
+    const { ctx, engine } = setup({ usdt: '50' });
+    expect(rejectReason(engine.submit(stop('sell', 'stop_loss', '', { qty: '1' }), ctx))).toBe('Enter a trigger price');
+    expect(rejectReason(engine.submit(stop('sell', 'stop_loss', '99', {}), ctx))).toBe(
+      'Enter either a coin amount or a dollar amount',
+    );
+    expect(rejectReason(engine.submit(sellStop('99.005', '1'), ctx))).toBe(
+      'PRICE_FILTER: trigger price 99.005 is not a multiple of tick size 0.01',
+    );
+    expect(rejectReason(engine.submit(sellStop('99', '0.05'), ctx))).toBe(
+      'NOTIONAL: order value 4.95 is below the minimum 5',
+    );
+    expect(rejectReason(engine.submit(sellStop('99', '3'), ctx))).toBe('Insufficient BTC: need 3, available 2');
+    expect(rejectReason(engine.submit(buyStop('101', '0.5'), ctx))).toBe('Insufficient USDT: need 50.5, available 50');
+    const attach = { stopLoss: '95', takeProfit: '110' };
+    expect(rejectReason(engine.submit(stop('buy', 'stop_loss', '101', { qty: '0.1', attach }), ctx))).toBe(
+      'Attached stop-loss and take-profit cannot be added to a stop or take-profit order',
+    );
+  });
+
+  it('dollar-sized sell stop: quoteQty 49.50 at trigger 99 → qty 0.5, BTC 0.5 locked', () => {
+    const { ctx, engine, bal } = setup();
+    const order = placed(engine.submit(stop('sell', 'stop_loss', '99', { quoteQty: '49.50' }), ctx));
+    expect(s(order.qty)).toBe('0.5');
+    expect(s(order.quoteQty)).toBe('49.5');
+    expect(s(order.lockAmount)).toBe('0.5');
+    expect(s(bal('BTC').locked)).toBe('0.5');
+  });
+
+  it('6th live stop/take-profit on BTCUSDT → MAX_NUM_ALGO_ORDERS (pending, open and triggered all count)', () => {
+    const { ctx, engine } = setup();
+    armAndTrigger(engine, sellStop('99', '0.1'), '99', ctx); // triggered
+    arm(engine, sellStop('98', '0.1'), ctx); // open
+    placed(engine.submit(sellStop('97', '0.1'), ctx)); // pending
+    placed(engine.submit(stop('sell', 'take_profit', '110', { qty: '0.1' }), ctx));
+    const fifth = placed(engine.submit(buyStop('101', '0.1'), ctx));
+    // Limit orders are not algo orders.
+    placed(engine.submit(limit('buy', '99', '0.1'), ctx));
+    expect(rejectReason(engine.submit(sellStop('96', '0.1'), ctx))).toBe(
+      'MAX_NUM_ALGO_ORDERS: already 5 open stop/take-profit orders on BTCUSDT (maximum 5)',
+    );
+    expect(engine.cancel(fifth.id, ctx).ok).toBe(true);
+    placed(engine.submit(sellStop('96', '0.1'), ctx));
+  });
+});
+
+describe('trigger and execution', () => {
+  it('onTrade(99.01) does not trigger; onTrade(99.00) triggers with a new arrival delay', () => {
+    const { ctx, engine, stored } = setup();
+    const id = arm(engine, sellStop('99.00', '1'), ctx);
+    expect(engine.onTrade('BTCUSDT', trade('99.01', '1', false), ctx)).toEqual([]);
+    expect(stored(id).status).toBe('open');
+
+    ctx.now += 5_000;
+    const e = only(engine.onTrade('BTCUSDT', trade('99.00', '0.001', false), ctx), 'order_triggered');
+    expect(e.time).toBe(ctx.now);
+    expect(s(e.lastPrice)).toBe('99');
+    expect(e.order.status).toBe('triggered');
+    expect(e.order.triggeredAt).toBe(ctx.now);
+    expect(e.order.arrivesAt).toBe(ctx.now + 100);
+    expect(s(e.order.bestAtSubmit)).toBe('99.9'); // best bid at trigger time
+    expect(stored(id)).toEqual(e.order);
+    // Already triggered: a further trade does nothing.
+    expect(engine.onTrade('BTCUSDT', trade('98', '1'), ctx)).toEqual([]);
+  });
+
+  it('triggers are paused while the symbol is stale', () => {
+    const { market, ctx, engine, stored } = setup();
+    const id = arm(engine, sellStop('99.00', '1'), ctx);
+    market.setFresh('BTCUSDT', false);
+    expect(engine.onTrade('BTCUSDT', trade('98.00'), ctx)).toEqual([]);
+    expect(stored(id).status).toBe('open');
+  });
+
+  it('gap: the triggered sell stop fills at whatever the book offers, never at the stop price', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const triggered = armAndTrigger(engine, sellStop('99.00', '1'), '99.00', ctx);
+    market.setBook('BTCUSDT', book([['97.50', '2']], [['100', '1']]));
+    const events = arriveNow(engine, triggered, ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill']);
+    const { fill, order } = fillOf(events);
+    expect(s(fill.price)).toBe('97.5');
+    expect(s(fill.qty)).toBe('1');
+    expect(s(fill.triggerPrice)).toBe('99');
+    expect(fill.liquidity).toBe('taker');
+    expect(fill.feeAsset).toBe('USDT');
+    expect(s(fill.fee)).toBe('0.0975');
+    expect(s(fill.bestAtSubmit)).toBe('99.9');
+    expect(s(fill.bestAtArrival)).toBe('97.5');
+    expect(s(fill.driftUsd)).toBe('2.4'); // best bid fell 99.9 → 97.5 between trigger and execution
+    expect(s(fill.slippageUsd)).toBe('0');
+    expect(order.status).toBe('filled');
+    expect(stored(triggered.id).status).toBe('filled');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('1');
+    expect(s(bal('USDT').free)).toBe('1097.4025');
+  });
+
+  it('thin book after trigger: fills what it can, the rest is cancelled (thin_book)', () => {
+    const { market, ctx, engine, bal } = setup();
+    const triggered = armAndTrigger(engine, sellStop('99.00', '1'), '99.00', ctx);
+    market.setBook('BTCUSDT', book([['98', '0.3']], []));
+    const events = arriveNow(engine, triggered, ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill', 'order_cancelled']);
+    expect(s(fillOf(events).fill.qty)).toBe('0.3');
+    const cancel = events[1]!;
+    if (cancel.type !== 'order_cancelled') throw new Error('expected order_cancelled');
+    expect(cancel.reason).toBe('thin_book');
+    expect(s(cancel.cancelledQty)).toBe('0.7');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('1.7');
+  });
+
+  it('triggered + stale at arrival: no rejection, stays triggered, fills on the first fresh book (onFresh)', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const triggered = armAndTrigger(engine, sellStop('99.00', '1'), '99.00', ctx);
+    market.setFresh('BTCUSDT', false);
+    expect(arriveNow(engine, triggered, ctx)).toEqual([]);
+    expect(stored(triggered.id).status).toBe('triggered');
+    expect(stored(triggered.id).arrivesAt).toBeNull();
+    expect(s(bal('BTC').locked)).toBe('1');
+    expect(engine.cancel(triggered.id, ctx)).toEqual({ ok: false, reason: EXECUTING });
+    // Still stale: onFresh does nothing.
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+
+    ctx.now += 60_000;
+    market.setFresh('BTCUSDT', true);
+    market.setBook('BTCUSDT', book([['98.00', '5']], [['98.10', '5']]));
+    const events = engine.onFresh('BTCUSDT', ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill']);
+    const { fill } = fillOf(events);
+    expect(s(fill.price)).toBe('98');
+    expect(fill.time).toBe(ctx.now);
+    expect(stored(triggered.id).status).toBe('filled');
+    expect(s(bal('BTC').locked)).toBe('0');
+    // Nothing left to execute; a late arrive is a no-op.
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+    expect(engine.arrive(triggered.id, ctx)).toEqual([]);
+  });
+
+  it('onFresh leaves a triggered order alone until its arrival time', () => {
+    const { ctx, engine, stored } = setup();
+    const triggered = armAndTrigger(engine, sellStop('99.00', '1'), '99.00', ctx);
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+    expect(engine.onFresh('ETHUSDT', ctx)).toEqual([]);
+    expect(stored(triggered.id).status).toBe('triggered');
+    ctx.now = triggered.arrivesAt!;
+    expect(fillOf(engine.onFresh('BTCUSDT', ctx)).order.status).toBe('filled');
+  });
+
+  it('buy stop_loss trigger 101 qty 0.5 locks 50.5 USDT and triggers at 101.00', () => {
+    const { ctx, engine, bal } = setup();
+    const id = arm(engine, buyStop('101', '0.5'), ctx);
+    expect(s(bal('USDT').locked)).toBe('50.5');
+    expect(engine.onTrade('BTCUSDT', trade('100.99'), ctx)).toEqual([]);
+    const triggered = only(engine.onTrade('BTCUSDT', trade('101.00', '1', false), ctx), 'order_triggered').order;
+    expect(triggered.id).toBe(id);
+    expect(s(triggered.bestAtSubmit)).toBe('100'); // best ask at trigger time
+    const { fill } = fillOf(arriveNow(engine, triggered, ctx));
+    expect(s(fill.price)).toBe('100');
+    expect(s(fill.quote)).toBe('50');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('USDT').free)).toBe('950');
+    expect(s(bal('BTC').free)).toBe('2.4995');
+  });
+
+  it('gapped buy stop with funds short expires in full', () => {
+    const { market, ctx, engine, bal, stored } = setup({ usdt: '50.5' });
+    const triggered = armAndTrigger(engine, buyStop('101', '0.5'), '101.00', ctx);
+    expect(s(bal('USDT').free)).toBe('0');
+    market.setBook('BTCUSDT', book([['101.90', '5']], [['102.00', '5']]));
+    const e = only(arriveNow(engine, triggered, ctx), 'order_rejected');
+    expect(e.afterTrigger).toBe(true);
+    expect(e.reason).toBe(
+      'Triggered stop expired: insufficient funds at execution ' +
+        '(need 51, available 50.5; trigger 101, book average 102)',
+    );
+    expect(e.order.status).toBe('rejected');
+    expect(e.order.rejectReason).toBe(e.reason);
+    expect(stored(triggered.id).status).toBe('rejected');
+    expect(s(stored(triggered.id).lockAmount)).toBe('0');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('USDT').free)).toBe('50.5');
+    expect(s(bal('BTC').free)).toBe('2');
+  });
+
+  it('gapped buy take-profit with funds short says take-profit', () => {
+    const { market, ctx, engine } = setup({ usdt: '45' });
+    const triggered = armAndTrigger(engine, stop('buy', 'take_profit', '90', { qty: '0.5' }), '90', ctx);
+    market.setBook('BTCUSDT', book([['95', '5']], [['95.10', '5']]));
+    const e = only(arriveNow(engine, triggered, ctx), 'order_rejected');
+    expect(e.afterTrigger).toBe(true);
+    expect(e.reason).toBe(
+      'Triggered take-profit expired: insufficient funds at execution ' +
+        '(need 47.55, available 45; trigger 90, book average 95.1)',
+    );
+  });
+
+  it('same gap with 10 USDT free besides the lock → fills 0.5 at 102', () => {
+    const { market, ctx, engine, bal } = setup({ usdt: '60.5' });
+    const triggered = armAndTrigger(engine, buyStop('101', '0.5'), '101.00', ctx);
+    market.setBook('BTCUSDT', book([['101.90', '5']], [['102.00', '5']]));
+    const events = arriveNow(engine, triggered, ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill']);
+    const { fill, order } = fillOf(events);
+    expect(s(fill.qty)).toBe('0.5');
+    expect(s(fill.price)).toBe('102');
+    expect(s(fill.triggerPrice)).toBe('101');
+    expect(order.status).toBe('filled');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('USDT').free)).toBe('9.5');
+    expect(s(bal('BTC').free)).toBe('2.4995');
+  });
+
+  it('dollar-sized buy stop under the same gap fills 0.49509 and never expires', () => {
+    const { market, ctx, engine, bal } = setup({ usdt: '50.5' });
+    const order = placed(engine.submit(stop('buy', 'stop_loss', '101', { quoteQty: '50.5' }), ctx));
+    expect(order.qty).toBeNull();
+    expect(s(order.quoteQty)).toBe('50.5');
+    expect(s(order.lockAmount)).toBe('50.5');
+    arriveNow(engine, order, ctx);
+    const triggered = only(engine.onTrade('BTCUSDT', trade('101'), ctx), 'order_triggered').order;
+    market.setBook('BTCUSDT', book([['101.90', '5']], [['102.00', '5']]));
+    const events = arriveNow(engine, triggered, ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill']);
+    const { fill, order: after } = fillOf(events);
+    expect(s(fill.qty)).toBe('0.49509');
+    expect(s(fill.quote)).toBe('50.49918');
+    expect(after.status).toBe('filled');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('USDT').free)).toBe('0.00082');
+  });
+
+  it('take-profits: sell 110 triggers at 110.00, buy 90 triggers at 90 (USDT 45 locked)', () => {
+    const { ctx, engine, bal } = setup();
+    const sellTp = arm(engine, stop('sell', 'take_profit', '110', { qty: '1' }), ctx);
+    const buyTp = arm(engine, stop('buy', 'take_profit', '90', { qty: '0.5' }), ctx);
+    expect(s(bal('USDT').locked)).toBe('45');
+    expect(engine.onTrade('BTCUSDT', trade('109.99'), ctx)).toEqual([]);
+    expect(only(engine.onTrade('BTCUSDT', trade('110.00'), ctx), 'order_triggered').order.id).toBe(sellTp);
+    expect(engine.onTrade('BTCUSDT', trade('90.01'), ctx)).toEqual([]);
+    expect(only(engine.onTrade('BTCUSDT', trade('90'), ctx), 'order_triggered').order.id).toBe(buyTp);
+  });
+
+  it('triggers run before limit matching on the same trade', () => {
+    const { ctx, engine } = setup();
+    arm(engine, sellStop('99.00', '1'), ctx);
+    const placedLimit = placed(engine.submit(limit('buy', '99.50', '1'), ctx));
+    arriveNow(engine, placedLimit, ctx);
+    expect(engine.onTrade('BTCUSDT', trade('98.90', '1', true), ctx).map((e) => e.type)).toEqual([
+      'order_triggered',
+      'fill',
+    ]);
+  });
+});
+
+describe('cancel', () => {
+  it('pending and open stops can be cancelled; triggered ones are already executing', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const pending = placed(engine.submit(sellStop('99', '0.5'), ctx));
+    const r1 = engine.cancel(pending.id, ctx);
+    if (!r1.ok) throw new Error(r1.reason);
+    const c1 = only(r1.events, 'order_cancelled');
+    expect(c1.reason).toBe('user');
+    expect(s(c1.cancelledQty)).toBe('0.5');
+    expect(arriveNow(engine, pending, ctx)).toEqual([]);
+    expect(stored(pending.id).status).toBe('cancelled');
+
+    const open = arm(engine, sellStop('99', '1'), ctx);
+    expect(engine.cancel(open, ctx).ok).toBe(true);
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('2');
+    expect(engine.onTrade('BTCUSDT', trade('98'), ctx)).toEqual([]);
+
+    const triggered = armAndTrigger(engine, sellStop('97', '1'), '97', ctx);
+    expect(engine.cancel(triggered.id, ctx)).toEqual({ ok: false, reason: EXECUTING });
+    expect(s(bal('BTC').locked)).toBe('1');
+  });
+
+  it('dollar-sized buy stop: cancel releases the dollars and reports the coins they would buy', () => {
+    const { ctx, engine, bal } = setup();
+    const id = arm(engine, stop('buy', 'stop_loss', '101', { quoteQty: '50.5' }), ctx);
+    const r = engine.cancel(id, ctx);
+    if (!r.ok) throw new Error(r.reason);
+    expect(s(only(r.events, 'order_cancelled').cancelledQty)).toBe('0.5');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('USDT').free)).toBe('1000');
+  });
+});
+
+describe('linked SL/TP pair (attachOco)', () => {
+  const pair = (engine: SpotEngine, ctx: EngineCtx, qty = '1', stopLoss = '95', takeProfit = '110') =>
+    engine.attachOco({ symbol: 'BTCUSDT', qty, stopLoss, takeProfit }, ctx);
+
+  function armPair(engine: SpotEngine, ctx: EngineCtx): [SpotOrder, SpotOrder] {
+    const events = pair(engine, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_placed', 'order_placed']);
+    const [sl, tp] = placedOrders(events) as [SpotOrder, SpotOrder];
+    expect(arriveNow(engine, sl, ctx)).toEqual([]);
+    expect(arriveNow(engine, tp, ctx)).toEqual([]);
+    return [engine.state.orders.get(sl.id)!, engine.state.orders.get(tp.id)!];
+  }
+
+  it('qty 1, SL 95, TP 110 → two pending orders sharing one group and one 1 BTC lock', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const events = pair(engine, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_placed', 'order_placed']);
+    const [sl, tp] = placedOrders(events) as [SpotOrder, SpotOrder];
+    expect([sl.type, sl.side, s(sl.triggerPrice), s(sl.qty)]).toEqual(['stop_loss', 'sell', '95', '1']);
+    expect([tp.type, tp.side, s(tp.triggerPrice), s(tp.qty)]).toEqual(['take_profit', 'sell', '110', '1']);
+    expect(sl.ocoGroupId).not.toBeNull();
+    expect(tp.ocoGroupId).toBe(sl.ocoGroupId);
+    expect(tp.arrivesAt).toBe(sl.arrivesAt);
+    expect(s(sl.lockAmount)).toBe('1');
+    expect(s(tp.lockAmount)).toBe('0');
+    expect(s(bal('BTC').locked)).toBe('1');
+    expect(s(bal('BTC').free)).toBe('1');
+
+    expect(arriveNow(engine, sl, ctx)).toEqual([]);
+    expect(stored(sl.id).status).toBe('open');
+    expect(stored(tp.id).status).toBe('open');
+    expect(arriveNow(engine, tp, ctx)).toEqual([]);
+  });
+
+  it('TP triggers at 110 → SL cancelled (oco) in the same call; the lock moves to the TP until it fills', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const [sl, tp] = armPair(engine, ctx);
+    const events = engine.onTrade('BTCUSDT', trade('110'), ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_triggered', 'order_cancelled']);
+    const [trig, cancel] = events as [
+      Extract<EngineEvent, { type: 'order_triggered' }>,
+      Extract<EngineEvent, { type: 'order_cancelled' }>,
+    ];
+    expect(trig.order.id).toBe(tp.id);
+    expect(s(trig.order.lockAmount)).toBe('1');
+    expect(cancel.order.id).toBe(sl.id);
+    expect(cancel.reason).toBe('oco');
+    expect(s(cancel.cancelledQty)).toBe('1');
+    expect(s(cancel.order.lockAmount)).toBe('0');
+    expect(stored(sl.id).status).toBe('cancelled');
+    expect(s(bal('BTC').locked)).toBe('1');
+    // The cancelled SL never triggers.
+    expect(engine.onTrade('BTCUSDT', trade('94'), ctx)).toEqual([]);
+
+    const { fill } = fillOf(arriveNow(engine, trig.order, ctx));
+    expect(s(fill.qty)).toBe('1');
+    expect(s(fill.triggerPrice)).toBe('110');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('1');
+  });
+
+  it('SL triggers at 95 → TP cancelled (oco), SL keeps the lock', () => {
+    const { ctx, engine, bal } = setup();
+    const [sl, tp] = armPair(engine, ctx);
+    const events = engine.onTrade('BTCUSDT', trade('95'), ctx);
+    expect(events.map((e) => [e.type, (e as { order: SpotOrder }).order.id])).toEqual([
+      ['order_triggered', sl.id],
+      ['order_cancelled', tp.id],
+    ]);
+    expect(s(bal('BTC').locked)).toBe('1');
+  });
+
+  it('cancelling either untriggered leg cancels both and releases the lock once', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const [sl, tp] = armPair(engine, ctx);
+    const r = engine.cancel(tp.id, ctx);
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.events.map((e) => (e.type === 'order_cancelled' ? [e.order.id, e.reason] : e.type))).toEqual([
+      [tp.id, 'user'],
+      [sl.id, 'oco'],
+    ]);
+    expect(stored(sl.id).status).toBe('cancelled');
+    expect(stored(tp.id).status).toBe('cancelled');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('2');
+
+    // Cancelling a pending pair (by its SL leg) works the same way.
+    const [pSl, pTp] = placedOrders(pair(engine, ctx)) as [SpotOrder, SpotOrder];
+    expect(engine.cancel(pSl.id, ctx).ok).toBe(true);
+    expect(stored(pTp.id).status).toBe('cancelled');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(arriveNow(engine, pSl, ctx)).toEqual([]);
+  });
+
+  it('a leg that would trigger now rejects the whole pair, nothing locked', () => {
+    const { ctx, engine, bal } = setup();
+    const events = pair(engine, ctx, '1', '100', '110');
+    expect(events.map((e) => e.type)).toEqual(['order_rejected', 'order_rejected']);
+    for (const e of events) {
+      if (e.type !== 'order_rejected') throw new Error('expected order_rejected');
+      expect(e.reason).toBe('Stop would trigger immediately (last 99.95, trigger 100)');
+      expect(e.order.status).toBe('rejected');
+    }
+    expect(reasons(pair(engine, ctx, '1', '95', '99.90'))).toEqual([
+      'Take-profit would trigger immediately (last 99.95, trigger 99.9)',
+      'Take-profit would trigger immediately (last 99.95, trigger 99.9)',
+    ]);
+    expect(reasons(pair(engine, ctx, '3'))[0]).toBe('Insufficient BTC: need 3, available 2');
+    expect(reasons(pair(engine, ctx, '1,5x'))[0]).toMatch(/^Invalid amount "1,5x"/);
+    expect(s(bal('BTC').locked)).toBe('0');
+  });
+
+  it('a pair counts as two algo orders', () => {
+    const { ctx, engine } = setup();
+    for (const t of ['98', '97', '96', '94']) placed(engine.submit(sellStop(t, '0.1'), ctx));
+    expect(reasons(pair(engine, ctx, '0.5'))).toEqual([
+      'MAX_NUM_ALGO_ORDERS: already 5 open stop/take-profit orders on BTCUSDT (maximum 5)',
+      'MAX_NUM_ALGO_ORDERS: already 5 open stop/take-profit orders on BTCUSDT (maximum 5)',
+    ]);
+  });
+
+  it('stale at arrival rejects both legs and releases the lock', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const [sl, tp] = placedOrders(pair(engine, ctx)) as [SpotOrder, SpotOrder];
+    market.setFresh('BTCUSDT', false);
+    const events = arriveNow(engine, sl, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_rejected', 'order_rejected']);
+    expect(stored(sl.id).status).toBe('rejected');
+    expect(stored(tp.id).status).toBe('rejected');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('2');
+    expect(arriveNow(engine, tp, ctx)).toEqual([]);
+  });
+});
+
+describe('pair attached to a buy', () => {
+  const attach = { stopLoss: '95', takeProfit: '110' };
+  const limitBuy = (qty: string, extra: Partial<SpotOrderRequest> = { attach }) => limit('buy', '99.50', qty, extra);
+
+  it('limit buy 1 @ 99.50 fully filled → pair for the net 0.999', () => {
+    const { ctx, engine, bal } = setup();
+    const parent = placed(engine.submit(limitBuy('1'), ctx));
+    expect(s(parent.attach!.stopLoss)).toBe('95');
+    expect(s(parent.attach!.takeProfit)).toBe('110');
+    arriveNow(engine, parent, ctx);
+    const events = engine.onTrade('BTCUSDT', trade('99.40', '1', true), ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill', 'order_placed', 'order_placed']);
+    const [sl, tp] = placedOrders(events) as [SpotOrder, SpotOrder];
+    expect([sl.type, s(sl.qty), s(sl.triggerPrice)]).toEqual(['stop_loss', '0.999', '95']);
+    expect([tp.type, s(tp.qty), s(tp.triggerPrice)]).toEqual(['take_profit', '0.999', '110']);
+    expect(tp.ocoGroupId).toBe(sl.ocoGroupId);
+    expect(s(bal('BTC').locked)).toBe('0.999');
+    expect(s(bal('BTC').free)).toBe('2');
+  });
+
+  it('parent cancelled after a partial fill of 0.5 → pair for 0.4995; cancelled with 0 filled → no pair', () => {
+    const { ctx, engine } = setup();
+    const parent = placed(engine.submit(limitBuy('1'), ctx));
+    arriveNow(engine, parent, ctx);
+    engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
+    const r = engine.cancel(parent.id, ctx);
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
+    expect(placedOrders(r.events).map((o) => s(o.qty))).toEqual(['0.4995', '0.4995']);
+
+    const unfilled = placed(engine.submit(limitBuy('1'), ctx));
+    arriveNow(engine, unfilled, ctx);
+    const r2 = engine.cancel(unfilled.id, ctx);
+    if (!r2.ok) throw new Error(r2.reason);
+    expect(r2.events.map((e) => e.type)).toEqual(['order_cancelled']);
+  });
+
+  it('market buy with a pair: activates when the market order fills at arrival', () => {
+    const { ctx, engine } = setup();
+    const parent = placed(engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1', attach }, ctx));
+    const events = arriveNow(engine, parent, ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill', 'order_placed', 'order_placed']);
+    expect(placedOrders(events).map((o) => s(o.qty))).toEqual(['0.999', '0.999']);
+  });
+
+  it('pair rejected at activation (TP below last) → parent stays filled, both legs rejected', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const parent = placed(engine.submit(limitBuy('1', { attach: { stopLoss: '95', takeProfit: '99' } }), ctx));
+    arriveNow(engine, parent, ctx);
+    const events = engine.onTrade('BTCUSDT', trade('99.40', '1', true), ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill', 'order_rejected', 'order_rejected']);
+    expect(reasons(events)[0]).toBe('Take-profit would trigger immediately (last 99.95, trigger 99)');
+    expect(stored(parent.id).status).toBe('filled');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('2.999');
+  });
+
+  it('attach on a sell is rejected', () => {
+    const { ctx, engine } = setup();
+    const marketSell: SpotOrderRequest = { symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '1', attach };
+    expect(rejectReason(engine.submit(marketSell, ctx))).toBe('Attached stop-loss and take-profit are only for buys');
+    expect(rejectReason(engine.submit(limit('sell', '101', '1', { attach }), ctx))).toBe(
+      'Attached stop-loss and take-profit are only for buys',
+    );
+  });
+});
+
+describe('replay guard', () => {
+  it('the same trade delivered twice fills only once; older ids are ignored per symbol', () => {
+    const { ctx, engine, stored } = setup();
+    const resting = placed(engine.submit(limit('buy', '99.50', '2'), ctx));
+    arriveNow(engine, resting, ctx);
+    const t = trade('99.40', '1', true);
+    expect(engine.onTrade('BTCUSDT', t, ctx).map((e) => e.type)).toEqual(['fill']);
+    expect(engine.onTrade('BTCUSDT', t, ctx)).toEqual([]);
+    expect(engine.onTrade('BTCUSDT', { ...t, id: t.id - 1 }, ctx)).toEqual([]);
+    expect(s(stored(resting.id).filledQty)).toBe('1');
+    expect(engine.state.lastTradeId).toEqual({ BTCUSDT: t.id });
+
+    // A stop is not triggered by a replayed trade either.
+    const stopId = arm(engine, sellStop('99', '0.5'), ctx);
+    const low = trade('98', '0.001', false);
+    engine.onTrade('BTCUSDT', low, ctx);
+    expect(stored(stopId).status).toBe('triggered');
+    expect(engine.onTrade('BTCUSDT', low, ctx)).toEqual([]);
+  });
+});
+
+describe('preview', () => {
+  it('stop: walks the current book as if triggered now, taker fee, labelled as an estimate', () => {
+    const { ctx, engine, bal } = setup();
+    const p = engine.preview(sellStop('99', '1'), ctx);
+    expect(s(p.estAvgPrice)).toBe('99.84');
+    expect(s(p.estSlippageUsd)).toBe('0.06');
+    expect(p.fee.asset).toBe('USDT');
+    expect(s(p.fee.amount)).toBe('0.09984');
+    expect(s(p.total)).toBe('99.74016');
+    expect(s(p.receive)).toBe('99.74016');
+    expect(p.note).toBe(ESTIMATE);
+    expect(p.rejectReason).toBeNull();
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(engine.state.orders.size).toBe(0);
+
+    const buy = engine.preview(stop('buy', 'take_profit', '90', { quoteQty: '50' }), ctx);
+    expect(s(buy.total)).toBe('50');
+    expect(s(buy.receive)).toBe('0.4995');
+    expect(buy.note).toBe(ESTIMATE);
+  });
+
+  it('stop preview reports what submit would reject with', () => {
+    const { market, ctx, engine } = setup();
+    market.setLastPrice('BTCUSDT', D('98.90'));
+    const p = engine.preview(sellStop('99', '1'), ctx);
+    expect(p.rejectReason).toBe('Stop would trigger immediately (last 98.9, trigger 99)');
+    expect(p.note).toBe(ESTIMATE);
+    market.setFresh('BTCUSDT', false);
+    const stale = engine.preview(sellStop('99', '1'), ctx);
+    expect(stale.rejectReason).toBe('Live data interrupted for BTCUSDT');
+    expect(stale.total).toBeNull();
+  });
+
+  it('market and limit previews have no note', () => {
+    const { ctx, engine } = setup();
+    expect(engine.preview({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1' }, ctx).note).toBeNull();
+    expect(engine.preview(limit('buy', '99', '1'), ctx).note).toBeNull();
+  });
+});

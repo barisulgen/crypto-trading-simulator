@@ -7,3 +7,5 @@ export * from './fees.ts';
 export * from './spot/state.ts';
 export * from './spot/engine.ts';
 export * from './spot/matching.ts';
+export * from './spot/triggers.ts';
+export type { OcoRequest } from './spot/stops.ts';
