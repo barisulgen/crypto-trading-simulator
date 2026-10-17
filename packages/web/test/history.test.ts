@@ -421,4 +421,24 @@ describe('history rows', () => {
     expect(lines(v)).toEqual(['Start: 18 Oct 2026 09:03:02', 'End: 18 Oct 2026 09:05:07', 'Duration: 2m 05s']);
     expect(v.note).toEqual({ label: 'Reason', text: 'No depth update for 120 s' });
   });
+
+  it('a row whose payload cannot be read shows as unreadable instead of blanking the screen', () => {
+    const v = describeEvent(row('order_placed', { type: 'order_placed', time: T }));
+    expect(v.label).toBe('Unreadable event (order_placed)');
+    expect(v.tone).toBe('down');
+    expect(v.coin).toBe('BTC');
+    expect(v.fields).toEqual([]);
+    expect(v.note).toEqual({ label: 'Data', text: '{"type":"order_placed","time":' + T + '}' });
+    expect(describeEvent(row('fill', null)).label).toBe('Unreadable event (fill)');
+  });
+
+  it('an unknown event type shows its type and a short raw JSON of the payload', () => {
+    const v = describeEvent(row('catch_up', { applied: 'funding', amount: '1.5' }));
+    expect(v.label).toBe('catch_up');
+    expect(v.fields).toEqual([]);
+    expect(v.note).toEqual({ label: 'Data', text: '{"applied":"funding","amount":"1.5"}' });
+    const long = describeEvent(row('catch_up', { text: 'x'.repeat(500) }));
+    expect(long.note?.text).toHaveLength(203);
+    expect(long.note?.text.endsWith('...')).toBe(true);
+  });
 });

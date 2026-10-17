@@ -231,8 +231,37 @@ function fillFields(f: WireFill, o: WireOrder): Field[] {
   return fields;
 }
 
-/** The badge, coin, labelled details and note shown for one history row. */
+/** At most 200 characters of a payload's raw JSON, for rows that cannot be described. */
+function rawJson(payload: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(payload) ?? String(payload);
+  } catch {
+    text = String(payload);
+  }
+  return text.length > 200 ? `${text.slice(0, 200)}...` : text;
+}
+
+/**
+ * The badge, coin, labelled details and note shown for one history row. A row that cannot be
+ * read (a malformed or unexpected payload) becomes 'Unreadable event (<type>)' with its raw data,
+ * so one bad record never blanks the screen.
+ */
 export function describeEvent(row: HistoryRow): EventView {
+  try {
+    return describeKnown(row);
+  } catch {
+    return {
+      label: `Unreadable event (${row.type})`,
+      tone: 'down',
+      coin: row.symbol === null ? null : baseOf(row.symbol),
+      fields: [],
+      note: { label: 'Data', text: rawJson(row.payload) },
+    };
+  }
+}
+
+function describeKnown(row: HistoryRow): EventView {
   const coin = row.symbol === null ? null : baseOf(row.symbol);
   const view = (label: string, tone: EventView['tone'], fields: Field[], note: EventView['note'] = null): EventView => ({
     label,
@@ -310,6 +339,6 @@ export function describeEvent(row: HistoryRow): EventView {
       );
     }
     default:
-      return view(row.type, 'muted', []);
+      return view(row.type, 'muted', [], { label: 'Data', text: rawJson(row.payload) });
   }
 }

@@ -9,10 +9,14 @@ import { Button } from './ui.tsx';
 
 function Stat({ label, children, className = '' }: { label: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <div className={`flex min-w-0 flex-col ${className}`}>
+    <div className={`flex min-w-0 flex-col desk:flex-none ${className}`}>
       <span className="text-2xs text-faint desk:text-xs">{label}</span>
-      {/* Dimmed while the bar is frozen (no live connection to the simulator). */}
-      <div className="truncate group-data-frozen/bar:opacity-45">{children}</div>
+      {/*
+        Money is never cut off: each amount is one unbreakable piece (nowrap), the words around it
+        may wrap, and on desktop the bar wraps onto a second row before anything is hidden.
+        Dimmed while the bar is frozen (no live connection to the simulator).
+      */}
+      <div className="group-data-frozen/bar:opacity-45">{children}</div>
     </div>
   );
 }
@@ -21,10 +25,11 @@ function Stat({ label, children, className = '' }: { label: ReactNode; children:
 function WalletStat({ label, free, locked }: { label: string; free?: string; locked?: string }) {
   return (
     <Stat label={label}>
-      {fmtUsdFloor(free)}
+      <span className="whitespace-nowrap">{fmtUsdFloor(free)}</span>
       <span className="text-muted"> free</span>
-      <span className="block text-xs text-muted desk:ml-2 desk:inline">
-        {fmtUsdFloor(locked)} <span>locked</span>
+      {/* Locked on its own line, except on wide desktops (1280 px and up) where it fits inline. */}
+      <span className="block text-xs text-muted min-[80rem]:ml-2 min-[80rem]:inline">
+        <span className="whitespace-nowrap">{fmtUsdFloor(locked)}</span> locked
       </span>
     </Stat>
   );
@@ -46,7 +51,7 @@ export function AccountBar() {
       data-frozen={frozen || undefined}
       className="group/bar flex-none border-b border-line bg-panel px-3 py-2 desk:px-4"
     >
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 desk:flex desk:items-center desk:gap-x-7">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 desk:flex desk:flex-wrap desk:items-center desk:gap-x-5 min-[80rem]:gap-x-7">
         {/* Phones: Net P&L wraps under the total when the buttons leave too little room. */}
         <div className="flex min-w-0 flex-wrap items-end gap-x-4 gap-y-1 desk:contents">
           <Stat
@@ -64,17 +69,17 @@ export function AccountBar() {
               </span>
             }
           >
-            <span className="text-lg font-semibold [font-stretch:108%] desk:text-xl">{fmtUsd(a?.total)}</span>
+            <span className="text-lg font-semibold whitespace-nowrap [font-stretch:108%] min-[80rem]:text-xl">{fmtUsd(a?.total)}</span>
           </Stat>
           <Stat label="Net P&L">
-            <span className={`text-base font-semibold ${changeClass(a?.netPnl)}`}>{fmtUsd(a?.netPnl, { sign: true })}</span>
-            <span className={`ml-1.5 text-xs ${changeClass(a?.netPnlPct)}`}>
+            <span className={`text-base font-semibold whitespace-nowrap ${changeClass(a?.netPnl)}`}>{fmtUsd(a?.netPnl, { sign: true })}</span>
+            <span className={`ml-1.5 text-xs whitespace-nowrap ${changeClass(a?.netPnlPct)}`}>
               {a ? (a.netPnlPct === null ? 'no deposits yet' : fmtPct(a.netPnlPct)) : ''}
             </span>
           </Stat>
         </div>
 
-        <div className="flex gap-2 desk:order-last desk:ml-auto">
+        <div className="flex flex-none gap-2 desk:order-last desk:ml-auto">
           <Button tone="primary" onClick={() => setDialog('deposit')}>
             Deposit
           </Button>
@@ -84,8 +89,8 @@ export function AccountBar() {
         </div>
 
         <div className="col-span-2 grid grid-cols-3 gap-3 border-t border-line pt-2 text-xs desk:contents desk:text-sm">
-          <Stat label="Deposited" className="desk:border-l desk:border-line desk:pl-7">
-            {fmtUsd(a?.totalDeposited)}
+          <Stat label="Deposited" className="desk:border-l desk:border-line desk:pl-5 min-[80rem]:pl-7">
+            <span className="whitespace-nowrap">{fmtUsd(a?.totalDeposited)}</span>
           </Stat>
           <WalletStat label="Spot wallet" free={a?.spotUsdtFree} locked={a?.spotUsdtLocked} />
           <WalletStat label="Leverage wallet" free={lev?.free} locked={lev?.locked} />

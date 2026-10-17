@@ -210,7 +210,7 @@ function EventLine({ row }: { row: HistoryRow }) {
     <li className={`flex flex-col gap-2 border-b border-line/60 px-3 py-2.5 text-xs desk:py-1.5 ${GRID}`}>
       <div className="flex items-center gap-2 desk:contents">
         <time
-          dateTime={new Date(row.time).toISOString()}
+          dateTime={Number.isFinite(row.time) ? new Date(row.time).toISOString() : undefined}
           title={fmtDateTime(row.time)}
           className="order-last ml-auto text-2xs whitespace-nowrap text-muted desk:order-none desk:ml-0 desk:pt-px desk:text-xs"
         >

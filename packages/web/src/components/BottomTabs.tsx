@@ -34,7 +34,6 @@ const WIDE = {
     right: '@min-[40rem]:text-right',
     action: '@min-[40rem]:order-none @min-[40rem]:ml-0',
     narrowOnly: '@min-[40rem]:hidden',
-    trunc: '@min-[40rem]:truncate',
   },
   lg: {
     head: 'hidden @min-[52rem]:grid',
@@ -44,7 +43,6 @@ const WIDE = {
     right: '@min-[52rem]:text-right',
     action: '@min-[52rem]:order-none @min-[52rem]:ml-0',
     narrowOnly: '@min-[52rem]:hidden',
-    trunc: '@min-[52rem]:truncate',
   },
 } as const;
 type Width = keyof typeof WIDE;
@@ -120,7 +118,8 @@ function Cell({
   return (
     <div title={title} className={`min-w-0 ${place} ${w.cell} ${right ? w.right : ''}`}>
       <span className={head ? 'sr-only' : `block text-2xs text-faint ${w.label}`}>{label}</span>
-      <span className={`block [overflow-wrap:anywhere] ${w.trunc}`}>{children}</span>
+      {/* Never truncated: a value too wide for its column wraps instead of being cut off. */}
+      <span className="block [overflow-wrap:anywhere]">{children}</span>
     </div>
   );
 }
