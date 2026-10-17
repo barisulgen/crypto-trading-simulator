@@ -1,0 +1,16 @@
+{
+  "name": "@sim/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@sim/engine": "*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5"
+  }
+}
