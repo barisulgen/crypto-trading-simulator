@@ -25,6 +25,8 @@ export interface SpotFeedDeps {
   wsFactory?: WsFactory;
   now?: () => number;
   setTimer?: SetTimer;
+  /** Terminate the socket when no frame arrived for this long (default 30 s = 2 x silentMs). */
+  watchdogMs?: number;
 }
 
 type Levels = [string, string][];
@@ -36,9 +38,24 @@ interface Diff {
 }
 
 const SNAPSHOT_STAGGER_MS = 200;
-const RETRY_MS = 1000;
+const RETRY_START_MS = 1000;
+const RETRY_MAX_MS = 30_000;
+const BUFFER_CAP = 1000;
+const WATCHDOG_CHECK_MS = 5000;
+const LOG_EVERY_MS = 60_000;
 const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
+
+/** A finite Decimal > 0 from a string, else null. */
+function positive(x: unknown): Decimal | null {
+  if (typeof x !== 'string') return null;
+  try {
+    const v = D(x);
+    return v.isFinite() && v.gt(0) ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 function parseLevels(x: unknown): Levels | null {
   if (!Array.isArray(x)) return null;
@@ -71,7 +88,10 @@ interface SymState {
   /** Bumped on every resync / disconnect so stale snapshot fetches are ignored. */
   epoch: number;
   snapshotApplied: boolean;
+  /** Diffs seen while waiting for a snapshot; bounded by BUFFER_CAP (oldest dropped). */
   buffer: Diff[];
+  /** Consecutive failed/forced resyncs; drives the per-symbol exponential backoff. */
+  failures: number;
   reportedValid: boolean;
   cancelTimer: (() => void) | null;
 }
@@ -86,8 +106,11 @@ export class SpotFeed extends EventEmitter {
   private readonly wsFactory: WsFactory;
   private readonly now: () => number;
   private readonly setTimer: SetTimer;
+  private readonly watchdogMs: number;
   private readonly st = new Map<string, SymState>();
+  private readonly lastWarn = new Map<string, number>();
   private ws: WsLike | null = null;
+  private started = false;
   private closed = false;
   private backoff = BACKOFF_START_MS;
   private cancelReconnect: (() => void) | null = null;
@@ -103,12 +126,15 @@ export class SpotFeed extends EventEmitter {
     this.wsFactory = d.wsFactory ?? defaultWsFactory;
     this.now = d.now ?? Date.now;
     this.setTimer = d.setTimer ?? defaultSetTimer;
+    this.watchdogMs = d.watchdogMs ?? 30_000;
     for (const s of d.symbols) {
-      this.st.set(s, { epoch: 0, snapshotApplied: false, buffer: [], reportedValid: false, cancelTimer: null });
+      this.st.set(s, { epoch: 0, snapshotApplied: false, buffer: [], failures: 0, reportedValid: false, cancelTimer: null });
     }
   }
 
   start(): void {
+    if (this.started) return;
+    this.started = true;
     this.connect();
   }
 
@@ -144,9 +170,12 @@ export class SpotFeed extends EventEmitter {
     const ws = this.wsFactory(this.url());
     this.ws = ws;
     let dead = false;
+    let lastFrame = this.now();
+    let cancelWatchdog: () => void = () => {};
     const down = (why: string) => {
       if (dead) return;
       dead = true;
+      cancelWatchdog();
       if (this.ws === ws) this.ws = null;
       try {
         ws.close();
@@ -155,16 +184,40 @@ export class SpotFeed extends EventEmitter {
       }
       this.onDown(why);
     };
+    // Half-open / silent sockets never emit 'close': kill them so the normal reconnect runs.
+    const watch = () => {
+      cancelWatchdog = this.setTimer(() => {
+        if (dead || this.closed) return;
+        if (this.now() - lastFrame > this.watchdogMs) {
+          try {
+            ws.terminate();
+          } catch {
+            // already gone
+          }
+          down('silent socket terminated');
+        } else {
+          watch();
+        }
+      }, WATCHDOG_CHECK_MS);
+    };
+    watch();
     ws.on('open', () => {
       if (dead || this.closed) return;
-      this.health.onConnect(this.now());
-      this.symbols.forEach((s, i) => this.resync(s, i * SNAPSHOT_STAGGER_MS));
+      lastFrame = this.now();
+      this.health.onConnect(lastFrame);
+      this.symbols.forEach((s, i) => {
+        this.st.get(s)!.failures = 0;
+        this.resync(s, i * SNAPSHOT_STAGGER_MS);
+      });
     });
     ws.on('ping', () => {
-      if (!dead) this.health.onFrame(this.now());
+      if (dead) return;
+      lastFrame = this.now();
+      this.health.onFrame(lastFrame);
     });
     ws.on('message', (raw: unknown) => {
       if (dead || this.closed) return;
+      lastFrame = this.now();
       this.onMessage(raw);
     });
     ws.on('error', (e: unknown) => down(`error: ${(e as Error)?.message ?? e}`));
@@ -181,6 +234,7 @@ export class SpotFeed extends EventEmitter {
       s.snapshotApplied = false;
       s.reportedValid = false;
       s.buffer = [];
+      s.failures = 0;
       this.emptyBook(sym);
     }
     if (this.closed) return;
@@ -190,6 +244,15 @@ export class SpotFeed extends EventEmitter {
       this.cancelReconnect = null;
       this.connect();
     }, delay);
+  }
+
+  /** Logs at most once per key per minute so a bad stream cannot flood the log. */
+  private warnLimited(key: string, msg: string): void {
+    const t = this.now();
+    const prev = this.lastWarn.get(key);
+    if (prev !== undefined && t - prev < LOG_EVERY_MS) return;
+    this.lastWarn.set(key, t);
+    this.log.warn(msg);
   }
 
   private onMessage(raw: unknown): void {
@@ -213,25 +276,28 @@ export class SpotFeed extends EventEmitter {
       else if (kind === 'aggTrade') this.onTrade(symbol, data);
       else if (kind === 'miniTicker') this.onTicker(symbol, data);
     } catch (e) {
-      this.log.warn(`spot feed: bad ${kind} message for ${symbol}: ${(e as Error).message}`);
+      this.warnLimited(`${symbol}:${kind}`, `spot feed: bad ${kind} message for ${symbol}: ${(e as Error).message}`);
     }
   }
 
   private onTrade(symbol: string, d: any): void {
-    const trade: AggTrade = {
-      id: d.a,
-      price: D(d.p),
-      qty: D(d.q),
-      sellerInitiated: Boolean(d.m),
-      time: d.T,
-    };
+    const price = positive(d.p);
+    const qty = positive(d.q);
+    if (!price || !qty || !Number.isSafeInteger(d.a) || !Number.isSafeInteger(d.T)) {
+      this.warnLimited(`${symbol}:aggTrade`, `spot feed: invalid aggTrade for ${symbol}; dropped`);
+      return;
+    }
+    const trade: AggTrade = { id: d.a, price, qty, sellerInitiated: Boolean(d.m), time: d.T };
     this.emit('trade', symbol, trade);
   }
 
   private onTicker(symbol: string, d: any): void {
-    const last = D(d.c);
-    const open = D(d.o);
-    if (open.isZero()) return;
+    const last = positive(d.c);
+    const open = positive(d.o);
+    if (!last || !open) {
+      this.warnLimited(`${symbol}:miniTicker`, `spot feed: invalid miniTicker for ${symbol}; dropped`);
+      return;
+    }
     this.emit('ticker', symbol, {
       last,
       open24h: open,
@@ -250,24 +316,27 @@ export class SpotFeed extends EventEmitter {
     }
     if (!s.snapshotApplied) {
       s.buffer.push(diff);
+      // Bounded: a later snapshot only has to bridge the first retained diff.
+      if (s.buffer.length > BUFFER_CAP) s.buffer.splice(0, s.buffer.length - BUFFER_CAP);
       return;
     }
     this.apply(symbol, diff);
   }
 
-  /** Applies one validated diff to a synced book. Returns false on a gap (resync already started). */
+  /** Applies one validated diff to a synced book. Returns false on a gap (resync already scheduled). */
   private apply(symbol: string, diff: Diff): boolean {
     const s = this.st.get(symbol)!;
     const book = this.books.get(symbol)!;
     const r = book.applyDiff(diff);
     if (r === 'gap') {
       this.log.warn(`spot feed: sequence gap on ${symbol}; resyncing`);
-      this.invalidate(symbol);
+      this.invalidate(symbol, [diff]); // keep the triggering diff for the next snapshot to bridge
       return false;
     }
     if (r === 'applied') {
       if (!s.reportedValid) {
         s.reportedValid = true;
+        s.failures = 0;
         this.health.setBookValid(symbol, true);
         this.syncedSinceConnect.add(symbol);
         if (this.syncedSinceConnect.size === this.symbols.length) this.backoff = BACKOFF_START_MS;
@@ -282,19 +351,25 @@ export class SpotFeed extends EventEmitter {
     this.books.get(symbol)?.applySnapshot({ lastUpdateId: 0, bids: [], asks: [] });
   }
 
-  private invalidate(symbol: string): void {
-    this.health.setBookValid(symbol, false);
-    this.resync(symbol, 0);
+  private nextDelay(s: SymState): number {
+    const delay = Math.min(RETRY_START_MS * 2 ** s.failures, RETRY_MAX_MS);
+    s.failures++;
+    return delay;
+  }
+
+  /** Forced resync (gap, malformed event, failure): per-symbol backoff, 1 s doubling to 30 s. */
+  private invalidate(symbol: string, keep: Diff[] = []): void {
+    this.resync(symbol, this.nextDelay(this.st.get(symbol)!), keep);
   }
 
   /** Starts (or restarts) the snapshot sync for one symbol after `delayMs`. */
-  private resync(symbol: string, delayMs: number): void {
+  private resync(symbol: string, delayMs: number, keep: Diff[] = []): void {
     const s = this.st.get(symbol)!;
     s.epoch++;
     s.cancelTimer?.();
     s.snapshotApplied = false;
     s.reportedValid = false;
-    s.buffer = [];
+    s.buffer = keep.slice(-BUFFER_CAP);
     this.health.setBookValid(symbol, false);
     this.emptyBook(symbol);
     this.scheduleFetch(symbol, delayMs);
@@ -312,37 +387,40 @@ export class SpotFeed extends EventEmitter {
 
   private async fetchSnapshot(symbol: string, epoch: number): Promise<void> {
     const s = this.st.get(symbol)!;
-    let snap: any;
     try {
-      snap = await this.rest.depth(symbol, 1000);
-    } catch (e) {
-      if (s.epoch !== epoch || this.closed) return;
-      this.log.warn(`spot feed: snapshot fetch failed for ${symbol}: ${(e as Error).message}`);
-      this.scheduleFetch(symbol, RETRY_MS);
-      return;
-    }
-    if (s.epoch !== epoch || this.closed) return;
-    const bids = parseLevels(snap?.bids);
-    const asks = parseLevels(snap?.asks);
-    if (!bids || !asks || !Number.isSafeInteger(snap?.lastUpdateId)) {
-      this.log.warn(`spot feed: malformed snapshot for ${symbol}`);
-      this.scheduleFetch(symbol, RETRY_MS);
-      return;
-    }
-    this.books.get(symbol)!.applySnapshot({ lastUpdateId: snap.lastUpdateId, bids, asks });
-    s.snapshotApplied = true;
-    const buffered = s.buffer;
-    s.buffer = [];
-    for (const diff of buffered) {
-      if (!this.apply(symbol, diff)) {
-        // Snapshot older than the buffered diffs (or a real gap): apply() restarted
-        // the sync. Keep the diffs so a newer snapshot can bridge them (Binance's
-        // procedure), and delay the retry so we do not hammer REST.
-        s.buffer = buffered;
-        s.cancelTimer?.();
-        this.scheduleFetch(symbol, RETRY_MS);
+      let snap: any;
+      try {
+        snap = await this.rest.depth(symbol, 1000);
+      } catch (e) {
+        if (s.epoch !== epoch || this.closed) return;
+        this.log.warn(`spot feed: snapshot fetch failed for ${symbol}: ${(e as Error).message}`);
+        this.scheduleFetch(symbol, this.nextDelay(s)); // keeps the (bounded) buffer
         return;
       }
+      if (s.epoch !== epoch || this.closed) return;
+      const bids = parseLevels(snap?.bids);
+      const asks = parseLevels(snap?.asks);
+      if (!bids || !asks || !Number.isSafeInteger(snap?.lastUpdateId)) {
+        this.log.warn(`spot feed: malformed snapshot for ${symbol}`);
+        this.scheduleFetch(symbol, this.nextDelay(s));
+        return;
+      }
+      this.books.get(symbol)!.applySnapshot({ lastUpdateId: snap.lastUpdateId, bids, asks });
+      s.snapshotApplied = true;
+      const buffered = s.buffer;
+      s.buffer = [];
+      for (const diff of buffered) {
+        if (!this.apply(symbol, diff)) {
+          // Snapshot older than the buffered diffs (or a real gap): apply() already scheduled
+          // the backed-off retry. Keep every diff so a newer snapshot can bridge them.
+          s.buffer = buffered;
+          return;
+        }
+      }
+    } catch (e) {
+      // e.g. a throwing 'book' listener during replay: never an unhandled rejection.
+      this.log.error(`spot feed: sync failed for ${symbol}: ${(e as Error).message}`);
+      if (!this.closed && s.epoch === epoch) this.invalidate(symbol);
     }
   }
 }

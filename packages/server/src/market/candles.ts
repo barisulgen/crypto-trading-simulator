@@ -26,6 +26,8 @@ export interface CandleServiceDeps {
 
 const CACHE_MS = 5000;
 const KLINE_WS_URL = 'wss://stream.binance.com:9443/ws';
+const WATCHDOG_MS = 30_000;
+const WATCHDOG_CHECK_MS = 5000;
 const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 
@@ -68,14 +70,16 @@ export class CandleService {
     if (hit && this.now() - hit.at <= CACHE_MS) return hit.value;
     const value = this.rest.klines(symbol, interval, 500, endTime).then((rows: unknown) => {
       if (!Array.isArray(rows)) throw new Error('Unexpected klines response');
-      return rows.map((r: any[]): Candle => ({
-        time: Number(r[0]),
-        open: String(r[1]),
-        high: String(r[2]),
-        low: String(r[3]),
-        close: String(r[4]),
-        volume: String(r[5]),
-      }));
+      return rows
+        .filter((r: unknown): r is unknown[] => Array.isArray(r) && r.length >= 6)
+        .map((r): Candle => ({
+          time: Number(r[0]),
+          open: String(r[1]),
+          high: String(r[2]),
+          low: String(r[3]),
+          close: String(r[4]),
+          volume: String(r[5]),
+        }));
     });
     this.cache.set(key, { at: this.now(), value });
     value.catch(() => {
@@ -142,9 +146,12 @@ export class CandleService {
     const ws = this.wsFactory(KLINE_WS_URL);
     this.ws = ws;
     let dead = false;
+    let lastFrame = this.now();
+    let cancelWatchdog: () => void = () => {};
     const down = () => {
       if (dead) return;
       dead = true;
+      cancelWatchdog();
       if (this.ws === ws) {
         this.ws = null;
         this.open = false;
@@ -162,7 +169,28 @@ export class CandleService {
         this.ensureSocket();
       }, delay);
     };
+    // Half-open / silent sockets never emit 'close': kill them so the normal reconnect runs.
+    const watch = () => {
+      cancelWatchdog = this.setTimer(() => {
+        if (dead || this.closed) return;
+        if (this.now() - lastFrame > WATCHDOG_MS) {
+          try {
+            ws.terminate();
+          } catch {
+            // already gone
+          }
+          down();
+        } else {
+          watch();
+        }
+      }, WATCHDOG_CHECK_MS);
+    };
+    watch();
+    ws.on('ping', () => {
+      lastFrame = this.now();
+    });
     ws.on('open', () => {
+      lastFrame = this.now();
       if (dead || this.ws !== ws) return;
       this.open = true;
       this.backoff = BACKOFF_START_MS;
@@ -172,6 +200,7 @@ export class CandleService {
     });
     ws.on('message', (raw: unknown) => {
       if (dead) return;
+      lastFrame = this.now();
       try {
         const m = JSON.parse(rawToString(raw));
         if (m?.e !== 'kline' || !m.k) return;

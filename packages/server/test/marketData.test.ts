@@ -6,31 +6,12 @@ import { LocalBook } from '../src/market/localBook.ts';
 import { MarketData } from '../src/market/marketData.ts';
 import { SpotFeed } from '../src/market/spotFeed.ts';
 import { CandleService } from '../src/market/candles.ts';
+import { fakeTimers, FakeWs, tick } from './helpers.ts';
 import { parseSpotRules } from '../src/binance/parseRules.ts';
 import exchangeInfo from './fixtures/btcusdt-exchangeinfo.json' with { type: 'json' };
 
 const cfg = { silentMs: 15000, lagMs: 5000, noUpdateMs: 120000 };
 const silent = { info() {}, warn() {}, error() {} };
-const tick = () => new Promise<void>((r) => setImmediate(r));
-
-/** Manual timers: nothing runs until the test fires it. */
-function fakeTimers() {
-  const timers: { fn: () => void; ms: number; live: boolean }[] = [];
-  const setTimer = (fn: () => void, ms: number) => {
-    const t = { fn, ms, live: true };
-    timers.push(t);
-    return () => {
-      t.live = false;
-    };
-  };
-  const pending = () => timers.filter((t) => t.live);
-  const fire = (i = 0) => {
-    const t = pending()[i]!;
-    t.live = false;
-    t.fn();
-  };
-  return { setTimer, pending, fire };
-}
 
 describe('MarketData', () => {
   const setup = (rest: any = {}) => {
@@ -184,29 +165,6 @@ describe('FeedHealth non-finite event time', () => {
     expect(h.isFresh('BTCUSDT', 3)).toBe(true);
   });
 });
-
-class FakeWs extends EventEmitter {
-  sent: string[] = [];
-  closed = false;
-  constructor(public url: string) {
-    super();
-  }
-  send(d: string) {
-    this.sent.push(d);
-  }
-  close() {
-    this.closed = true;
-  }
-  open() {
-    this.emit('open');
-  }
-  msg(o: unknown) {
-    this.emit('message', Buffer.from(JSON.stringify(o)), false);
-  }
-  drop() {
-    this.emit('close');
-  }
-}
 
 type Lv = [string, string][];
 

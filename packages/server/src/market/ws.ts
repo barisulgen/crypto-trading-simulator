@@ -5,13 +5,15 @@ export interface WsLike {
   on(event: string, cb: (...args: any[]) => void): unknown;
   send(data: string): void;
   close(): void;
+  /** Hard-kills the socket (no close handshake); needed for half-open connections. */
+  terminate(): void;
 }
 
 export type WsFactory = (url: string) => WsLike;
 /** Schedules `fn` once after `ms`; returns a cancel function. */
 export type SetTimer = (fn: () => void, ms: number) => () => void;
 
-export const defaultWsFactory: WsFactory = (url) => new WebSocket(url) as unknown as WsLike;
+export const defaultWsFactory: WsFactory = (url) => new WebSocket(url, { handshakeTimeout: 10_000 }) as unknown as WsLike;
 
 export const defaultSetTimer: SetTimer = (fn, ms) => {
   const h = setTimeout(fn, ms);

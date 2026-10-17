@@ -16,6 +16,8 @@ export const RULES_REFRESH_MS = 3_600_000;
 export const CLOCK_REFRESH_MS = 600_000;
 const TRADE_RING = 50;
 const POLL_STAGGER_MS = 1000;
+const STARTUP_RETRY_START_MS = 5000;
+const STARTUP_RETRY_MAX_MS = 60_000;
 
 export interface MarketDataDeps {
   symbols: string[];
@@ -45,6 +47,7 @@ export class MarketData extends EventEmitter implements MarketView {
   private readonly trades = new Map<string, AggTrade[]>();
   private cancels = new Set<() => void>();
   private stopped = false;
+  private started = false;
 
   constructor(d: MarketDataDeps) {
     super();
@@ -70,35 +73,54 @@ export class MarketData extends EventEmitter implements MarketView {
     d.feed.on('book', (symbol: string) => this.emit('book', symbol));
   }
 
-  /** Loads rules, measures the clock offset and starts the pollers. */
+  /** Loads rules, measures the clock offset and starts the pollers. Idempotent; stop() then start() restarts. */
   start(): void {
-    this.every(() => this.refreshRules(), RULES_REFRESH_MS, 0);
-    this.every(() => this.refreshClockOffset(), CLOCK_REFRESH_MS, 0);
-    this.symbols.forEach((s, i) => this.every(() => this.pollAvgPrice(s), AVG_PRICE_POLL_MS, i * POLL_STAGGER_MS));
+    if (this.started) return;
+    this.started = true;
+    this.stopped = false;
+    this.every(() => this.refreshRules(), RULES_REFRESH_MS, 0, true);
+    this.every(() => this.refreshClockOffset(), CLOCK_REFRESH_MS, 0, true);
+    this.symbols.forEach((s, i) =>
+      this.every(async () => (await this.pollAvgPrice(s), true), AVG_PRICE_POLL_MS, i * POLL_STAGGER_MS, false),
+    );
   }
 
   stop(): void {
     this.stopped = true;
+    this.started = false;
     for (const c of this.cancels) c();
     this.cancels.clear();
   }
 
-  private every(fn: () => Promise<void>, ms: number, firstDelay: number): void {
+  /**
+   * Runs `fn` after `firstDelay`, then every `ms`. With `untilFirstSuccess`, a failed run is
+   * retried quickly (5 s doubling to 60 s) until it first succeeds, then at the normal period.
+   */
+  private every(fn: () => Promise<boolean>, ms: number, firstDelay: number, untilFirstSuccess: boolean): void {
     let cancel: () => void = () => {};
+    let ok = false;
+    let retry = STARTUP_RETRY_START_MS;
     const arm = (delay: number) => {
       this.cancels.delete(cancel);
       cancel = this.setTimer(() => {
         if (this.stopped) return;
-        void fn().finally(() => {
-          if (!this.stopped) arm(ms);
-        });
+        void fn()
+          .catch(() => false)
+          .then((success) => {
+            if (this.stopped) return;
+            if (success) ok = true;
+            if (ok || !untilFirstSuccess) return arm(ms);
+            arm(retry);
+            retry = Math.min(retry * 2, STARTUP_RETRY_MAX_MS);
+          });
       }, delay);
       this.cancels.add(cancel);
     };
     arm(firstDelay);
   }
 
-  async refreshRules(): Promise<void> {
+  /** True when every symbol has rules afterwards. */
+  async refreshRules(): Promise<boolean> {
     try {
       const info = await this.rest.exchangeInfo(this.symbols);
       for (const raw of info?.symbols ?? []) {
@@ -109,8 +131,10 @@ export class MarketData extends EventEmitter implements MarketView {
           this.log.warn(`exchangeInfo: ${(e as Error).message}`);
         }
       }
+      return this.symbols.every((s) => this.ruleMap.has(s));
     } catch (e) {
       this.log.warn(`exchangeInfo refresh failed: ${(e as Error).message}`);
+      return false;
     }
   }
 
@@ -123,15 +147,18 @@ export class MarketData extends EventEmitter implements MarketView {
     }
   }
 
-  async refreshClockOffset(): Promise<void> {
+  async refreshClockOffset(): Promise<boolean> {
     try {
       const t0 = this.now();
       const r = await this.rest.serverTime();
       const t1 = this.now();
       const offset = Number(r?.serverTime) - (t0 + t1) / 2;
-      if (Number.isFinite(offset)) this.health.setClockOffset(offset);
+      if (!Number.isFinite(offset)) return false;
+      this.health.setClockOffset(offset);
+      return true;
     } catch (e) {
       this.log.warn(`serverTime failed: ${(e as Error).message}`);
+      return false;
     }
   }
 
