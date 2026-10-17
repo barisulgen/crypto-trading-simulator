@@ -49,6 +49,9 @@ export function FeedIndicator() {
         : overall === 'partial'
           ? `${stale.length} of ${symbols.length} coins paused`
           : 'Live';
+  // Phones: a shorter label, so the header stays on one line.
+  const shortLabel =
+    overall === 'down' ? 'Disconnected' : overall === 'partial' ? `${stale.length}/${symbols.length} paused` : label;
 
   return (
     <div
@@ -65,7 +68,10 @@ export function FeedIndicator() {
         className="flex h-7 items-center gap-2 rounded-ctl px-2 text-xs text-muted hover:bg-raised"
       >
         <span aria-hidden="true" className={`size-2.5 flex-none ${DOT[overall]}`} />
-        <span className={overall === 'down' ? 'text-down' : overall === 'partial' ? 'text-fg' : ''}>{label}</span>
+        <span className={`whitespace-nowrap ${overall === 'down' ? 'text-down' : overall === 'partial' ? 'text-fg' : ''}`}>
+          <span className="desk:hidden">{shortLabel}</span>
+          <span className="hidden desk:inline">{label}</span>
+        </span>
       </button>
       {open && (
         <div

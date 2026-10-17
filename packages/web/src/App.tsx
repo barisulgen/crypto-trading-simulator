@@ -47,8 +47,8 @@ function ThemeToggle() {
 
 function Header({ path }: { path: RoutePath }) {
   return (
-    <header className="flex h-10 flex-none items-center gap-4 border-b border-line bg-panel px-3 desk:px-4">
-      <span className="font-semibold [font-stretch:112%]">Trading Simulator</span>
+    <header className="flex h-10 flex-none items-center gap-3 border-b border-line bg-panel px-3 desk:gap-4 desk:px-4">
+      <span className="font-semibold whitespace-nowrap [font-stretch:112%]">Trading Simulator</span>
       <nav aria-label="Pages" className="flex h-full gap-1">
         {NAV.map((n) => (
           <a

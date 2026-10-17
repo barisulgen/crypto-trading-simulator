@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountSnapshot, ServerMessage, WireAggTrade } from '../src/lib/api.ts';
-import { initialLiveData, reduce } from '../src/lib/live.ts';
+import { initialLiveData, reduce, useLive } from '../src/lib/live.ts';
 import type { LiveData } from '../src/lib/live.ts';
 
 const T0 = 1_700_000_000_000;
@@ -101,5 +101,27 @@ describe('live store reducer', () => {
   it('turns a server error message into an error notice', () => {
     const s = apply(initialLiveData(), { type: 'error', error: 'Unknown symbol FOO' });
     expect(s.notices[0]).toMatchObject({ level: 'error', text: 'Unknown symbol FOO' });
+  });
+  it('counts fill and partial-fill notices so the chart can reload its fill markers', () => {
+    let s = initialLiveData();
+    expect(s.fillSeq).toBe(0);
+    s = apply(s, { type: 'notice', kind: 'fill', level: 'info', text: 'Bought 0.001 BTC' }, T0);
+    s = apply(s, { type: 'notice', kind: 'fill', level: 'info', text: 'Bought 0.001 BTC' }, T0 + 100);
+    s = apply(s, { type: 'notice', kind: 'partial_fill', level: 'info', text: 'Partial fill: Sold 1 ETH' }, T0 + 200);
+    s = apply(s, { type: 'notice', kind: 'rejected', level: 'error', text: 'Insufficient funds' }, T0 + 300);
+    // The second identical fill is collapsed into one toast but is still a new fill.
+    expect(s.fillSeq).toBe(3);
+  });
+});
+
+describe('live store actions', () => {
+  it('priceClicked records the clicked book price with a new sequence number each time', () => {
+    expect(useLive.getState().priceClick).toBeNull();
+    useLive.getState().priceClicked('81232.01');
+    const first = useLive.getState().priceClick;
+    expect(first?.price).toBe('81232.01');
+    useLive.getState().priceClicked('81232.01');
+    expect(useLive.getState().priceClick?.price).toBe('81232.01');
+    expect(useLive.getState().priceClick?.seq).toBe((first?.seq ?? 0) + 1);
   });
 });

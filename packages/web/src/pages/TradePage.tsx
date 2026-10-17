@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { CoinList } from '../components/CoinList.tsx';
+import { OrderBook } from '../components/OrderBook.tsx';
 import { Panel, SlotPlaceholder } from '../components/Panel.tsx';
+import { IntervalPicker, PriceChart } from '../components/PriceChart.tsx';
+import { RecentTrades } from '../components/RecentTrades.tsx';
 import type { Slot } from '../components/Panel.tsx';
 import { fmtPrice } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
@@ -34,6 +37,8 @@ function SelectedTitle() {
  */
 export function TradePage() {
   const [tab, setTab] = useState<Slot>('chart');
+  const symbol = useLive((s) => s.selected.symbol);
+  const interval = useLive((s) => s.interval);
   const on = (slot: Slot) => tab === slot;
 
   return (
@@ -43,19 +48,16 @@ export function TradePage() {
           <CoinList onPicked={() => setTab('chart')} />
         </Panel>
 
-        <Panel slot="chart" active={on('chart')} title={<SelectedTitle />}>
-          {/* T14: <PriceChart /> with the 1m-1d timeframe switch in the header actions. */}
-          <SlotPlaceholder>The candle chart of the selected coin goes here.</SlotPlaceholder>
+        <Panel slot="chart" active={on('chart')} title={<SelectedTitle />} actions={<IntervalPicker />}>
+          <PriceChart symbol={symbol} interval={interval} />
         </Panel>
 
         <Panel slot="book" active={on('book')} title="Order book">
-          {/* T14: <OrderBook /> */}
-          <SlotPlaceholder>Live bids and asks with the spread go here.</SlotPlaceholder>
+          <OrderBook />
         </Panel>
 
         <Panel slot="trades" active={on('trades')} title="Recent trades">
-          {/* T14: <RecentTrades /> */}
-          <SlotPlaceholder>The live stream of market trades goes here.</SlotPlaceholder>
+          <RecentTrades />
         </Panel>
 
         <Panel slot="form" active={on('form')} title="Place order">

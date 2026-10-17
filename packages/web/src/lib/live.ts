@@ -57,6 +57,8 @@ export interface LiveData {
   orders: WireOrder[];
   notices: Notice[];
   noticeSeq: number;
+  /** Bumped on every fill or partial-fill notice, so views showing fills know to reload them. */
+  fillSeq: number;
   selected: Selection;
   interval: Interval;
 }
@@ -69,11 +71,14 @@ export interface LiveState extends LiveData {
   conn: Connection;
   /** LAN password mode and no session: show the login screen. */
   needsLogin: boolean;
+  /** The last order-book price the owner clicked (the order form prefills its limit price); `seq` changes on every click. */
+  priceClick: { price: string; seq: number } | null;
   select(symbol: string): void;
   setInterval(interval: Interval): void;
   setAccount(account: AccountSnapshot): void;
   pushNotice(level: Notice['level'], text: string): void;
   dismissNotice(id: number): void;
+  priceClicked(price: string): void;
 }
 
 export function initialLiveData(): LiveData {
@@ -87,6 +92,7 @@ export function initialLiveData(): LiveData {
     orders: [],
     notices: [],
     noticeSeq: 0,
+    fillSeq: 0,
     selected: { symbol: 'BTCUSDT', market: 'spot' },
     interval: '15m',
   };
@@ -128,8 +134,11 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
       return { account: msg.account };
     case 'orders':
       return { orders: msg.orders };
-    case 'notice':
-      return addNotice(s, { kind: msg.kind, level: msg.level, text: msg.text }, now);
+    case 'notice': {
+      const notices = addNotice(s, { kind: msg.kind, level: msg.level, text: msg.text }, now);
+      const filled = msg.kind === 'fill' || msg.kind === 'partial_fill';
+      return filled ? { ...notices, fillSeq: s.fillSeq + 1 } : notices;
+    }
     case 'error':
       return addNotice(s, { kind: 'local', level: 'error', text: msg.error }, now);
     case 'book':
@@ -151,6 +160,7 @@ export const useLive = create<LiveState>()((set) => ({
   meta: null,
   conn: 'connecting',
   needsLogin: false,
+  priceClick: null,
   select(symbol) {
     set((s) =>
       s.selected.symbol === symbol ? {} : { selected: { symbol, market: 'spot' }, book: null, trades: [], kline: null },
@@ -169,6 +179,9 @@ export const useLive = create<LiveState>()((set) => ({
   },
   dismissNotice(id) {
     set((s) => ({ notices: s.notices.filter((n) => n.id !== id) }));
+  },
+  priceClicked(price) {
+    set((s) => ({ priceClick: { price, seq: (s.priceClick?.seq ?? 0) + 1 } }));
   },
 }));
 

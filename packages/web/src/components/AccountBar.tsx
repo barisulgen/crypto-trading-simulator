@@ -46,8 +46,9 @@ export function AccountBar() {
       data-frozen={frozen || undefined}
       className="group/bar flex-none border-b border-line bg-panel px-3 py-2 desk:px-4"
     >
-      <div className="grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-2 desk:flex desk:items-center desk:gap-x-7">
-        <div className="flex items-end gap-4 desk:contents">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 desk:flex desk:items-center desk:gap-x-7">
+        {/* Phones: Net P&L wraps under the total when the buttons leave too little room. */}
+        <div className="flex min-w-0 flex-wrap items-end gap-x-4 gap-y-1 desk:contents">
           <Stat
             label={
               <span className="flex items-center gap-1.5">

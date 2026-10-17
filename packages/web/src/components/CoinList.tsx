@@ -3,6 +3,8 @@ import { useLive } from '../lib/live.ts';
 import { Segmented } from './ui.tsx';
 
 const FALLBACK_COINS = ['BTC', 'ETH', 'SOL', 'NEAR', 'XRP', 'BNB', 'DOGE', 'SUI', 'HYPE', 'AVAX'];
+/** Coin (shrinks, clips), last price (its own width), 24 h % (fixed, so prices line up across rows). */
+const ROW_COLS = 'grid-cols-[minmax(0,1fr)_auto_3.75rem]';
 
 /** Up/down colour of a change: teal for gains, rose for losses, muted for none. */
 export function changeClass(value: string | null | undefined, dp = 2): string {
@@ -41,12 +43,12 @@ export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
           ]}
         />
       </div>
-      <div className="grid flex-none grid-cols-[1fr_auto_4.25rem] gap-2 border-b border-line px-3 pb-1.5 text-2xs text-faint">
+      <div className={`grid flex-none ${ROW_COLS} gap-2 border-b border-line px-3 pb-1.5 text-2xs text-faint`}>
         <span>Coin</span>
         <span className="text-right">Last</span>
         <span className="text-right">24h</span>
       </div>
-      <ul className={`min-h-0 flex-1 overflow-auto ${down ? 'opacity-60' : ''}`}>
+      <ul className={`@container min-h-0 flex-1 overflow-auto ${down ? 'opacity-60' : ''}`}>
         {coins.map((coin) => {
           const symbol = `${coin}USDT`;
           const t = tickers[symbol];
@@ -61,13 +63,14 @@ export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
                   select(symbol);
                   onPicked?.(symbol);
                 }}
-                className={`grid w-full grid-cols-[1fr_auto_4.25rem] items-center gap-2 border-l-2 px-3 py-2 text-left desk:py-1.5 ${
+                className={`grid w-full ${ROW_COLS} items-center gap-2 border-l-2 px-3 py-2 text-left desk:py-1.5 ${
                   on ? 'border-accent bg-raised' : 'border-transparent hover:bg-raised/60'
                 }`}
               >
-                <span className="flex min-w-0 items-baseline gap-1">
+                <span className="flex min-w-0 items-baseline gap-1 overflow-hidden">
                   <span className="font-semibold">{coin}</span>
-                  <span className="text-2xs text-faint">/USDT</span>
+                  {/* Only where the list is wide enough (phones); the narrow desktop column would collide with the price. */}
+                  <span className="hidden text-2xs text-faint @min-[16rem]:inline">/USDT</span>
                   {h && !h.fresh && (
                     <span
                       title={h.reason ?? 'Paused'}

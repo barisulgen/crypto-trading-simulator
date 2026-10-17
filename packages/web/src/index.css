@@ -53,16 +53,28 @@
  *   book   - OrderBook (T14)         trades - RecentTrades (T14)
  *   form   - OrderForm (T15)         tabs   - BottomTabs (T15)
  * Under 900 px every slot is a full-height panel and one is shown at a time (see TradePage).
+ * 1280 px and up: book over trades right of the chart; 900-1279 px: side by side under it.
  */
 .trade-grid {
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
+/* 900-1279 px: book and trades sit side by side under a full-width chart, so the chart keeps room. */
 @media (width >= 56.25rem) {
   .trade-grid {
     display: grid;
     gap: 6px;
+    grid-template-columns: 12.5rem minmax(0, 1fr) minmax(0, 1fr) 16.5rem;
+    grid-template-rows: minmax(0, 1.3fr) minmax(0, 1fr) minmax(10rem, 13rem);
+    grid-template-areas:
+      'coins chart chart  form'
+      'coins book  trades form'
+      'coins tabs  tabs   form';
+  }
+}
+@media (width >= 80rem) {
+  .trade-grid {
     grid-template-columns: 13.5rem minmax(0, 1fr) 16.5rem 18.5rem;
     grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr) minmax(12rem, 15rem);
     grid-template-areas:
