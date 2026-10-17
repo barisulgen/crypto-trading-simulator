@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import type { WireFill, WireOrder } from '../lib/api.ts';
-import { fmtBalance, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
+import { ORDER_TYPE_LABEL, fmtBalance, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { avgFill, holdingRows } from '../lib/holdings.ts';
 import type { HoldingRow } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
@@ -136,14 +136,6 @@ function Empty({ children }: { children: ReactNode }) {
 
 // ---- open orders ----
 
-const TYPE_LABEL: Record<WireOrder['type'], string> = {
-  market: 'Market',
-  limit: 'Limit',
-  post_only: 'Post-only',
-  stop_loss: 'Stop-loss',
-  take_profit: 'Take-profit',
-};
-
 function statusLabel(o: WireOrder): string {
   switch (o.status) {
     case 'pending':
@@ -199,7 +191,7 @@ function OrderRow({ o, onCancel, cancel = true }: { o: WireOrder; onCancel(o: Wi
             : undefined
         }
       >
-        {TYPE_LABEL[o.type]}
+        {ORDER_TYPE_LABEL[o.type]}
         {o.attach && <span className="ml-1 text-faint">+SL/TP</span>}
       </Cell>
       <Cell label="Side" head>

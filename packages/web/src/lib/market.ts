@@ -259,6 +259,17 @@ export function fmtChartTime(ms: number): string {
   return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Local date and time with seconds, for records: '18 Oct 2026 09:05:07'. */
+export function fmtDateTime(ms: number): string {
+  return `${fmtChartTime(ms)}:${pad(new Date(ms).getSeconds())}`;
+}
+
+/** Local date only: '18 Oct 2026'. */
+export function fmtDate(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+
 /** Axis tick labels in local time: year, month, day of month, or HH:MM. */
 export function fmtTick(ms: number, kind: 'year' | 'month' | 'day' | 'time'): string {
   const d = new Date(ms);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { fmtBalance, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
+import { fmtAvgPrice, fmtBalance, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
 
 describe('tickDecimals', () => {
   it('counts the significant decimals of a tick or step size', () => {
@@ -61,6 +61,21 @@ describe('fmtPrice and fmtQty', () => {
     expect(fmtBalance('DOGEUSDT', '1498.5')).toBe('1,498.5');
     expect(fmtBalance('DOGEUSDT', '1500')).toBe('1,500');
     expect(fmtBalance('ETHUSDT', undefined)).toBe('-');
+  });
+
+  it('exact: a value the owner entered keeps every decimal it has (an off-tick price shows as sent, never rounded)', () => {
+    setRules({ BTCUSDT: { tickSize: '0.01000000', stepSize: '0.00001000' } });
+    expect(fmtPrice('BTCUSDT', '100.005', { exact: true })).toBe('100.005'); // fmtPrice alone: 100.01
+    expect(fmtPrice('BTCUSDT', '78000', { exact: true })).toBe('78,000.00');
+    expect(fmtQty('BTCUSDT', '0.000123', { exact: true })).toBe('0.000123');
+    expect(fmtQty('BTCUSDT', '0.0002', { exact: true })).toBe('0.00020');
+    expect(fmtUsd('100.005', { exact: true })).toBe('$100.005');
+    expect(fmtUsd('100', { exact: true })).toBe('$100.00');
+  });
+
+  it('fmtAvgPrice shows a fill price with the tick decimals plus 2', () => {
+    setRules({ BTCUSDT: { tickSize: '0.01000000', stepSize: '0.00001000' } });
+    expect(fmtAvgPrice('BTCUSDT', '81382.01234')).toBe('81,382.0123');
   });
 
   it('fall back to the value as given (trailing zeros trimmed) without rules, and a dash for no value', () => {

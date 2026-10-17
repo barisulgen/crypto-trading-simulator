@@ -1,5 +1,6 @@
 // Display formatting for decimal strings. Money never becomes a JS number here: every helper
 // rounds and groups the decimal string itself (half away from zero), so nothing is lost to floats.
+import type { OrderType } from '@sim/engine';
 
 const NUMERIC = /^([+-])?(\d+)(?:\.(\d*))?$/;
 const DASH = '-';
@@ -96,18 +97,40 @@ function ownDecimals(value: string): number {
   return p ? Math.min(p.frac.replace(/0+$/, '').length, 8) : 0;
 }
 
+/** All decimals a value has, trailing zeros trimmed. */
+function allDecimals(value: string): number {
+  return parse(value)?.frac.replace(/0+$/, '').length ?? 0;
+}
+
+/**
+ * `exact`: a value the owner entered (an order's price, trigger or amount) keeps every decimal it
+ * has beyond the usual ones, so a rejected off-tick price shows as sent instead of rounded onto it.
+ */
+interface Exact {
+  exact?: boolean;
+}
+
+const decimals = (value: string, dp: number, opts: Exact) => (opts.exact ? Math.max(dp, allDecimals(value)) : dp);
+
 /** A price with the symbol's tick-size decimals. */
-export function fmtPrice(symbol: string, value: Value): string {
+export function fmtPrice(symbol: string, value: Value, opts: Exact = {}): string {
   if (value === null || value === undefined) return DASH;
   const tick = rulesBySymbol[symbol]?.tickSize;
-  return fmtNum(value, tick !== undefined ? tickDecimals(tick) : ownDecimals(value));
+  return fmtNum(value, decimals(value, tick !== undefined ? tickDecimals(tick) : ownDecimals(value), opts));
+}
+
+/** A fill's (average) price: the tick-size decimals plus 2, as in the fill notices. */
+export function fmtAvgPrice(symbol: string, value: Value): string {
+  if (value === null || value === undefined) return DASH;
+  const tick = rulesBySymbol[symbol]?.tickSize;
+  return fmtNum(value, tick !== undefined ? tickDecimals(tick) + 2 : ownDecimals(value));
 }
 
 /** A coin quantity with the symbol's step-size decimals. */
-export function fmtQty(symbol: string, value: Value): string {
+export function fmtQty(symbol: string, value: Value, opts: Exact = {}): string {
   if (value === null || value === undefined) return DASH;
   const step = rulesBySymbol[symbol]?.stepSize;
-  return fmtNum(value, step !== undefined ? tickDecimals(step) : ownDecimals(value));
+  return fmtNum(value, decimals(value, step !== undefined ? tickDecimals(step) : ownDecimals(value), opts));
 }
 
 /**
@@ -151,10 +174,19 @@ export function fmtDrift(value: Value): string {
   return `${s > 0 ? 'cost' : 'gain'} ${fmtUsd(abs)}`;
 }
 
-/** US dollars: '$1,234.56', '-$12.35'; with `sign: true` gains get a '+'. */
-export function fmtUsd(value: Value, opts: { sign?: boolean } = {}): string {
+/** Order types as the owner reads them. */
+export const ORDER_TYPE_LABEL: Record<OrderType, string> = {
+  market: 'Market',
+  limit: 'Limit',
+  post_only: 'Post-only',
+  stop_loss: 'Stop-loss',
+  take_profit: 'Take-profit',
+};
+
+/** US dollars: '$1,234.56', '-$12.35'; with `sign: true` gains get a '+'; `exact` keeps extra decimals. */
+export function fmtUsd(value: Value, opts: { sign?: boolean } & Exact = {}): string {
   if (value === null || value === undefined) return DASH;
-  const r = rounded(value, 2);
+  const r = rounded(value, decimals(value, 2, opts));
   if (!r) return value;
   const prefix = r.sign < 0 ? '-' : r.sign > 0 && opts.sign ? '+' : '';
   return `${prefix}$${group(r.int)}.${r.frac}`;
