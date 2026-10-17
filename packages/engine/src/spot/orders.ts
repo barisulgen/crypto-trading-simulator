@@ -15,7 +15,7 @@ import type {
   SpotOrderRequest,
   SpotRules,
 } from '../types.ts';
-import { recordFill } from './accounting.ts';
+import { assertBasisCovers, recordFill } from './accounting.ts';
 import { credit, lockFunds, releaseFunds, spendFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import { isStopType } from './triggers.ts';
@@ -212,6 +212,7 @@ export function settleTaker(
   ctx: EngineCtx,
   retain: Decimal = D(0),
 ): { order: SpotOrder; fill: Fill } {
+  assertBasisCovers(s, rules, order.side, walk.qty);
   const buy = order.side === 'buy';
   const fee = spotFee(order.side, walk.qty, walk.quote, ctx.fees.taker, rules.base, rules.quote);
   const unspent = spendFunds(s, order.lockAsset, buy ? walk.quote : walk.qty, order.lockAmount);

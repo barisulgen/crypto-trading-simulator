@@ -38,11 +38,12 @@ function lotSize(req: NormalizedRequest, qty: Decimal, r: SpotRules): string | n
   return null;
 }
 
-function notional(req: NormalizedRequest, avg: Decimal, r: SpotRules): string | null {
+/** `avg` is non-null for market orders (checked by validateSpotOrder); other types never read it. */
+function notional(req: NormalizedRequest, avg: Decimal | null, r: SpotRules): string | null {
   const isMarket = req.type === 'market';
   let value: Decimal;
   if (isMarket) {
-    if (req.qty) value = avg.mul(req.qty);
+    if (req.qty) value = avg!.mul(req.qty);
     else if (req.quoteQty) value = req.quoteQty;
     else return null;
   } else {
@@ -59,8 +60,9 @@ function notional(req: NormalizedRequest, avg: Decimal, r: SpotRules): string | 
   return null;
 }
 
-function percentPrice(req: NormalizedRequest, avg: Decimal, r: SpotRules): string | null {
-  if ((req.type !== 'limit' && req.type !== 'post_only') || !req.price) return null;
+/** Limit and post-only only; `avg` is non-null for them (checked by validateSpotOrder). */
+function percentPrice(req: NormalizedRequest, avg: Decimal | null, r: SpotRules): string | null {
+  if ((req.type !== 'limit' && req.type !== 'post_only') || !req.price || !avg) return null;
   const buy = req.side === 'buy';
   const up = buy ? r.bidMultiplierUp : r.askMultiplierUp;
   const down = buy ? r.bidMultiplierDown : r.askMultiplierDown;
@@ -75,14 +77,23 @@ function percentPrice(req: NormalizedRequest, avg: Decimal, r: SpotRules): strin
   return null;
 }
 
-/** Returns a rejection reason, or null if the order passes every Binance spot filter. */
+/** Order types whose filters use the average price: NOTIONAL for market, PERCENT_PRICE_BY_SIDE for limits. */
+function usesAvgPrice(type: NormalizedRequest['type']): boolean {
+  return type === 'market' || type === 'limit' || type === 'post_only';
+}
+
+/**
+ * Returns a rejection reason, or null if the order passes every Binance spot filter.
+ * Orders whose filters use the average price are rejected when it is unavailable; stops and
+ * take-profits (NOTIONAL on the trigger price, no PERCENT_PRICE_BY_SIDE) do not need it.
+ */
 export function validateSpotOrder(
   req: NormalizedRequest,
   rules: SpotRules,
   ctx: RuleContext,
 ): string | null {
-  if (!ctx.avgPrice || ctx.avgPrice.lte(0)) return 'Average price unavailable; order rejected (never guessed)';
-  const avg = ctx.avgPrice;
+  const avg = ctx.avgPrice && ctx.avgPrice.gt(0) ? ctx.avgPrice : null;
+  if (!avg && usesAvgPrice(req.type)) return 'Average price unavailable; order rejected (never guessed)';
 
   if (ctx.openOrders >= rules.maxNumOrders) {
     return `MAX_NUM_ORDERS: already ${ctx.openOrders} open orders on ${rules.symbol} (maximum ${rules.maxNumOrders})`;

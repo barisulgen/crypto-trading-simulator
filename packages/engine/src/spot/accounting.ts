@@ -1,6 +1,6 @@
 import { D } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
-import type { Basis, EngineCtx, EngineEvent, Fill, RoundTrip, SpotOrder, SpotRules } from '../types.ts';
+import type { Basis, EngineCtx, EngineEvent, Fill, RoundTrip, Side, SpotOrder, SpotRules } from '../types.ts';
 import type { SpotState } from './state.ts';
 
 /**
@@ -66,6 +66,16 @@ export function applySellToBasis(
     realized,
     closed,
   };
+}
+
+/**
+ * Throws if selling `qty` would exceed the coin's cost basis, an invariant breach (coins only
+ * arrive through buys). Fill paths call it before settling, so nothing has changed when it throws.
+ */
+export function assertBasisCovers(s: SpotState, rules: SpotRules, side: Side, qty: Decimal): void {
+  if (side !== 'sell') return;
+  const held = s.basis[rules.base]?.qty ?? D(0);
+  if (qty.gt(held)) throw new Error(`${rules.symbol}: cannot sell ${qty} against a cost basis of ${held}`);
 }
 
 /**

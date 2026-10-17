@@ -127,12 +127,13 @@ export function previewStop(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx)
 /**
  * Arrival of a pending stop, or of both legs of a pending pair at once: armed ('open'), or
  * rejected when the data is stale or it would trigger now (as the exchange would reject it).
- * A pair attached to a buy is exchange-side (like Binance's OTOCO), so our stale feed never
- * rejects it: its legs wait (arrivesAt null) and arm on the first fresh book (armWaitingPairs).
+ * A pair attached to a buy is exchange-side (like Binance's OTOCO), so gaps in our data (stale
+ * feed, no last price) never reject it: its legs wait (arrivesAt null) and arm on the first fresh
+ * book that has a last price (armWaitingPairs).
  */
 export function arriveStop(s: SpotState, order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
   const legs = order.ocoGroupId ? pairLegs(s, order.ocoGroupId).filter((l) => l.status === 'pending') : [order];
-  if (order.parentId !== null && !ctx.market.isFresh(order.symbol)) {
+  if (order.parentId !== null && !canArmNow(order.symbol, ctx)) {
     for (const l of legs) s.orders.set(l.id, { ...l, arrivesAt: null });
     return [];
   }
@@ -140,6 +141,11 @@ export function arriveStop(s: SpotState, order: SpotOrder, ctx: EngineCtx): Engi
   if (reason !== null) return legs.flatMap((l) => rejectPending(s, l, reason, ctx));
   for (const l of legs) s.orders.set(l.id, { ...l, status: 'open' });
   return [];
+}
+
+/** Our data can judge "would trigger now": the book is fresh and there is a last price. */
+function canArmNow(symbol: string, ctx: EngineCtx): boolean {
+  return ctx.market.isFresh(symbol) && ctx.market.lastPrice(symbol) !== null;
 }
 
 function armReason(legs: SpotOrder[], ctx: EngineCtx): string | null {
@@ -206,7 +212,7 @@ export function arriveTriggered(s: SpotState, order: SpotOrder, ctx: EngineCtx):
   return executeTriggered(s, order, ctx);
 }
 
-/** Arm (or reject) the attached pairs of `symbol` that waited for fresh data. */
+/** Arm (or reject) the attached pairs of `symbol` that waited for data (fresh book, last price). */
 export function armWaitingPairs(s: SpotState, symbol: string, ctx: EngineCtx): EngineEvent[] {
   if (!ctx.market.isFresh(symbol)) return [];
   const waiting = [...s.orders.values()].filter(
@@ -339,7 +345,7 @@ interface PairAmounts {
  * share a group id and one arrival; the coins are locked once, on the stop-loss leg.
  * On any problem both legs are recorded as rejected with the same reason.
  * A pair attached to a buy (`parentId`) placed while the data is stale waits for fresh data
- * (arrivesAt null) instead of being rejected; whether it would trigger now is checked then.
+ * (arrivesAt null) instead of being rejected; whether it would trigger now is checked when it arms.
  */
 function placePair(
   s: SpotState,
@@ -379,7 +385,8 @@ function placePair(
 
 /**
  * Freshness, amounts, filters for each leg (a pair counts as two algo orders), trigger-now, funds.
- * An attached pair skips freshness, and trigger-now while stale (it is checked when it arms).
+ * An attached pair skips freshness, and skips trigger-now while our data cannot judge it (stale or
+ * no last price); that is checked when it arms.
  */
 function pairReason(
   s: SpotState,
@@ -401,7 +408,8 @@ function pairReason(
       rules,
       { avgPrice, openOrders: counts.openOrders + extra, openAlgoOrders: counts.openAlgoOrders + extra },
     );
-  const invalid = check(sl, 0) ?? check(tp, 1) ?? (fresh ? armReason([sl, tp], ctx) : null);
+  const triggerNow = sl.parentId === null || canArmNow(symbol, ctx);
+  const invalid = check(sl, 0) ?? check(tp, 1) ?? (triggerNow ? armReason([sl, tp], ctx) : null);
   if (invalid) return invalid;
   const free = freeOf(s, 'spot', rules.base);
   if (sl.qty!.gt(free)) return `Insufficient ${rules.base}: need ${sl.qty}, available ${free}`;

@@ -61,6 +61,18 @@ describe('validateSpotOrder', () => {
       'Average price unavailable; order rejected (never guessed)',
     );
   });
+  it('average price unavailable: limits and post-only are rejected; stops and take-profits do not use it', () => {
+    const missing = 'Average price unavailable; order rejected (never guessed)';
+    expect(check({ side: 'buy', type: 'limit', price: D('99'), qty: D('1') }, { avgPrice: null })).toBe(missing);
+    expect(check({ side: 'sell', type: 'post_only', price: D('101'), qty: D('1') }, { avgPrice: null })).toBe(missing);
+    const noAvg = { avgPrice: null };
+    expect(check({ side: 'sell', type: 'stop_loss', triggerPrice: D('95'), qty: D('1') }, noAvg)).toBeNull();
+    expect(check({ side: 'sell', type: 'take_profit', triggerPrice: D('110'), qty: D('1') }, noAvg)).toBeNull();
+    // Their own filters still apply without it.
+    expect(check({ side: 'sell', type: 'stop_loss', triggerPrice: D('95'), qty: D('0.05') }, { avgPrice: null })).toBe(
+      'NOTIONAL: order value 4.75 is below the minimum 5',
+    );
+  });
   it('accepts a valid limit buy', () => {
     expect(check({ side: 'buy', type: 'limit', price: D('99'), qty: D('1') })).toBeNull();
   });

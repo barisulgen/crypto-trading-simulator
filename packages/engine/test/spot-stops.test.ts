@@ -153,6 +153,19 @@ describe('placing a stop', () => {
     expect(rejectReason(engine.submit(sellStop('99.00', '1'), ctx))).toBe('Last price unavailable for BTCUSDT');
   });
 
+  it('owner stops: no average price needed; a missing last price rejects at arrival and for a pair', () => {
+    const { market, ctx, engine, stored } = setup();
+    market.setAvgPrice('BTCUSDT', null);
+    const id = arm(engine, sellStop('99.00', '0.5'), ctx);
+    expect(stored(id).status).toBe('open');
+
+    const pending = placed(engine.submit(sellStop('98.00', '0.5'), ctx));
+    market.setLastPrice('BTCUSDT', null);
+    expect(rejectReason(arriveNow(engine, pending, ctx))).toBe('Last price unavailable for BTCUSDT');
+    const pair = engine.attachOco({ symbol: 'BTCUSDT', qty: '0.5', stopLoss: '95', takeProfit: '110' }, ctx);
+    expect(reasons(pair)).toEqual(['Last price unavailable for BTCUSDT', 'Last price unavailable for BTCUSDT']);
+  });
+
   it('request problems: trigger missing, filters, funds, attach on a stop', () => {
     const { ctx, engine } = setup({ usdt: '50' });
     expect(rejectReason(engine.submit(stop('sell', 'stop_loss', '', { qty: '1' }), ctx))).toBe('Enter a trigger price');
@@ -691,6 +704,56 @@ describe('pair attached to a buy', () => {
       'Take-profit would trigger immediately (last 111, trigger 110)',
     ]);
     expect(s(bal('BTC').locked)).toBe('0');
+  });
+
+  it('average price unavailable at a stale activation → the attached pair still waits pending and arms later', () => {
+    const { market, ctx, engine, stored } = setup();
+    const parent = placed(engine.submit(limitBuy('1'), ctx));
+    arriveNow(engine, parent, ctx);
+    engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
+    market.setFresh('BTCUSDT', false);
+    market.setAvgPrice('BTCUSDT', null);
+    const r = engine.cancel(parent.id, ctx);
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
+    const [sl, tp] = placedOrders(r.events) as [SpotOrder, SpotOrder];
+    expect([sl.status, sl.arrivesAt]).toEqual(['pending', null]);
+
+    market.setFresh('BTCUSDT', true); // the average price is still missing: stops do not need it
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+    expect([stored(sl.id).status, stored(tp.id).status]).toEqual(['open', 'open']);
+  });
+
+  it('last price unavailable when an attached pair arms → legs stay pending, then arm once it is back', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const parent = placed(engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1', attach }, ctx));
+    const [sl, tp] = placedOrders(arriveNow(engine, parent, ctx)) as [SpotOrder, SpotOrder];
+    market.setLastPrice('BTCUSDT', null);
+    expect(arriveNow(engine, sl, ctx)).toEqual([]);
+    expect([stored(sl.id).status, stored(sl.id).arrivesAt]).toEqual(['pending', null]);
+    expect([stored(tp.id).status, stored(tp.id).arrivesAt]).toEqual(['pending', null]);
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+    expect(stored(sl.id).status).toBe('pending');
+    expect(s(bal('BTC').locked)).toBe('0.999');
+
+    market.setLastPrice('BTCUSDT', D('99.95'));
+    expect(engine.onTrade('BTCUSDT', trade('99.95'), ctx)).toEqual([]);
+    expect([stored(sl.id).status, stored(tp.id).status]).toEqual(['open', 'open']);
+    expect(s(bal('BTC').locked)).toBe('0.999');
+  });
+
+  it('last price unavailable at activation (fresh) → the attached pair is placed and waits, not rejected', () => {
+    const { market, ctx, engine, stored } = setup();
+    const parent = placed(engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1', attach }, ctx));
+    market.setLastPrice('BTCUSDT', null);
+    const events = arriveNow(engine, parent, ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill', 'order_placed', 'order_placed']);
+    const [sl] = placedOrders(events) as [SpotOrder, SpotOrder];
+    expect(arriveNow(engine, sl, ctx)).toEqual([]);
+    expect(stored(sl.id).status).toBe('pending');
+    market.setLastPrice('BTCUSDT', D('99.95'));
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+    expect(stored(sl.id).status).toBe('open');
   });
 
   it('market buy with a pair: activates when the market order fills at arrival', () => {

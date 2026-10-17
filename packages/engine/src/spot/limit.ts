@@ -15,7 +15,7 @@ import type {
   SpotOrderRequest,
   SpotRules,
 } from '../types.ts';
-import { recordFill } from './accounting.ts';
+import { assertBasisCovers, recordFill } from './accounting.ts';
 import { allocateTradeThrough } from './matching.ts';
 import {
   applyFill,
@@ -150,6 +150,7 @@ function makerFill(
   book: BookSnapshot,
   ctx: EngineCtx,
 ): EngineEvent[] {
+  assertBasisCovers(s, rules, order.side, qty);
   const buy = order.side === 'buy';
   const price = order.price!;
   const quote = qty.mul(price);

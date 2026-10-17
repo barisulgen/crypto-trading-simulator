@@ -226,6 +226,55 @@ describe('accounting on engine fills', () => {
   });
 });
 
+describe('accounting on engine fills: dust and invariant', () => {
+  it('a sell leaving 0.00004 BTC closes the trip; the dust stays in the basis and joins the next trip', () => {
+    const { ctx, engine } = setup();
+    const buy = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1' }, ctx));
+    arriveNow(engine, buy, ctx); // 0.5 @ 100 + 0.5 @ 100.10 = 100.05 for a net 0.999 BTC
+    expect(s(engine.state.basis.BTC!.cost)).toBe('100.05');
+
+    const sell = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.99896' }, ctx));
+    const events = arriveNow(engine, sell, ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill', 'round_trip_closed']);
+    const closed = events[1]!;
+    if (closed.type !== 'round_trip_closed') throw new Error('expected round_trip_closed');
+    expect(closed.roundTrip.id).toBe('rt1');
+    expect(s(closed.roundTrip.pnl)).toBe(s(fills(events)[0]!.realizedPnl));
+
+    const dust = engine.state.basis.BTC!;
+    expect(s(dust.qty)).toBe('0.00004');
+    expect(s(holdings(engine))).toBe('0.00004');
+    expect(dust.cost.toFixed(8)).toBe('0.00400601'); // 100.05 × 0.00004 / 0.999
+    expect(dust.roundTripId).toBeNull();
+
+    const again = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1' }, ctx));
+    const [f] = fills(arriveNow(engine, again, ctx)) as [Fill];
+    expect(f.roundTripId).toBe('rt2');
+    const next = engine.state.basis.BTC!;
+    expect(next.roundTripId).toBe('rt2');
+    expect(s(next.qty)).toBe('0.99904');
+    expect(s(next.cost)).toBe(s(dust.cost.plus('100.05')));
+  });
+
+  it('a sell with no cost basis behind it throws before any balance or order changes', () => {
+    const { ctx, engine } = setup();
+    engine.state.balances.spot.BTC!.free = D('2'); // coins that never came through a buy
+    const sell = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.5' }, ctx));
+    const before = JSON.stringify([engine.state.balances, [...engine.state.orders.values()]]);
+    expect(() => arriveNow(engine, sell, ctx)).toThrow('BTCUSDT: cannot sell 0.5 against a cost basis of 0');
+    expect(JSON.stringify([engine.state.balances, [...engine.state.orders.values()]])).toBe(before);
+
+    // Same for a maker fill of a resting limit sell.
+    const lim = placedOrder(
+      engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '101', qty: '0.5' }, ctx),
+    );
+    arriveNow(engine, lim, ctx);
+    const beforeMaker = JSON.stringify([engine.state.balances, [...engine.state.orders.values()]]);
+    expect(() => engine.onTrade('BTCUSDT', trade('101.01', '1', false), ctx)).toThrow('cannot sell 0.5');
+    expect(JSON.stringify([engine.state.balances, [...engine.state.orders.values()]])).toBe(beforeMaker);
+  });
+});
+
 describe('valueAccount', () => {
   it('USDT 879.93, BTC 1.1988 at bid 99.90 → total 999.69012, net P&L −0.30988 on 1000 deposited', () => {
     const { market, ctx, engine } = setup();
