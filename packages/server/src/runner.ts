@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { D, Decimal, arrivalDelay, releaseFunds, valueAccount } from '@sim/engine';
+import { Decimal, RESTART_REASON, arrivalDelay, valueAccount } from '@sim/engine';
 import type {
   AccountValue,
   ActionResult,
@@ -25,7 +25,7 @@ import type { Logger } from './log.ts';
 import type { HealthTransition } from './market/feedHealth.ts';
 import type { SetTimer } from './market/ws.ts';
 
-export const RESTART_REASON = 'Server restarted before execution';
+export { RESTART_REASON };
 export const INTEGRITY_REFUSAL = 'Account state failed integrity check; see server log';
 export const OFFLINE_REASON = 'Server offline';
 const STOPPED_REFUSAL = 'Server stopped after an internal error; see server log';
@@ -137,12 +137,16 @@ export class EngineRunner {
     this.every(EQUITY_MS, () => this.snapshotEquity());
   }
 
-  /** Stops trades, timers and pending arrival timers. */
+  /**
+   * Stops trades, timers and pending arrival timers, and records every gap still open as a
+   * feed_gap ending now (after a fatal error nothing more is written).
+   */
   stop(): void {
     this.started = false;
     this.d.market.off('trade', this.tradeListener);
     for (const cancel of this.timers) cancel();
     this.timers.clear();
+    this.closeOpenGaps();
   }
 
   // ---- actions (each persisted before it returns) ----
@@ -248,6 +252,24 @@ export class EngineRunner {
     for (const n of noticesFor(events, (s) => this.rulesOf(s))) this.d.onBroadcast({ type: 'notice', ...n });
   }
 
+  private closeOpenGaps(): void {
+    if (this.dead || this.staleSince.size === 0) return;
+    const now = this.d.now();
+    const gaps: FeedGap[] = [...this.staleSince].map(([symbol, s]) => ({
+      symbol,
+      market: 'spot',
+      startedAt: s.at,
+      endedAt: now,
+      reason: s.reason,
+    }));
+    this.staleSince.clear();
+    try {
+      persist(this.d.db, this.d.seasonId, this.d.engine.state, [], { feedGaps: gaps });
+    } catch (e) {
+      this.die('persist failed', e);
+    }
+  }
+
   private die(what: string, e: unknown): void {
     if (this.dead) return;
     this.dead = true;
@@ -304,9 +326,10 @@ export class EngineRunner {
   }
 
   /**
-   * Startup: pending market orders are rejected; other pending orders are sent again with
-   * a fresh arrival delay (a pair's legs share one). Triggered orders and attached pairs waiting
-   * for data (arrivesAt null) are left to onFresh.
+   * Startup: pending market orders are rejected (engine.rejectRestartedMarket); other pending
+   * orders are sent again with a fresh arrival delay (a pair's legs share one). Every order with
+   * an arrival time - re-armed, or triggered before the restart - gets its arrive() scheduled;
+   * triggered orders and attached pairs waiting for data (arrivesAt null) are left to onFresh.
    */
   private recover(): void {
     const state = this.d.engine.state;
@@ -316,10 +339,7 @@ export class EngineRunner {
     for (const o of [...state.orders.values()]) {
       if (o.status !== 'pending') continue;
       if (o.type === 'market') {
-        releaseFunds(state, o.lockAsset, o.lockAmount);
-        const rejected: SpotOrder = { ...o, status: 'rejected', rejectReason: RESTART_REASON, lockAmount: D(0) };
-        state.orders.set(o.id, rejected);
-        events.push({ type: 'order_rejected', time: ctx.now, order: rejected, reason: RESTART_REASON });
+        events.push(...this.d.engine.rejectRestartedMarket(o.id, ctx));
       } else if (o.arrivesAt !== null) {
         const key = o.ocoGroupId ?? o.id;
         const at = rearmed.get(key) ?? ctx.now + arrivalDelay(ctx);
@@ -333,7 +353,7 @@ export class EngineRunner {
       return; // fatal, already reported
     }
     for (const o of state.orders.values()) {
-      if (o.status === 'pending' && o.arrivesAt !== null && rearmed.has(o.ocoGroupId ?? o.id)) {
+      if ((o.status === 'pending' || o.status === 'triggered') && o.arrivesAt !== null) {
         this.scheduleArrival(o.id, o.arrivesAt);
       }
     }

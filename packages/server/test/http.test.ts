@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { D, SpotEngine } from '@sim/engine';
 import type { FastifyInstance } from 'fastify';
@@ -34,7 +37,7 @@ class FakeCandles {
   }
 }
 
-async function makeApp(opts: { password?: boolean } = {}) {
+async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
   const db = openDb(':memory:');
   const clock = new FakeClock(T0);
   const seasonId = currentSeasonId(db, () => clock.now);
@@ -73,6 +76,7 @@ async function makeApp(opts: { password?: boolean } = {}) {
     fees: config.fees,
     appPassword: opts.password === false ? null : config.appPassword,
     logger,
+    webDist: opts.webDist ?? null,
   });
 
   let cookie = '';
@@ -146,6 +150,43 @@ describe('auth', () => {
     ws.terminate();
   });
 
+  it('LAN mode gates the matched route: percent-encoded /api and /ws paths still need the session', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    expect((await t.call('GET', '/%61pi/account')).status).toBe(401);
+    expect((await t.call('GET', '/%61%70%69/account')).status).toBe(401);
+    expect((await t.call('GET', '/api/%61ccount')).status).toBe(401);
+    expect((await t.call('POST', '/%61pi/deposit', { wallet: 'spot', amount: '1000' })).status).toBe(401);
+    expect(t.runner.state.totalDeposited.toString()).toBe('0');
+    expect(t.db.prepare("SELECT count(*) AS n FROM events WHERE type = 'deposit'").get()).toEqual({ n: 0 });
+    await expect(t.app.injectWS('/%77s')).rejects.toThrow('Unexpected server response: 401');
+    // Unknown routes are denied too (deny by default); only POST /api/login is open.
+    expect((await t.call('GET', '/nothing-here')).status).toBe(401);
+    expect((await t.call('GET', '/api/login')).status).toBe(401);
+    await t.login();
+    expect((await t.call('GET', '/%61pi/account')).status).toBe(200);
+  });
+
+  it('LAN mode serves the static web UI without a session, but nothing else', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sim-web-'));
+    writeFileSync(join(dir, 'index.html'), '<!doctype html><title>sim</title>');
+    try {
+      const t = await makeApp({ webDist: dir });
+      apps.push(t.app);
+      const index = await t.app.inject({ method: 'GET', url: '/' });
+      expect(index.statusCode).toBe(200);
+      expect(index.body).toContain('<title>sim</title>');
+      expect((await t.app.inject({ method: 'GET', url: '/index.html' })).statusCode).toBe(200);
+      expect((await t.call('GET', '/%61pi/account')).status).toBe(401);
+      // An unknown /api path falls to the static wildcard: a plain 404 from web/dist, no data.
+      expect(await t.call('GET', '/api/nothing')).toMatchObject({ status: 404 });
+      await expect(t.app.injectWS('/%77s')).rejects.toThrow('Unexpected server response: 401');
+      seen.push(index.body);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('without a password, needs no login but refuses foreign Host and Origin headers', async () => {
     const t = await makeApp({ password: false });
     apps.push(t.app);
@@ -158,7 +199,12 @@ describe('auth', () => {
       headers: { origin: 'http://evil.example' },
     });
     expect(origin.statusCode).toBe(403);
-    seen.push(evil.body, origin.body);
+    const encoded = await t.app.inject({ method: 'GET', url: '/%61pi/account', headers: { host: 'evil.example' } });
+    expect(encoded.statusCode).toBe(403);
+    await expect(t.app.injectWS('/%77s', { headers: { origin: 'http://evil.example' } })).rejects.toThrow(
+      'Unexpected server response: 403',
+    );
+    seen.push(evil.body, origin.body, encoded.body);
   });
 });
 

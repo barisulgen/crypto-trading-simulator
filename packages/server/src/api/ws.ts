@@ -14,6 +14,12 @@ const BOOK_MIN_GAP_MS = 250;
 const BOOK_LEVELS = 20;
 const TRADES_ON_SUBSCRIBE = 50;
 const OPEN = 1;
+/** Above this much unsent data, live messages to the client are skipped (it catches up on the next ones). */
+const SKIP_BUFFER_BYTES = 1024 * 1024;
+/** Above this, the client is too far behind or gone: terminated. */
+const TERMINATE_BUFFER_BYTES = 4 * 1024 * 1024;
+/** Ping interval; a client that has not answered the previous ping by the next one is terminated. */
+const HEARTBEAT_MS = 30_000;
 
 /** What the hub reads from MarketData. */
 export interface HubMarket {
@@ -28,7 +34,11 @@ export interface HubMarket {
 /** The slice of a `ws` WebSocket the hub uses. */
 export interface HubSocket {
   readonly readyState: number;
+  /** Bytes queued but not yet sent. */
+  readonly bufferedAmount: number;
   send(data: string): void;
+  ping(): void;
+  terminate(): void;
   on(event: string, cb: (...args: any[]) => void): unknown;
 }
 
@@ -44,6 +54,8 @@ export interface HubDeps {
 interface Client {
   symbol: string | null;
   unsubscribeKline: (() => void) | null;
+  /** Answered the last ping (or connected since it). */
+  alive: boolean;
 }
 
 /**
@@ -51,6 +63,9 @@ interface Client {
  * 5 s and on change) and the runner's account / orders / notice messages; a client that sent
  * `{ type: 'subscribe', symbol, interval }` also gets that symbol's book (top 20, at most 4/s),
  * trades and klines. Every message is JSON with decimals as strings.
+ * Backpressure: live messages are skipped while a client has more than 1 MB unsent and the
+ * client is terminated above 4 MB; a client that misses a 30 s ping is terminated. Whenever a
+ * client goes, its kline subscription is released.
  */
 export class ClientHub {
   private readonly clients = new Map<HubSocket, Client>();
@@ -74,6 +89,7 @@ export class ClientHub {
     this.every(HEALTH_MS, () => {
       if (this.clients.size > 0) this.broadcast({ type: 'health', health: this.d.market.healthSnapshot() });
     });
+    this.every(HEARTBEAT_MS, () => this.heartbeat());
   }
 
   stop(): void {
@@ -89,22 +105,25 @@ export class ClientHub {
 
   /** A new connection: snapshot first (tickers, health, account, orders), then live messages. */
   add(socket: HubSocket): void {
-    const client: Client = { symbol: null, unsubscribeKline: null };
+    const client: Client = { symbol: null, unsubscribeKline: null, alive: true };
     this.clients.set(socket, client);
     socket.on('message', (raw: unknown) => this.onMessage(socket, client, raw));
+    socket.on('pong', () => {
+      client.alive = true;
+    });
     socket.on('close', () => this.remove(socket));
     socket.on('error', () => this.remove(socket));
-    this.sendTo(socket, { type: 'tickers', tickers: this.d.market.tickers() });
-    this.sendTo(socket, { type: 'health', health: this.d.market.healthSnapshot() });
-    this.sendTo(socket, { type: 'account', account: this.d.runner.account() });
-    this.sendTo(socket, { type: 'orders', orders: this.d.runner.openOrders() });
+    this.sendTo(socket, { type: 'tickers', tickers: this.d.market.tickers() }, true);
+    this.sendTo(socket, { type: 'health', health: this.d.market.healthSnapshot() }, true);
+    this.sendTo(socket, { type: 'account', account: this.d.runner.account() }, true);
+    this.sendTo(socket, { type: 'orders', orders: this.d.runner.openOrders() }, true);
   }
 
   /** Send to every client (the runner's account, orders, notice and health messages). */
   broadcast(msg: object): void {
     if (this.clients.size === 0) return;
     const text = toJson(msg);
-    for (const socket of this.clients.keys()) this.write(socket, text);
+    for (const socket of [...this.clients.keys()]) this.write(socket, text);
   }
 
   private remove(socket: HubSocket): void {
@@ -112,6 +131,32 @@ export class ClientHub {
     if (!c) return;
     c.unsubscribeKline?.();
     this.clients.delete(socket);
+  }
+
+  /** Forget the client (releasing its kline subscription) and kill its socket. */
+  private drop(socket: HubSocket, why: string): void {
+    this.d.logger.warn(`ws client terminated: ${why}`);
+    this.remove(socket);
+    try {
+      socket.terminate();
+    } catch {
+      // already gone
+    }
+  }
+
+  private heartbeat(): void {
+    for (const [socket, c] of [...this.clients]) {
+      if (!c.alive) {
+        this.drop(socket, 'no pong since the last ping');
+        continue;
+      }
+      c.alive = false;
+      try {
+        socket.ping();
+      } catch {
+        this.drop(socket, 'ping failed');
+      }
+    }
   }
 
   private onMessage(socket: HubSocket, client: Client, raw: unknown): void {
@@ -139,8 +184,10 @@ export class ClientHub {
     } catch (e) {
       this.d.logger.warn(`kline subscribe ${symbol} ${interval} failed: ${(e as Error).message}`);
     }
-    this.sendTo(socket, { type: 'book', symbol, ...this.d.market.bookTop(symbol, BOOK_LEVELS) });
-    this.sendTo(socket, { type: 'trades', symbol, trades: this.d.market.recentTrades(symbol, TRADES_ON_SUBSCRIBE) });
+    // The subscription's starting snapshot.
+    this.sendTo(socket, { type: 'book', symbol, ...this.d.market.bookTop(symbol, BOOK_LEVELS) }, true);
+    const trades = this.d.market.recentTrades(symbol, TRADES_ON_SUBSCRIBE);
+    this.sendTo(socket, { type: 'trades', symbol, trades }, true);
   }
 
   private readonly onBook = (symbol: string): void => {
@@ -175,20 +222,25 @@ export class ClientHub {
 
   private toSubscribers(symbol: string, msg: object): void {
     const text = toJson(msg);
-    for (const [socket, c] of this.clients) if (c.symbol === symbol) this.write(socket, text);
+    for (const [socket, c] of [...this.clients]) if (c.symbol === symbol) this.write(socket, text);
   }
 
-  private sendTo(socket: HubSocket, msg: object): void {
-    this.write(socket, toJson(msg));
+  private sendTo(socket: HubSocket, msg: object, snapshot = false): void {
+    this.write(socket, toJson(msg), snapshot);
   }
 
-  private write(socket: HubSocket, text: string): void {
+  /** Snapshot messages are always sent (unless the client is terminated); live ones yield to backpressure. */
+  private write(socket: HubSocket, text: string, snapshot = false): void {
     if (socket.readyState !== OPEN) return;
+    if (socket.bufferedAmount > TERMINATE_BUFFER_BYTES) {
+      this.drop(socket, `${socket.bufferedAmount} bytes unsent`);
+      return;
+    }
+    if (!snapshot && socket.bufferedAmount > SKIP_BUFFER_BYTES) return;
     try {
       socket.send(text);
     } catch (e) {
-      this.d.logger.warn(`ws send failed: ${(e as Error).message}`);
-      this.remove(socket);
+      this.drop(socket, `send failed: ${(e as Error).message}`);
     }
   }
 

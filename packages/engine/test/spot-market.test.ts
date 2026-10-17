@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
-import { SpotEngine } from '../src/spot/engine.ts';
+import { RESTART_REASON, SpotEngine } from '../src/spot/engine.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import type { EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest } from '../src/types.ts';
 import { FakeMarket, seedCoins, testCtx } from './fixtures.ts';
@@ -453,5 +453,31 @@ describe('unknown order type', () => {
     expect(p.rejectReason).toBe('Unknown order type');
     expect(p.estAvgPrice).toBeNull();
     expect(p.total).toBeNull();
+  });
+});
+
+describe('server restart', () => {
+  it('rejectRestartedMarket rejects a pending market order and releases its lock', () => {
+    const { ctx, engine, bal } = setup('1000');
+    const order = placed(engine.submit(buy({ qty: '1' }), ctx));
+    expect(bal('USDT').locked.toString()).toBe('100.05');
+    const events = engine.rejectRestartedMarket(order.id, ctx);
+    expect(RESTART_REASON).toBe('Server restarted before execution');
+    expect(rejectReason(events)).toBe('Server restarted before execution');
+    expect(engine.state.orders.get(order.id)).toMatchObject({ status: 'rejected', lockAmount: D(0) });
+    expect(bal('USDT').locked.toString()).toBe('0');
+    expect(bal('USDT').free.toString()).toBe('1000');
+  });
+
+  it('rejectRestartedMarket ignores unknown ids, non-market and non-pending orders', () => {
+    const { ctx, engine } = setup('1000');
+    const limit = placed(engine.submit(buy({ type: 'limit', qty: '1', price: '99.50' }), ctx));
+    expect(engine.rejectRestartedMarket(limit.id, ctx)).toEqual([]);
+    expect(engine.rejectRestartedMarket('nope', ctx)).toEqual([]);
+    const market = placed(engine.submit(buy({ qty: '0.1' }), ctx));
+    ctx.now = market.arrivesAt!;
+    engine.arrive(market.id, ctx);
+    expect(engine.rejectRestartedMarket(market.id, ctx)).toEqual([]);
+    expect(engine.state.orders.get(market.id)!.status).toBe('filled');
   });
 });

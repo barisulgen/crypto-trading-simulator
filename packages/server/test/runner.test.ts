@@ -237,8 +237,51 @@ describe('EngineRunner', () => {
     b.runner.start();
     expect(b.orderRow(order.id)!.status).toBe('filled');
     expect(b.eventsOf('feed_gap').map((g) => g.payload)).toEqual([
+      // closed by a.runner.stop(): stale since the poll at T0 + 1 s, stopped at T0 + 5.5 s
+      { startedAt: T0 + 1000, endedAt: T0 + 5500, reason: 'Disconnected' },
       { startedAt: lastAlive, endedAt: startAt, reason: 'Server offline' },
     ]);
+  });
+
+  it('stop() persists a gap still open at shutdown, ending at the stop time', () => {
+    const t = setup();
+    t.runner.start();
+    t.market.setFresh('BTCUSDT', false);
+    t.clock.advance(1000); // stale at T0 + 1000
+    t.clock.advance(4500);
+    t.runner.stop(); // at T0 + 5500
+    expect(t.eventsOf('feed_gap').map((g) => g.payload)).toEqual([
+      { startedAt: T0 + 1000, endedAt: T0 + 5500, reason: 'Disconnected' },
+    ]);
+    t.runner.stop(); // a second stop records nothing more
+    expect(t.eventsOf('feed_gap')).toHaveLength(1);
+  });
+
+  it.each([
+    ['past (down longer than the delay)', 60_000],
+    ['future (restarted within the delay)', 0],
+  ])('restart: schedules arrive() for a triggered order whose arrivesAt is %s', (_label, downMs) => {
+    const a = setup();
+    a.runner.start();
+    withBtc(a);
+    const order = submittedOrder(a.runner.submit(stopSell('0.4', '99')));
+    a.clock.advance(100);
+    a.market.trade('BTCUSDT', trade('98.90'));
+    const arrivesAt = a.engine.state.orders.get(order.id)!.arrivesAt!;
+    expect(arrivesAt).toBe(a.clock.now + 100);
+    a.runner.stop();
+    a.clock.advance(downMs);
+
+    // Not started: no health poll / onFresh / trades, so only a scheduled arrive() can fill it.
+    const b = setup({ db: a.db, clock: a.clock });
+    expect(b.engine.state.orders.get(order.id)!.status).toBe('triggered');
+    const wait = Math.max(0, arrivesAt - b.clock.now);
+    if (wait > 0) {
+      b.clock.advance(wait - 1);
+      expect(b.orderRow(order.id)!.status).toBe('triggered');
+    }
+    b.clock.advance(wait > 0 ? 1 : 0);
+    expect(b.orderRow(order.id)!.status).toBe('filled');
   });
 
   it('a persist failure is fatal: logged, onFatal called, nothing more runs', () => {

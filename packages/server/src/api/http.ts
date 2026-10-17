@@ -88,7 +88,8 @@ function queryInt(q: Query, key: string, min: number, max: number): number | und
 export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 16 * 1024 });
   await app.register(websocket, { options: { maxPayload: 4096 } });
-  registerAuth(app, { appPassword: d.appPassword, logger: d.logger });
+  // @fastify/static serves the UI under the wildcard route '/*' (and its HEAD twin).
+  registerAuth(app, { appPassword: d.appPassword, logger: d.logger, publicRoutes: d.webDist ? ['/*'] : [] });
 
   app.setErrorHandler((err: unknown, req, reply) => {
     if (err instanceof InputError) return send(reply, 400, { error: err.message });

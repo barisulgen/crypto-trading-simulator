@@ -48,6 +48,7 @@ import type { OcoRequest } from './stops.ts';
 import { isStopType } from './triggers.ts';
 
 export const UNKNOWN_ORDER_TYPE = 'Unknown order type';
+export const RESTART_REASON = 'Server restarted before execution';
 
 /** Everything submit and preview work out for a market order before touching state. */
 interface MarketPlan {
@@ -201,6 +202,16 @@ export class SpotEngine {
       { type: 'order_cancelled', time: ctx.now, order: cancelled, reason: 'user', cancelledQty },
     ];
     return { ok: true, events: activateAttachedPairs(this.s, events, ctx) };
+  }
+
+  /**
+   * On restart: a market order still waiting for its arrival delay never reached the
+   * exchange, so it is rejected and its lock released. A no-op for any other order.
+   */
+  rejectRestartedMarket(orderId: string, ctx: EngineCtx): EngineEvent[] {
+    const order = this.s.orders.get(orderId);
+    if (!order || order.type !== 'market' || order.status !== 'pending') return [];
+    return rejectPending(this.s, order, RESTART_REASON, ctx);
   }
 
   /** What submit would do right now, without changing state. */

@@ -5,12 +5,6 @@ import type { Logger } from '../log.ts';
 export const SESSION_COOKIE = 'sim_session';
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
-/** /api/* and /ws are gated; the static web UI is not (it shows the login form). */
-function isGated(url: string): boolean {
-  const path = url.split('?')[0]!;
-  return path === '/ws' || path.startsWith('/api/');
-}
-
 const digest = (s: string): Buffer => createHash('sha256').update(s, 'utf8').digest();
 
 function cookieValue(header: string | undefined, name: string): string | null {
@@ -33,14 +27,24 @@ function deny(reply: FastifyReply, code: number, error: string): FastifyReply {
   return reply.code(code).send({ error });
 }
 
+export interface AuthOptions {
+  appPassword: string | null;
+  logger: Logger;
+  /** Matched route patterns open without a session besides POST /api/login (the static web UI). */
+  publicRoutes?: string[];
+}
+
 /**
  * With an APP_PASSWORD (LAN mode), POST /api/login compares the password in constant
- * time and sets an HttpOnly SameSite=Strict session cookie (random token, kept in memory);
- * every /api route and /ws then needs it (401 otherwise).
- * Without one (localhost only), requests whose Host or Origin is not local are refused (403),
- * so another website cannot reach the API through DNS rebinding or a cross-site WebSocket.
+ * time and sets an HttpOnly SameSite=Strict session cookie (random token, kept in memory).
+ * Deny by default: the decision uses the route the router MATCHED (after percent-decoding, so
+ * `/%61pi/account` is `/api/account`), and only POST /api/login and `publicRoutes` are open;
+ * every other route, /ws and unmatched paths need the session (401 otherwise).
+ * Without a password (localhost only), every request whose Host or Origin is not local is
+ * refused (403), so another website cannot reach the API through DNS rebinding or a
+ * cross-site WebSocket.
  */
-export function registerAuth(app: FastifyInstance, opts: { appPassword: string | null; logger: Logger }): void {
+export function registerAuth(app: FastifyInstance, opts: AuthOptions): void {
   if (opts.appPassword === null) {
     app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
       const host = hostnameOf(req.headers.host ?? '', false);
@@ -56,8 +60,15 @@ export function registerAuth(app: FastifyInstance, opts: { appPassword: string |
   const expected = digest(opts.appPassword);
   const sessions = new Set<string>();
 
+  const publicRoutes = new Set(opts.publicRoutes ?? []);
+  const isPublic = (req: FastifyRequest): boolean => {
+    const route = req.routeOptions.url; // undefined when no route matched
+    if (route === undefined) return false;
+    return (route === '/api/login' && req.method === 'POST') || publicRoutes.has(route);
+  };
+
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!isGated(req.url) || req.url.split('?')[0] === '/api/login') return;
+    if (isPublic(req)) return;
     const token = cookieValue(req.headers.cookie, SESSION_COOKIE);
     if (token === null || !sessions.has(token)) return deny(reply, 401, 'Login required');
   });
