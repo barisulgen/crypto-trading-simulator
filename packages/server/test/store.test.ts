@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { D, SpotEngine, emptySpotState } from '@sim/engine';
+import { D, Decimal, SpotEngine, emptySpotState } from '@sim/engine';
 import type { AggTrade, EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest, SpotState } from '@sim/engine';
 import { FakeMarket, seedCoins, testCtx } from '../../engine/test/fixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
@@ -302,5 +302,112 @@ describe('equity snapshot and heartbeat', () => {
     expect(db.prepare('SELECT time, total, deposited, spot_value, leverage_value FROM equity_snapshots').get()).toEqual({
       time: 555, total: '1010.5', deposited: '1000', spot_value: '1000.5', leverage_value: '10',
     });
+  });
+});
+
+describe('history cursor with time order different from id order', () => {
+  it('a late-written feed_gap (older time, higher id) is visited exactly once, in order', () => {
+    const { db, seasonId } = setup();
+    const ins = db.prepare('INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, ?, ?, ?, ?)');
+    ins.run(seasonId, 1000, 'fill', 'BTCUSDT', 'spot', '{}');
+    ins.run(seasonId, 990, 'feed_gap', 'BTCUSDT', 'spot', '{}');
+    const seen: number[] = [];
+    let before: number | undefined;
+    for (let i = 0; i < 5; i++) {
+      const page = queryHistory(db, { seasonId, limit: 1, before });
+      seen.push(...page.rows.map((r) => r.id));
+      if (page.nextBefore === null) break;
+      before = page.nextBefore;
+    }
+    expect(seen).toEqual([1, 2]);
+  });
+
+  it('a full walk over a mixed set returns every row exactly once in (time DESC, id DESC) order', () => {
+    const { db, seasonId } = setup();
+    const ins = db.prepare('INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, ?, ?, ?, ?)');
+    for (const time of [500, 300, 500, 100, 300, 900, 300, 100, 700, 500]) ins.run(seasonId, time, 'fill', 'BTCUSDT', 'spot', '{}');
+    const expected = (db.prepare('SELECT id FROM events ORDER BY time DESC, id DESC').all() as { id: number }[]).map((r) => r.id);
+    for (const limit of [1, 2, 3, 4]) {
+      const seen: number[] = [];
+      let before: number | undefined;
+      for (let i = 0; i < 50; i++) {
+        const page = queryHistory(db, { seasonId, limit, before });
+        seen.push(...page.rows.map((r) => r.id));
+        if (page.nextBefore === null) break;
+        before = page.nextBefore;
+      }
+      expect(seen).toEqual(expected);
+    }
+  });
+});
+
+describe('revived Decimals', () => {
+  it('every Decimal field of a reloaded state is a Decimal instance', () => {
+    const { engine, ctx, db, seasonId } = setup();
+    engine.deposit('spot', D('1000'), ctx);
+    seedCoins(engine.state, 'BTC', D('2'));
+    const buy = placedOrder(engine.submit(limitBuy('99.50', '1', { attach: { stopLoss: '95', takeProfit: '110' } }), ctx));
+    const stop = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'stop_loss', triggerPrice: '99', qty: '0.5' }, ctx));
+    const mkt = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.1' }, ctx));
+    persist(db, seasonId, engine.state, []);
+    const r = loadSpotState(db, seasonId, ASSETS);
+    expect(r.orders.size).toBe(3);
+    const isD = (v: unknown) => v === null || v instanceof Decimal;
+    for (const o of r.orders.values()) {
+      for (const k of ['qty', 'quoteQty', 'price', 'triggerPrice', 'bestAtSubmit'] as const) expect(isD(o[k]), `${o.id}.${k}`).toBe(true);
+      for (const k of ['filledQty', 'filledQuote', 'fee', 'lockAmount'] as const) expect(o[k]).toBeInstanceOf(Decimal);
+    }
+    const reBuy = r.orders.get(buy.id)!;
+    expect(reBuy.attach!.stopLoss).toBeInstanceOf(Decimal);
+    expect(reBuy.attach!.takeProfit).toBeInstanceOf(Decimal);
+    expect(r.orders.get(stop.id)!.triggerPrice).toBeInstanceOf(Decimal);
+    expect(r.orders.get(mkt.id)).toBeDefined();
+    for (const wallet of ['spot', 'leverage'] as const) {
+      for (const b of Object.values(r.balances[wallet])) {
+        expect(b.free).toBeInstanceOf(Decimal);
+        expect(b.locked).toBeInstanceOf(Decimal);
+      }
+    }
+    for (const b of Object.values(r.basis)) {
+      expect(b.qty).toBeInstanceOf(Decimal);
+      expect(b.cost).toBeInstanceOf(Decimal);
+      expect(b.tripRealized).toBeInstanceOf(Decimal);
+    }
+    expect(Object.keys(r.basis).length).toBeGreaterThan(0);
+    expect(r.totalDeposited).toBeInstanceOf(Decimal);
+  });
+
+  it('an engine on the reloaded state cancels a reloaded open limit order and releases its lock', () => {
+    const { engine, ctx, db, seasonId } = setup();
+    engine.deposit('spot', D('1000'), ctx);
+    const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
+    arrive(engine, order, ctx);
+    persist(db, seasonId, engine.state, []);
+    const reloaded = loadSpotState(db, seasonId, ASSETS);
+    const res = new SpotEngine(reloaded).cancel(order.id, ctx);
+    expect(res.ok).toBe(true);
+    expect(reloaded.balances.spot.USDT!.locked.toString()).toBe('0');
+    expect(reloaded.balances.spot.USDT!.free.toString()).toBe('1000');
+    expect(checkInvariants(reloaded)).toEqual([]);
+  });
+
+  it('a negative-zero Decimal is stored as "0" in order data and event payloads', () => {
+    const { engine, ctx, db, seasonId } = setup();
+    engine.deposit('spot', D('1000'), ctx);
+    const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
+    const negZero = { ...order, filledQty: D('-0') };
+    persist(db, seasonId, engine.state, [{ type: 'order_placed', time: ctx.now, order: negZero }]);
+    const { data } = db.prepare('SELECT data FROM orders WHERE id = ?').get(order.id) as { data: string };
+    expect(JSON.parse(data).filledQty).toBe('0');
+    const { payload } = db.prepare('SELECT payload FROM events').get() as { payload: string };
+    expect(JSON.parse(payload).order.filledQty).toBe('0');
+  });
+});
+
+describe('currentSeasonId clock', () => {
+  it('uses the injected time for started_at', () => {
+    const db = openDb(':memory:');
+    currentSeasonId(db, () => 4242);
+    expect(db.prepare('SELECT started_at FROM seasons').get()).toEqual({ started_at: 4242 });
   });
 });

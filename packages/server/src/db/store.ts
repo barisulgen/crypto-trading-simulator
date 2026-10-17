@@ -1,8 +1,7 @@
-import { D, emptySpotState } from '@sim/engine';
+import { D, Decimal, emptySpotState } from '@sim/engine';
 import type {
   AccountValue,
   Basis,
-  Decimal,
   EngineEvent,
   Fill,
   RoundTrip,
@@ -31,16 +30,12 @@ export interface HistoryRow {
 
 // ---- Decimal <-> string ----
 
-function isDecimal(v: unknown): v is Decimal {
-  return typeof v === 'object' && v !== null && 'isDecimal' in v;
-}
-
-/** JSON with every Decimal written as its decimal string (toString, never an exponent in our range). */
+/** JSON with every Decimal written via toString() (JSON.stringify would call valueOf, giving '-0'). */
 function toJson(value: unknown): string {
   // JSON.stringify calls Decimal.toJSON before the replacer, so test the holder's raw value instead.
   return JSON.stringify(value, function (this: Record<string, unknown>, key: string, v: unknown) {
     const raw = this[key];
-    return isDecimal(raw) ? raw.toString() : v;
+    return Decimal.isDecimal(raw) ? (raw as Decimal).toString() : v;
   });
 }
 
@@ -300,8 +295,16 @@ export function queryHistory(db: Db, q: HistoryQuery): { rows: HistoryRow[]; nex
     args.push(q.to);
   }
   if (q.before !== undefined) {
-    where.push('id < ?');
-    args.push(q.before);
+    // Keyset on (time, id): the cursor row's time is looked up, so rows written late with an
+    // older time (feed gaps) are neither skipped nor repeated.
+    const cur = db.prepare('SELECT time FROM events WHERE id = ?').get(q.before) as { time: number } | undefined;
+    if (cur) {
+      where.push('(time < ? OR (time = ? AND id < ?))');
+      args.push(cur.time, cur.time, q.before);
+    } else {
+      where.push('id < ?');
+      args.push(q.before);
+    }
   }
   const raw = db
     .prepare(

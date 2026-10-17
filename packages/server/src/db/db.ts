@@ -35,13 +35,13 @@ export function openDb(file: string): Db {
 }
 
 /** The current season's id; creates 'Season 1' on first run. */
-export function currentSeasonId(db: Db): number {
+export function currentSeasonId(db: Db, now: () => number = Date.now): number {
   const row = db.prepare('SELECT id FROM seasons WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1').get() as
     | { id: number }
     | undefined;
   if (row) return row.id;
   const info = db
     .prepare('INSERT INTO seasons (name, started_at) VALUES (?, ?)')
-    .run('Season 1', Date.now());
+    .run('Season 1', now());
   return Number(info.lastInsertRowid);
 }
