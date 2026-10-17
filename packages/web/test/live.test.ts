@@ -76,6 +76,28 @@ describe('live store reducer', () => {
     expect(new Set(s.notices.map((n) => n.id)).size).toBe(3);
   });
 
+  it('keeps at most 50 notices, dropping the oldest', () => {
+    let s = initialLiveData();
+    for (let i = 1; i <= 60; i++) s = apply(s, { type: 'notice', kind: 'fill', level: 'info', text: `Fill ${i}` }, T0 + i * 5000);
+    expect(s.notices).toHaveLength(50);
+    expect(s.notices[0]?.text).toBe('Fill 11');
+    expect(s.notices[49]?.text).toBe('Fill 60');
+  });
+
+  it('collapses an error into the identical error still on screen, however late it comes', () => {
+    let s = initialLiveData();
+    const err = { type: 'error', error: 'Could not load market rules: Cannot reach the server' } as const;
+    s = apply(s, err, T0);
+    s = apply(s, err, T0 + 30_000);
+    expect(s.notices).toHaveLength(1);
+    expect(s.notices[0]).toMatchObject({ level: 'error', count: 2, at: T0 + 30_000 });
+    // Once dismissed, the next one shows again.
+    s = { ...s, notices: [] };
+    s = apply(s, err, T0 + 60_000);
+    expect(s.notices).toHaveLength(1);
+    expect(s.notices[0]?.count).toBe(1);
+  });
+
   it('turns a server error message into an error notice', () => {
     const s = apply(initialLiveData(), { type: 'error', error: 'Unknown symbol FOO' });
     expect(s.notices[0]).toMatchObject({ level: 'error', text: 'Unknown symbol FOO' });

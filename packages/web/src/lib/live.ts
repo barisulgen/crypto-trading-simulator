@@ -19,8 +19,12 @@ import { setRules } from './format.ts';
 const TRADES_KEPT = 100;
 /** An identical notice text arriving within this window bumps the earlier toast's count instead. */
 const NOTICE_COLLAPSE_MS = 1000;
+/** Notices kept in the store (oldest dropped first). */
+const NOTICES_KEPT = 50;
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 10_000;
+/** The backoff starts over only after a connection stayed open this long (no fast flapping). */
+const STABLE_OPEN_MS = 5000;
 
 export interface Notice {
   id: number;
@@ -95,13 +99,14 @@ function addNotice(
 ): Pick<LiveData, 'notices' | 'noticeSeq'> {
   const same = s.notices.findLastIndex((x) => x.text === n.text && x.level === n.level);
   const prev = s.notices[same];
-  if (prev && now - prev.at < NOTICE_COLLAPSE_MS) {
+  // Errors stay until dismissed, so a repeat of one still on screen is folded into it, however late.
+  if (prev && (prev.level === 'error' || now - prev.at < NOTICE_COLLAPSE_MS)) {
     const notices = [...s.notices];
     notices[same] = { ...prev, at: now, count: prev.count + 1 };
     return { notices, noticeSeq: s.noticeSeq };
   }
   const id = s.noticeSeq + 1;
-  return { notices: [...s.notices, { id, ...n, at: now, count: 1 }], noticeSeq: id };
+  return { notices: [...s.notices, { id, ...n, at: now, count: 1 }].slice(-NOTICES_KEPT), noticeSeq: id };
 }
 
 /** Merge new trades into the list: newest first by trade id, no duplicates, at most TRADES_KEPT. */
@@ -172,6 +177,8 @@ export const useLive = create<LiveState>()((set) => ({
 let socket: WebSocket | null = null;
 let retryDelay = RETRY_MIN_MS;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
+/** When the current socket opened, ms; null while not open. */
+let openedAt: number | null = null;
 let started = false;
 
 function subscribe(): void {
@@ -220,7 +227,7 @@ function connect(): void {
   let opened = false;
   ws.onopen = () => {
     opened = true;
-    retryDelay = RETRY_MIN_MS;
+    openedAt = Date.now();
     useLive.setState({ conn: 'open' });
     subscribe();
     const meta = useLive.getState().meta;
@@ -237,6 +244,9 @@ function connect(): void {
   };
   ws.onclose = () => {
     if (socket === ws) socket = null;
+    // Only a connection that held for a while resets the backoff: accept-then-drop keeps doubling.
+    if (openedAt !== null && Date.now() - openedAt >= STABLE_OPEN_MS) retryDelay = RETRY_MIN_MS;
+    openedAt = null;
     useLive.setState({ conn: 'down' });
     if (opened) return scheduleReconnect();
     void needsLogin().then((login) => {

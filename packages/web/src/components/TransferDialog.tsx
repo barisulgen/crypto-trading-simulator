@@ -73,7 +73,7 @@ export function TransferDialog({ open, onClose }: { open: boolean; onClose(): vo
           name="amount"
           inputMode="decimal"
           autoComplete="off"
-          autoFocus
+          data-autofocus
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
           hint={

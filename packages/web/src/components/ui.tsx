@@ -85,7 +85,7 @@ export function TextField({
       <input
         id={id}
         {...rest}
-        className="h-10 rounded-ctl border border-line bg-canvas px-3 text-base text-fg placeholder:text-faint focus:border-accent focus:outline-none"
+        className="h-10 rounded-ctl border border-line bg-canvas px-3 text-base text-fg placeholder:text-faint focus:border-focus"
       />
       {hint !== undefined && <div className="text-xs text-faint">{hint}</div>}
     </div>
@@ -104,7 +104,7 @@ export function ErrorText({ children }: { children: ReactNode }) {
 
 /**
  * A modal dialog (native <dialog>: focus trap, Escape closes). Centred on desktop, a bottom
- * sheet on phones.
+ * sheet on phones. Initial focus goes to the child marked `data-autofocus` (else the first input).
  */
 export function Dialog({
   open,
@@ -122,7 +122,14 @@ export function Dialog({
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) d.showModal();
+    if (open && !d.open) {
+      d.showModal();
+      // showModal() focuses the first focusable element (the Close button) and React's autoFocus
+      // ran while the dialog was still hidden, so move focus to the field marked data-autofocus
+      // (else the first input): on phones this opens the keyboard on the amount field.
+      const first = d.querySelector<HTMLElement>('[data-autofocus]') ?? d.querySelector<HTMLElement>('input');
+      first?.focus();
+    }
     if (!open && d.open) d.close();
   }, [open]);
   return (

@@ -52,7 +52,7 @@ export function DepositDialog({ open, onClose }: { open: boolean; onClose(): voi
           name="amount"
           inputMode="decimal"
           autoComplete="off"
-          autoFocus
+          data-autofocus
           placeholder="1000"
           value={amount}
           onChange={(e) => setAmount(e.target.value)}

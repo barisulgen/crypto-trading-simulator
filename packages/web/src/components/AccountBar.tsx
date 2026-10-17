@@ -7,11 +7,12 @@ import { DepositDialog } from './DepositDialog.tsx';
 import { TransferDialog } from './TransferDialog.tsx';
 import { Button } from './ui.tsx';
 
-function Stat({ label, children, className = '' }: { label: string; children: ReactNode; className?: string }) {
+function Stat({ label, children, className = '' }: { label: ReactNode; children: ReactNode; className?: string }) {
   return (
     <div className={`flex min-w-0 flex-col ${className}`}>
       <span className="text-2xs text-faint desk:text-xs">{label}</span>
-      <div className="truncate">{children}</div>
+      {/* Dimmed while the bar is frozen (no live connection to the simulator). */}
+      <div className="truncate group-data-frozen/bar:opacity-45">{children}</div>
     </div>
   );
 }
@@ -35,14 +36,33 @@ function WalletStat({ label, free, locked }: { label: string; free?: string; loc
  */
 export function AccountBar() {
   const a = useLive((s) => s.account);
+  // Our server connection is down: the numbers are the last ones received, dimmed and labelled.
+  const frozen = useLive((s) => s.conn === 'down');
   const [dialog, setDialog] = useState<'deposit' | 'transfer' | null>(null);
   const lev = a?.balances.leverage.USDT;
 
   return (
-    <div className="flex-none border-b border-line bg-panel px-3 py-2 desk:px-4">
+    <div
+      data-frozen={frozen || undefined}
+      className="group/bar flex-none border-b border-line bg-panel px-3 py-2 desk:px-4"
+    >
       <div className="grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-2 desk:flex desk:items-center desk:gap-x-7">
         <div className="flex items-end gap-4 desk:contents">
-          <Stat label="Total value">
+          <Stat
+            label={
+              <span className="flex items-center gap-1.5">
+                Total value
+                {frozen && (
+                  <span
+                    title="Connection to the simulator lost - showing the last values received"
+                    className="rounded-ctl border border-down px-1 text-2xs font-semibold text-down"
+                  >
+                    Not live
+                  </span>
+                )}
+              </span>
+            }
+          >
             <span className="text-lg font-semibold [font-stretch:108%] desk:text-xl">{fmtUsd(a?.total)}</span>
           </Stat>
           <Stat label="Net P&L">
