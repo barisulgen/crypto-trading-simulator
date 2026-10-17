@@ -119,6 +119,8 @@ export interface SpotOrder {
   lockAsset: string;
   lockAmount: Decimal;
   ocoGroupId: string | null;
+  /** For a leg of a pair attached to a buy: that buy's id. Null otherwise. */
+  parentId: string | null;
   attach: { stopLoss: Decimal; takeProfit: Decimal } | null;
   createdAt: number;
   arrivesAt: number | null;

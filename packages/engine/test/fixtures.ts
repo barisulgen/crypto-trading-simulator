@@ -1,5 +1,6 @@
 import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
+import type { SpotState } from '../src/spot/state.ts';
 import type { BookSnapshot, EngineCtx, MarketView, SpotRules } from '../src/types.ts';
 
 export const btcRules: SpotRules = {
@@ -105,4 +106,13 @@ export function testCtx(
     market,
     fees: { maker: D('0.001'), taker: D('0.001') },
   };
+}
+
+/**
+ * Give the spot wallet `qty` of `asset` as if bought at `price` (fees ignored): the free balance
+ * and a matching average-cost basis with an open round trip, so sells have a basis to realise against.
+ */
+export function seedCoins(state: SpotState, asset: string, qty: Decimal, price: Decimal = D('100')): void {
+  state.balances.spot[asset] = { free: qty, locked: D(0) };
+  state.basis[asset] = { qty, cost: qty.mul(price), roundTripId: 'rt0', openedAt: 0, tripRealized: D(0) };
 }

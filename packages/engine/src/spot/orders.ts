@@ -15,6 +15,7 @@ import type {
   SpotOrderRequest,
   SpotRules,
 } from '../types.ts';
+import { recordFill } from './accounting.ts';
 import { credit, lockFunds, releaseFunds, spendFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import { isStopType } from './triggers.ts';
@@ -105,6 +106,7 @@ export function newOrder(req: SpotOrderRequest, rules: SpotRules, fields: Reques
     lockAsset: req.side === 'buy' ? rules.quote : rules.base,
     lockAmount: D(0),
     ocoGroupId: null,
+    parentId: null,
     attach: fields.attach,
     createdAt: ctx.now,
     arrivesAt: null,
@@ -297,7 +299,7 @@ export function fillOrThin(
   if (walk.qty.gt(0)) {
     const settled = settleTaker(s, order, walk, rules, thin ? 'partially_filled' : 'filled', ctx);
     current = settled.order;
-    events.push({ type: 'fill', time: ctx.now, fill: settled.fill, order: current });
+    events.push(...recordFill(s, settled.fill, current, rules, ctx));
   } else {
     releaseFunds(s, order.lockAsset, order.lockAmount);
     current = { ...order, lockAmount: D(0) };

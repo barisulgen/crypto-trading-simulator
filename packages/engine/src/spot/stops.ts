@@ -1,5 +1,4 @@
-import { D, floorToStep } from '../decimal.ts';
-import type { Decimal } from '../decimal.ts';
+import { D, Decimal, floorToStep } from '../decimal.ts';
 import { bestPrice, walkBook } from '../book.ts';
 import type { WalkResult } from '../book.ts';
 import { InputError, parseAmount } from '../input.ts';
@@ -128,9 +127,15 @@ export function previewStop(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx)
 /**
  * Arrival of a pending stop, or of both legs of a pending pair at once: armed ('open'), or
  * rejected when the data is stale or it would trigger now (as the exchange would reject it).
+ * A pair attached to a buy is exchange-side (like Binance's OTOCO), so our stale feed never
+ * rejects it: its legs wait (arrivesAt null) and arm on the first fresh book (armWaitingPairs).
  */
 export function arriveStop(s: SpotState, order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
   const legs = order.ocoGroupId ? pairLegs(s, order.ocoGroupId).filter((l) => l.status === 'pending') : [order];
+  if (order.parentId !== null && !ctx.market.isFresh(order.symbol)) {
+    for (const l of legs) s.orders.set(l.id, { ...l, arrivesAt: null });
+    return [];
+  }
   const reason = armReason(legs, ctx);
   if (reason !== null) return legs.flatMap((l) => rejectPending(s, l, reason, ctx));
   for (const l of legs) s.orders.set(l.id, { ...l, status: 'open' });
@@ -201,6 +206,21 @@ export function arriveTriggered(s: SpotState, order: SpotOrder, ctx: EngineCtx):
   return executeTriggered(s, order, ctx);
 }
 
+/** Arm (or reject) the attached pairs of `symbol` that waited for fresh data. */
+export function armWaitingPairs(s: SpotState, symbol: string, ctx: EngineCtx): EngineEvent[] {
+  if (!ctx.market.isFresh(symbol)) return [];
+  const waiting = [...s.orders.values()].filter(
+    (o) => o.symbol === symbol && o.status === 'pending' && o.parentId !== null && o.arrivesAt === null,
+  );
+  const events: EngineEvent[] = [];
+  for (const { id } of waiting) {
+    // Re-read: arriving one leg settles its partner too.
+    const o = s.orders.get(id)!;
+    if (o.status === 'pending') events.push(...arriveStop(s, o, ctx));
+  }
+  return events;
+}
+
 /** Execute every triggered order of `symbol` that is due, deferred ones included. */
 export function executeDue(s: SpotState, symbol: string, ctx: EngineCtx): EngineEvent[] {
   if (!ctx.market.isFresh(symbol)) return [];
@@ -218,17 +238,27 @@ function executeTriggered(s: SpotState, order: SpotOrder, ctx: EngineCtx): Engin
   // dollars and a sell at most its coins.
   if (order.side === 'buy') {
     const available = order.lockAmount.plus(freeOf(s, 'spot', order.lockAsset));
-    if (walk.quote.gt(available)) return expire(s, order, walk, available, ctx);
+    if (walk.quote.gt(available)) return expire(s, order, walk, available, rules, ctx);
   }
   return fillOrThin(s, order, walk, book, rules, ctx);
 }
 
 /** The exchange rejects for balance and never part-fills on it, so the order expires in full. */
-function expire(s: SpotState, order: SpotOrder, walk: WalkResult, available: Decimal, ctx: EngineCtx): EngineEvent[] {
+function expire(
+  s: SpotState,
+  order: SpotOrder,
+  walk: WalkResult,
+  available: Decimal,
+  rules: SpotRules,
+  ctx: EngineCtx,
+): EngineEvent[] {
   const kind = order.type === 'stop_loss' ? 'stop' : 'take-profit';
+  // The book average is shown at the symbol's price precision (tick), rounded half-up.
+  const avg = walk.avgPrice;
+  const shownAvg = avg && !rules.tickSize.isZero() ? avg.toNearest(rules.tickSize, Decimal.ROUND_HALF_UP) : avg;
   const reason =
     `Triggered ${kind} expired: insufficient funds at execution ` +
-    `(need ${walk.quote}, available ${available}; trigger ${order.triggerPrice}, book average ${walk.avgPrice})`;
+    `(need ${walk.quote}, available ${available}; trigger ${order.triggerPrice}, book average ${shownAvg})`;
   releaseFunds(s, order.lockAsset, order.lockAmount);
   const rejected: SpotOrder = { ...order, status: 'rejected', rejectReason: reason, lockAmount: D(0) };
   s.orders.set(rejected.id, rejected);
@@ -278,7 +308,7 @@ export function attachOco(s: SpotState, req: OcoRequest, ctx: EngineCtx): Engine
     if (!(e instanceof InputError)) throw e;
     parseError = e.message;
   }
-  return placePair(s, req.symbol, amounts, parseError, ctx);
+  return placePair(s, req.symbol, amounts, parseError, null, ctx);
 }
 
 /**
@@ -293,7 +323,7 @@ export function activateAttachedPairs(s: SpotState, events: EngineEvent[], ctx: 
     if (!o.attach || (o.status !== 'filled' && o.status !== 'cancelled') || o.filledQty.isZero()) continue;
     // Buys only: the fee was taken in the coin.
     const qty = floorToStep(o.filledQty.minus(o.fee), ctx.market.rules(o.symbol).stepSize);
-    out.push(...placePair(s, o.symbol, { qty, ...o.attach }, null, ctx));
+    out.push(...placePair(s, o.symbol, { qty, ...o.attach }, null, o.id, ctx));
   }
   return out;
 }
@@ -308,12 +338,15 @@ interface PairAmounts {
  * A sell stop-loss and a sell take-profit over the same coins, one-cancels-other. Both legs
  * share a group id and one arrival; the coins are locked once, on the stop-loss leg.
  * On any problem both legs are recorded as rejected with the same reason.
+ * A pair attached to a buy (`parentId`) placed while the data is stale waits for fresh data
+ * (arrivesAt null) instead of being rejected; whether it would trigger now is checked then.
  */
 function placePair(
   s: SpotState,
   symbol: string,
   a: PairAmounts | null,
   parseError: string | null,
+  parentId: string | null,
   ctx: EngineCtx,
 ): EngineEvent[] {
   const rules = ctx.market.rules(symbol);
@@ -321,6 +354,7 @@ function placePair(
   const leg = (type: StopType, triggerPrice: Decimal | null): SpotOrder => ({
     ...newOrder({ symbol, side: 'sell', type }, rules, { ...noFields(), qty: a?.qty ?? null, triggerPrice }, ctx),
     ocoGroupId,
+    parentId,
   });
   const sl = leg('stop_loss', a?.stopLoss ?? null);
   const tp = leg('take_profit', a?.takeProfit ?? null);
@@ -331,7 +365,7 @@ function placePair(
   lockFunds(s, rules.base, qty);
   const sent = {
     status: 'pending' as const,
-    arrivesAt: ctx.now + arrivalDelay(ctx),
+    arrivesAt: ctx.market.isFresh(symbol) ? ctx.now + arrivalDelay(ctx) : null,
     bestAtSubmit: bestPrice(ctx.market.book(symbol), 'sell'),
   };
   return [
@@ -343,7 +377,10 @@ function placePair(
   });
 }
 
-/** Freshness, amounts, filters for each leg (a pair counts as two algo orders), trigger-now, funds. */
+/**
+ * Freshness, amounts, filters for each leg (a pair counts as two algo orders), trigger-now, funds.
+ * An attached pair skips freshness, and trigger-now while stale (it is checked when it arms).
+ */
 function pairReason(
   s: SpotState,
   sl: SpotOrder,
@@ -353,7 +390,8 @@ function pairReason(
   ctx: EngineCtx,
 ): string | null {
   const symbol = sl.symbol;
-  if (!ctx.market.isFresh(symbol)) return `Live data interrupted for ${symbol}`;
+  const fresh = ctx.market.isFresh(symbol);
+  if (!fresh && sl.parentId === null) return `Live data interrupted for ${symbol}`;
   if (parseError !== null) return parseError;
   const avgPrice = ctx.market.avgPrice(symbol);
   const counts = openCounts(s, symbol);
@@ -363,7 +401,7 @@ function pairReason(
       rules,
       { avgPrice, openOrders: counts.openOrders + extra, openAlgoOrders: counts.openAlgoOrders + extra },
     );
-  const invalid = check(sl, 0) ?? check(tp, 1) ?? armReason([sl, tp], ctx);
+  const invalid = check(sl, 0) ?? check(tp, 1) ?? (fresh ? armReason([sl, tp], ctx) : null);
   if (invalid) return invalid;
   const free = freeOf(s, 'spot', rules.base);
   if (sl.qty!.gt(free)) return `Insufficient ${rules.base}: need ${sl.qty}, available ${free}`;

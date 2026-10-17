@@ -15,6 +15,7 @@ import type {
   SpotOrderRequest,
   SpotRules,
 } from '../types.ts';
+import { recordFill } from './accounting.ts';
 import { allocateTradeThrough } from './matching.ts';
 import {
   applyFill,
@@ -122,7 +123,7 @@ export function arriveLimit(s: SpotState, order: SpotOrder, ctx: EngineCtx): Eng
   const status: OrderStatus = remaining.isZero() ? 'filled' : 'partially_filled';
   const settled = settleTaker(s, order, walk, rules, status, ctx, retain);
   s.orders.set(order.id, settled.order);
-  return [{ type: 'fill', time: ctx.now, fill: settled.fill, order: settled.order }];
+  return recordFill(s, settled.fill, settled.order, rules, ctx);
 }
 
 /**
@@ -138,7 +139,7 @@ export function matchTrade(s: SpotState, symbol: string, trade: AggTrade, ctx: E
 
   const rules = ctx.market.rules(symbol);
   const book = ctx.market.book(symbol);
-  return allocations.map(({ orderId, qty }) => makerFill(s, s.orders.get(orderId)!, qty, rules, book, ctx));
+  return allocations.flatMap(({ orderId, qty }) => makerFill(s, s.orders.get(orderId)!, qty, rules, book, ctx));
 }
 
 function makerFill(
@@ -148,7 +149,7 @@ function makerFill(
   rules: SpotRules,
   book: BookSnapshot,
   ctx: EngineCtx,
-): EngineEvent {
+): EngineEvent[] {
   const buy = order.side === 'buy';
   const price = order.price!;
   const quote = qty.mul(price);
@@ -177,7 +178,7 @@ function makerFill(
   );
   const updated = applyFill(order, fill, done ? 'filled' : 'partially_filled', lock);
   s.orders.set(updated.id, updated);
-  return { type: 'fill', time: ctx.now, fill, order: updated };
+  return recordFill(s, fill, updated, rules, ctx);
 }
 
 /**

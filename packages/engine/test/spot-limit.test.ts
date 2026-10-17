@@ -5,7 +5,7 @@ import { SpotEngine } from '../src/spot/engine.ts';
 import { allocateTradeThrough } from '../src/spot/matching.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import type { AggTrade, EngineCtx, EngineEvent, Fill, SpotOrder, SpotOrderRequest } from '../src/types.ts';
-import { btcRules, FakeMarket, testCtx } from './fixtures.ts';
+import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
 
 const NOW = 1_000_000;
 const POST_ONLY = 'Post-only order would immediately match; rejected';
@@ -16,7 +16,7 @@ function setup(opts: { usdt?: string; btc?: string } = {}) {
   const ctx = testCtx(market, { now: NOW });
   const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
   engine.deposit('spot', D(opts.usdt ?? '1000'), ctx);
-  engine.state.balances.spot.BTC!.free = D(opts.btc ?? '2');
+  seedCoins(engine.state, 'BTC', D(opts.btc ?? '2'));
   const bal = (asset: string) => engine.state.balances.spot[asset]!;
   const stored = (id: string) => engine.state.orders.get(id)!;
   return { market, ctx, engine, bal, stored };

@@ -16,6 +16,7 @@ import type {
 } from '../types.ts';
 import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import {
+  emptyPreview,
   fillOrThin,
   marketStep,
   marketTarget,
@@ -33,6 +34,7 @@ import { balanceOf, freeOf, releaseFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import {
   activateAttachedPairs,
+  armWaitingPairs,
   arriveStop,
   arriveTriggered,
   attachOco,
@@ -44,6 +46,8 @@ import {
 } from './stops.ts';
 import type { OcoRequest } from './stops.ts';
 import { isStopType } from './triggers.ts';
+
+export const UNKNOWN_ORDER_TYPE = 'Unknown order type';
 
 /** Everything submit and preview work out for a market order before touching state. */
 interface MarketPlan {
@@ -110,6 +114,11 @@ export class SpotEngine {
       case 'stop_loss':
       case 'take_profit':
         return submitStop(this.s, req, ctx);
+      default: {
+        // A runtime value outside OrderType (e.g. from the API) is recorded as rejected.
+        const order = newOrder(req, ctx.market.rules(req.symbol), noFields(), ctx);
+        return rejectOrder(this.s, order, UNKNOWN_ORDER_TYPE, ctx);
+      }
     }
   }
 
@@ -137,21 +146,31 @@ export class SpotEngine {
   }
 
   /**
-   * A real trade on `symbol`: first triggers the armed stops its price reached, then fills the
-   * resting limit and post-only orders it went through. A trade id at or below the last one
-   * processed for the symbol is a replay and is ignored, so no trade is ever counted twice.
+   * A real trade on `symbol`. While the symbol is fresh it first does what onFresh does (arms
+   * waiting attached pairs, executes due triggered orders), so nothing waits on a missed onFresh;
+   * then triggers the armed stops its price reached; then fills the resting limit and post-only
+   * orders it went through. A trade id at or below the last one processed for the symbol is a
+   * replay and is ignored, so no trade is ever counted twice.
    */
   onTrade(symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
     const lastId = this.s.lastTradeId[symbol];
     if (lastId !== undefined && trade.id <= lastId) return [];
-    const events = [...triggerStops(this.s, symbol, trade, ctx), ...matchTrade(this.s, symbol, trade, ctx)];
+    const events = [
+      ...this.onFresh(symbol, ctx),
+      ...triggerStops(this.s, symbol, trade, ctx),
+      ...matchTrade(this.s, symbol, trade, ctx),
+    ];
     this.s.lastTradeId[symbol] = trade.id;
     return activateAttachedPairs(this.s, events, ctx);
   }
 
-  /** The symbol's book is fresh again: triggered orders that are due execute against it now. */
+  /**
+   * The symbol's book is fresh again: attached pairs that waited for fresh data arm (or are
+   * rejected if they would trigger now), and triggered orders that are due execute against it.
+   * A no-op while the symbol is stale.
+   */
   onFresh(symbol: string, ctx: EngineCtx): EngineEvent[] {
-    return executeDue(this.s, symbol, ctx);
+    return [...armWaitingPairs(this.s, symbol, ctx), ...executeDue(this.s, symbol, ctx)];
   }
 
   /** Attach a linked stop-loss / take-profit pair (both sells) to coins already held. */
@@ -186,10 +205,20 @@ export class SpotEngine {
 
   /** What submit would do right now, without changing state. */
   preview(req: SpotOrderRequest, ctx: EngineCtx): OrderPreview {
-    if (req.type === 'limit' || req.type === 'post_only') return previewLimit(this.s, req, ctx);
-    if (isStopType(req.type)) return previewStop(this.s, req, ctx);
-    const plan = this.planMarket(req, ctx);
-    return takerPreview(plan.walk, req.side, plan.rules, ctx, plan.reason);
+    switch (req.type) {
+      case 'market': {
+        const plan = this.planMarket(req, ctx);
+        return takerPreview(plan.walk, req.side, plan.rules, ctx, plan.reason);
+      }
+      case 'limit':
+      case 'post_only':
+        return previewLimit(this.s, req, ctx);
+      case 'stop_loss':
+      case 'take_profit':
+        return previewStop(this.s, req, ctx);
+      default:
+        return emptyPreview(UNKNOWN_ORDER_TYPE);
+    }
   }
 
   // ---- market orders ----

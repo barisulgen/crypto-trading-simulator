@@ -4,7 +4,7 @@ import type { Decimal } from '../src/decimal.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import type { EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest } from '../src/types.ts';
-import { FakeMarket, testCtx } from './fixtures.ts';
+import { FakeMarket, seedCoins, testCtx } from './fixtures.ts';
 
 const NOW = 1_000_000;
 
@@ -13,7 +13,7 @@ function setup(usdt: string, opts: { btc?: string; rngValues?: number[] } = {}) 
   const ctx = testCtx(market, { now: NOW, rngValues: opts.rngValues });
   const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
   if (D(usdt).gt(0)) engine.deposit('spot', D(usdt), ctx);
-  if (opts.btc) engine.state.balances.spot.BTC!.free = D(opts.btc);
+  if (opts.btc) seedCoins(engine.state, 'BTC', D(opts.btc));
   const bal = (asset: string) => engine.state.balances.spot[asset]!;
   return { market, ctx, engine, bal };
 }
@@ -106,7 +106,7 @@ describe('market buy by quantity', () => {
     expect(s(fill.bestAtSubmit)).toBe('100');
     expect(fill.triggerPrice).toBeNull();
     expect(fill.realizedPnl).toBeNull();
-    expect(fill.roundTripId).toBeNull();
+    expect(fill.roundTripId).toBe('rt1'); // a buy from flat opens a round trip
 
     expect(s(bal('USDT').free)).toBe('879.93');
     expect(s(bal('USDT').locked)).toBe('0');
@@ -440,5 +440,18 @@ describe('preview', () => {
     expect(engine.preview(sell({ qty: '1' }), ctx).rejectReason).toBe('Insufficient BTC: need 1, available 0');
     expect(JSON.stringify(engine.state.balances)).toBe(before);
     expect('BTC' in engine.state.balances.spot).toBe(false);
+  });
+});
+
+describe('unknown order type', () => {
+  it('submit rejects it and preview reports it; it is never treated as a market order', () => {
+    const { ctx, engine, bal } = setup('1000');
+    const bogus = { symbol: 'BTCUSDT', side: 'buy', type: 'iceberg', qty: '1' } as unknown as SpotOrderRequest;
+    expect(rejectReason(engine.submit(bogus, ctx))).toBe('Unknown order type');
+    expect(s(bal('USDT').locked)).toBe('0');
+    const p = engine.preview(bogus, ctx);
+    expect(p.rejectReason).toBe('Unknown order type');
+    expect(p.estAvgPrice).toBeNull();
+    expect(p.total).toBeNull();
   });
 });

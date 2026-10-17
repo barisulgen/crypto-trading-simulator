@@ -5,7 +5,7 @@ import { SpotEngine } from '../src/spot/engine.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import { isTriggered } from '../src/spot/triggers.ts';
 import type { AggTrade, EngineCtx, EngineEvent, Fill, SpotOrder, SpotOrderRequest } from '../src/types.ts';
-import { FakeMarket, testCtx } from './fixtures.ts';
+import { FakeMarket, seedCoins, testCtx } from './fixtures.ts';
 
 const NOW = 1_000_000;
 const EXECUTING = 'Order is already executing and cannot be cancelled';
@@ -18,7 +18,7 @@ function setup(opts: { usdt?: string; btc?: string } = {}) {
   const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
   const usdt = D(opts.usdt ?? '1000');
   if (usdt.gt(0)) engine.deposit('spot', usdt, ctx);
-  engine.state.balances.spot.BTC!.free = D(opts.btc ?? '2');
+  seedCoins(engine.state, 'BTC', D(opts.btc ?? '2'));
   const bal = (asset: string) => engine.state.balances.spot[asset]!;
   const stored = (id: string) => engine.state.orders.get(id)!;
   return { market, ctx, engine, bal, stored };
@@ -303,6 +303,23 @@ describe('trigger and execution', () => {
     expect(fillOf(engine.onFresh('BTCUSDT', ctx)).order.status).toBe('filled');
   });
 
+  it('a deferred triggered stop fills on the next fresh trade even if onFresh was missed', () => {
+    const { market, ctx, engine, stored } = setup();
+    const triggered = armAndTrigger(engine, sellStop('99.00', '1'), '99.00', ctx);
+    market.setFresh('BTCUSDT', false);
+    expect(arriveNow(engine, triggered, ctx)).toEqual([]);
+    expect(stored(triggered.id).arrivesAt).toBeNull();
+    // A trade while still stale executes nothing.
+    expect(engine.onTrade('BTCUSDT', trade('99.50'), ctx)).toEqual([]);
+    expect(stored(triggered.id).status).toBe('triggered');
+
+    market.setFresh('BTCUSDT', true);
+    const events = engine.onTrade('BTCUSDT', trade('99.50'), ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill']);
+    expect(s(fillOf(events).fill.price)).toBe('99.84'); // 0.4 @ 99.90 + 0.6 @ 99.80
+    expect(stored(triggered.id).status).toBe('filled');
+  });
+
   it('buy stop_loss trigger 101 qty 0.5 locks 50.5 USDT and triggers at 101.00', () => {
     const { ctx, engine, bal } = setup();
     const id = arm(engine, buyStop('101', '0.5'), ctx);
@@ -348,6 +365,18 @@ describe('trigger and execution', () => {
     expect(e.reason).toBe(
       'Triggered take-profit expired: insufficient funds at execution ' +
         '(need 47.55, available 45; trigger 90, book average 95.1)',
+    );
+  });
+
+  it('the expiry reason shows the multi-level book average rounded half-up to the tick size', () => {
+    const { market, ctx, engine } = setup({ usdt: '50.5' });
+    const triggered = armAndTrigger(engine, buyStop('101', '0.5'), '101.00', ctx);
+    // 0.25 @ 101.93 + 0.25 @ 102.00 = 50.9825 for 0.5 BTC: average 101.965 → 101.97 (not 101.96).
+    market.setBook('BTCUSDT', book([['101.90', '5']], [['101.93', '0.25'], ['102.00', '5']]));
+    const e = only(arriveNow(engine, triggered, ctx), 'order_rejected');
+    expect(e.reason).toBe(
+      'Triggered stop expired: insufficient funds at execution ' +
+        '(need 50.9825, available 50.5; trigger 101, book average 101.97)',
     );
   });
 
@@ -613,6 +642,55 @@ describe('pair attached to a buy', () => {
     const r2 = engine.cancel(unfilled.id, ctx);
     if (!r2.ok) throw new Error(r2.reason);
     expect(r2.events.map((e) => e.type)).toEqual(['order_cancelled']);
+  });
+
+  it('parent cancelled after a partial fill while stale → pair waits pending; armed on the next onFresh', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const parent = placed(engine.submit(limitBuy('1'), ctx));
+    arriveNow(engine, parent, ctx);
+    engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
+    market.setFresh('BTCUSDT', false);
+    const r = engine.cancel(parent.id, ctx);
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
+    const [sl, tp] = placedOrders(r.events) as [SpotOrder, SpotOrder];
+    for (const leg of [sl, tp]) {
+      expect([leg.status, leg.arrivesAt, leg.parentId, s(leg.qty)]).toEqual(['pending', null, parent.id, '0.4995']);
+    }
+    expect(s(bal('BTC').locked)).toBe('0.4995');
+    // Still stale: nothing arms.
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+    expect(engine.onTrade('BTCUSDT', trade('99.80'), ctx)).toEqual([]);
+    expect(stored(sl.id).status).toBe('pending');
+
+    market.setFresh('BTCUSDT', true);
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+    expect(stored(sl.id).status).toBe('open');
+    expect(stored(tp.id).status).toBe('open');
+    expect(s(stored(sl.id).lockAmount)).toBe('0.4995');
+    expect(s(stored(tp.id).lockAmount)).toBe('0');
+    expect(s(bal('BTC').locked)).toBe('0.4995');
+  });
+
+  it('attached pair stale at arrival waits; the first fresh trade rejects it if it would trigger now', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const parent = placed(engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1', attach }, ctx));
+    const [sl, tp] = placedOrders(arriveNow(engine, parent, ctx)) as [SpotOrder, SpotOrder];
+    market.setFresh('BTCUSDT', false);
+    expect(arriveNow(engine, sl, ctx)).toEqual([]);
+    expect([stored(sl.id).status, stored(sl.id).arrivesAt]).toEqual(['pending', null]);
+    expect([stored(tp.id).status, stored(tp.id).arrivesAt]).toEqual(['pending', null]);
+    expect(s(bal('BTC').locked)).toBe('0.999');
+
+    // Fresh again, but the price ran through the take-profit meanwhile: the exchange would reject now.
+    market.setFresh('BTCUSDT', true);
+    market.setLastPrice('BTCUSDT', D('111'));
+    const events = engine.onTrade('BTCUSDT', trade('111', '1', false), ctx);
+    expect(reasons(events)).toEqual([
+      'Take-profit would trigger immediately (last 111, trigger 110)',
+      'Take-profit would trigger immediately (last 111, trigger 110)',
+    ]);
+    expect(s(bal('BTC').locked)).toBe('0');
   });
 
   it('market buy with a pair: activates when the market order fills at arrival', () => {
