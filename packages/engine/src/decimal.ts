@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js';
 
-Decimal.set({ precision: 40, rounding: Decimal.ROUND_HALF_EVEN });
+Decimal.set({ precision: 40, rounding: Decimal.ROUND_HALF_EVEN, toExpNeg: -40, toExpPos: 40 });
 
 export { Decimal };
 

@@ -64,4 +64,22 @@ describe('validateSpotOrder', () => {
   it('accepts a valid limit buy', () => {
     expect(check({ side: 'buy', type: 'limit', price: D('99'), qty: D('1') })).toBeNull();
   });
+  it('rejects a zero average price', () => {
+    expect(check({ side: 'buy', type: 'market', qty: D('1') }, { avgPrice: D(0) })).toBe(
+      'Average price unavailable; order rejected (never guessed)',
+    );
+  });
+  it('stop PRICE_FILTER on trigger price', () => {
+    expect(check({ side: 'sell', type: 'stop_loss', triggerPrice: D('99.005'), qty: D('1') })).toBe(
+      'PRICE_FILTER: trigger price 99.005 is not a multiple of tick size 0.01',
+    );
+  });
+  it('stop NOTIONAL on trigger price x qty', () => {
+    expect(check({ side: 'sell', type: 'stop_loss', triggerPrice: D('95'), qty: D('0.05') })).toBe(
+      'NOTIONAL: order value 4.75 is below the minimum 5',
+    );
+  });
+  it('stops are not subject to PERCENT_PRICE_BY_SIDE', () => {
+    expect(check({ side: 'sell', type: 'stop_loss', triggerPrice: D('121'), qty: D('1') })).toBeNull();
+  });
 });

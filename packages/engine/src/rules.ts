@@ -81,7 +81,7 @@ export function validateSpotOrder(
   rules: SpotRules,
   ctx: RuleContext,
 ): string | null {
-  if (!ctx.avgPrice) return 'Average price unavailable; order rejected (never guessed)';
+  if (!ctx.avgPrice || ctx.avgPrice.lte(0)) return 'Average price unavailable; order rejected (never guessed)';
   const avg = ctx.avgPrice;
 
   if (ctx.openOrders >= rules.maxNumOrders) {
