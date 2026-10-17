@@ -12,6 +12,12 @@ export interface WalkResult {
   exhausted: boolean;
 }
 
+/** Best price a taker would hit: the best ask for a buy, the best bid for a sell. */
+export function bestPrice(book: BookSnapshot, side: Side): Decimal | null {
+  const levels = side === 'buy' ? book.asks : book.bids;
+  return levels[0]?.price ?? null;
+}
+
 /**
  * Walk the book (buys take asks, sells hit bids) until the target is met or
  * the book / limit price runs out. Full precision; no rounding.
@@ -24,7 +30,7 @@ export function walkBook(
   limitPrice?: Decimal,
 ): WalkResult {
   const levels = side === 'buy' ? book.asks : book.bids;
-  const bestPrice = levels.length > 0 ? levels[0]!.price : null;
+  const best = bestPrice(book, side);
   const byQty = 'qty' in target;
 
   let qty = D(0);
@@ -74,13 +80,9 @@ export function walkBook(
 
   const avgPrice = qty.isZero() ? null : quote.div(qty);
   const slippageUsd =
-    bestPrice === null
-      ? D(0)
-      : side === 'buy'
-        ? quote.minus(bestPrice.mul(qty))
-        : bestPrice.mul(qty).minus(quote);
+    best === null ? D(0) : side === 'buy' ? quote.minus(best.mul(qty)) : best.mul(qty).minus(quote);
 
-  return { qty, quote, avgPrice, bestPrice, slippageUsd, levelsUsed, exhausted };
+  return { qty, quote, avgPrice, bestPrice: best, slippageUsd, levelsUsed, exhausted };
 }
 
 function minD(a: Decimal, b: Decimal): Decimal {

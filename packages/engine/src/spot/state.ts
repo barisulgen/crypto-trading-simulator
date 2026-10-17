@@ -38,6 +38,11 @@ export function balanceOf(state: SpotState, wallet: Wallet, asset: string): Bala
   return row;
 }
 
+/** Free balance of wallet/asset, read-only (never creates a row). */
+export function freeOf(state: SpotState, wallet: Wallet, asset: string): Decimal {
+  return state.balances[wallet][asset]?.free ?? D(0);
+}
+
 /** Move amount from free to locked. Caller has checked that free covers it. */
 export function lockFunds(state: SpotState, asset: string, amount: Decimal): void {
   const b = balanceOf(state, 'spot', asset);

@@ -101,6 +101,16 @@ describe('transfer', () => {
     });
   });
 
+  it('rejects a transfer to the same wallet', () => {
+    const { engine, ctx } = setup();
+    engine.deposit('spot', D('1000'), ctx);
+    expect(engine.transfer('spot', 'spot', D('100'), ctx)).toEqual({
+      ok: false,
+      reason: 'Choose two different wallets',
+    });
+    expect(engine.state.balances.spot.USDT!.free.toString()).toBe('1000');
+  });
+
   it('rejects zero amounts', () => {
     const { engine, ctx } = setup();
     engine.deposit('spot', D('1000'), ctx);

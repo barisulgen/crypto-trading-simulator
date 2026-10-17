@@ -3,34 +3,39 @@ import type { Decimal } from '../decimal.ts';
 import { walkBook } from '../book.ts';
 import type { WalkResult } from '../book.ts';
 import { spotFee } from '../fees.ts';
-import { InputError, parseAmount } from '../input.ts';
 import { validateSpotOrder } from '../rules.ts';
 import type {
   ActionResult,
+  AggTrade,
   EngineCtx,
   EngineEvent,
-  Fill,
   OrderPreview,
-  OrderStatus,
-  Side,
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
   Wallet,
 } from '../types.ts';
-import { balanceOf, credit, lockFunds, releaseFunds, spendFunds } from './state.ts';
+import { arriveLimit, isLimitType, matchTrade, previewLimit, submitLimit } from './limit.ts';
+import {
+  emptyPreview,
+  newOrder,
+  openCounts,
+  placePending,
+  readRequest,
+  rejectOrder,
+  rejectPending,
+  settleTaker,
+} from './orders.ts';
+import type { RequestFields } from './orders.ts';
+import { balanceOf, freeOf, releaseFunds } from './state.ts';
 import type { SpotState } from './state.ts';
-
-/** Statuses of orders that still count against MAX_NUM_ORDERS (in flight included). */
-const LIVE_STATUSES: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled', 'triggered']);
 
 const NOT_SUPPORTED = 'Order type not supported yet';
 
 /** Everything submit and preview work out for a market order before touching state. */
 interface MarketPlan {
   rules: SpotRules;
-  qty: Decimal | null;
-  quoteQty: Decimal | null;
+  fields: RequestFields;
   lockAsset: string;
   walk: WalkResult | null;
   lockAmount: Decimal | null;
@@ -65,6 +70,7 @@ export class SpotEngine {
 
   /** Moves free USDT only; locked funds never move. Not a deposit. */
   transfer(from: Wallet, to: Wallet, amount: Decimal, ctx: EngineCtx): ActionResult {
+    if (from === to) return { ok: false, reason: 'Choose two different wallets' };
     if (!amount.isFinite() || !amount.gt(0)) return { ok: false, reason: 'Transfer must be greater than 0' };
     const src = balanceOf(this.s, from, 'USDT');
     if (amount.gt(src.free)) {
@@ -85,27 +91,68 @@ export class SpotEngine {
     switch (req.type) {
       case 'market':
         return this.submitMarket(req, ctx);
+      case 'limit':
+      case 'post_only':
+        return submitLimit(this.s, req, ctx);
       default: {
         const rules = ctx.market.rules(req.symbol);
-        return this.rejectOrder(this.newOrder(req, rules, null, null, ctx), NOT_SUPPORTED, ctx);
+        const order = newOrder(req, rules, { qty: null, quoteQty: null, price: null }, ctx);
+        return rejectOrder(this.s, order, NOT_SUPPORTED, ctx);
       }
     }
   }
 
-  /** The order reaches the exchange after its delay. Anything not pending is a no-op. */
+  /**
+   * The order reaches the exchange after its delay. A no-op for unknown or non-pending
+   * orders (e.g. cancelled while in flight) and before the order's arrivesAt.
+   */
   arrive(orderId: string, ctx: EngineCtx): EngineEvent[] {
     const order = this.s.orders.get(orderId);
     if (!order || order.status !== 'pending') return [];
+    if (order.arrivesAt !== null && ctx.now < order.arrivesAt) return [];
     switch (order.type) {
       case 'market':
         return this.arriveMarket(order, ctx);
+      case 'limit':
+      case 'post_only':
+        return arriveLimit(this.s, order, ctx);
       default:
         return [];
     }
   }
 
+  /** A real trade on `symbol`: fills resting limit and post-only orders it went through. */
+  onTrade(symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
+    return matchTrade(this.s, symbol, trade, ctx);
+  }
+
+  /**
+   * Cancel by the owner. Pending, open and partially filled limit/post-only orders can be
+   * cancelled (a cancelled pending order never arrives); market orders in flight and
+   * triggered orders are already executing.
+   */
+  cancel(orderId: string, ctx: EngineCtx): ActionResult {
+    const order = this.s.orders.get(orderId);
+    if (!order) return { ok: false, reason: 'Order not found' };
+    if (order.status === 'filled' || order.status === 'cancelled' || order.status === 'rejected') {
+      return { ok: false, reason: 'Order is not open' };
+    }
+    if (order.status === 'triggered' || !isLimitType(order)) {
+      return { ok: false, reason: 'Order is already executing and cannot be cancelled' };
+    }
+    releaseFunds(this.s, order.lockAsset, order.lockAmount);
+    const cancelled: SpotOrder = { ...order, status: 'cancelled', lockAmount: D(0) };
+    this.s.orders.set(cancelled.id, cancelled);
+    const cancelledQty = order.qty!.minus(order.filledQty);
+    return {
+      ok: true,
+      events: [{ type: 'order_cancelled', time: ctx.now, order: cancelled, reason: 'user', cancelledQty }],
+    };
+  }
+
   /** What submit would do right now, without changing state. */
   preview(req: SpotOrderRequest, ctx: EngineCtx): OrderPreview {
+    if (req.type === 'limit' || req.type === 'post_only') return previewLimit(this.s, req, ctx);
     if (req.type !== 'market') return emptyPreview(NOT_SUPPORTED);
     const plan = this.planMarket(req, ctx);
     const w = plan.walk;
@@ -132,32 +179,21 @@ export class SpotEngine {
 
   private submitMarket(req: SpotOrderRequest, ctx: EngineCtx): EngineEvent[] {
     const plan = this.planMarket(req, ctx);
-    const order = this.newOrder(req, plan.rules, plan.qty, plan.quoteQty, ctx);
-    if (plan.reason !== null) return this.rejectOrder(order, plan.reason, ctx);
+    const order = newOrder(req, plan.rules, plan.fields, ctx);
+    if (plan.reason !== null) return rejectOrder(this.s, order, plan.reason, ctx);
     // A plan without a reason always has its walk and lock.
-    const lockAmount = plan.lockAmount!;
-    lockFunds(this.s, plan.lockAsset, lockAmount);
-    const pending: SpotOrder = {
-      ...order,
-      status: 'pending',
-      lockAmount,
-      arrivesAt: ctx.now + arrivalDelay(ctx),
-      bestAtSubmit: plan.walk!.bestPrice,
-    };
-    this.s.orders.set(pending.id, pending);
-    return [{ type: 'order_placed', time: ctx.now, order: pending }];
+    return placePending(this.s, order, plan.lockAmount!, plan.walk!.bestPrice, ctx);
   }
 
   /**
-   * Freshness, amounts, exchange filters, book walk and lock size, in that order.
-   * Stops at the first problem; later fields stay null.
+   * Freshness, amounts, exchange filters, book walk, lock size and funds, in that order.
+   * Stops at the first problem; later fields stay null. Reads state, never writes it.
    */
   private planMarket(req: SpotOrderRequest, ctx: EngineCtx): MarketPlan {
     const rules = ctx.market.rules(req.symbol);
     const plan: MarketPlan = {
       rules,
-      qty: null,
-      quoteQty: null,
+      fields: { qty: null, quoteQty: null, price: null },
       lockAsset: req.side === 'buy' ? rules.quote : rules.base,
       walk: null,
       lockAmount: null,
@@ -167,40 +203,39 @@ export class SpotEngine {
 
     if (!ctx.market.isFresh(req.symbol)) return fail(`Live data interrupted for ${req.symbol}`);
 
-    const hasQty = present(req.qty);
-    if (hasQty === present(req.quoteQty)) return fail('Enter either a coin amount or a dollar amount');
-    try {
-      if (hasQty) plan.qty = parseAmount(req.qty!);
-      else plan.quoteQty = parseAmount(req.quoteQty!);
-    } catch (e) {
-      if (e instanceof InputError) return fail(e.message);
-      throw e;
-    }
-    // Attached pairs arrive with Task 6; never accept an order while ignoring part of it.
-    if (req.attach) return fail('Attached stop-loss and take-profit are not supported yet');
+    const read = readRequest(req, false);
+    plan.fields = read.fields;
+    if (read.reason !== null) return fail(read.reason);
+    const { qty, quoteQty } = plan.fields;
 
-    const counts = this.openCounts(req.symbol);
     const invalid = validateSpotOrder(
       {
         symbol: req.symbol,
         side: req.side,
         type: 'market',
-        ...(plan.qty ? { qty: plan.qty } : {}),
-        ...(plan.quoteQty ? { quoteQty: plan.quoteQty } : {}),
+        ...(qty ? { qty } : {}),
+        ...(quoteQty ? { quoteQty } : {}),
       },
       rules,
-      { avgPrice: ctx.market.avgPrice(req.symbol), ...counts },
+      { avgPrice: ctx.market.avgPrice(req.symbol), ...openCounts(this.s, req.symbol) },
     );
     if (invalid) return fail(invalid);
 
-    const walk = walkBook(ctx.market.book(req.symbol), req.side, marketTarget(plan), marketStep(rules));
+    const book = ctx.market.book(req.symbol);
+    const walk = walkBook(book, req.side, marketTarget(plan.fields), marketStep(rules));
     plan.walk = walk;
+    if (walk.qty.isZero()) {
+      const side = req.side === 'buy' ? book.asks : book.bids;
+      if (side.length === 0) return fail(`Order book empty for ${req.symbol}`);
+      const step = marketStep(rules);
+      return fail(`Amount too small: ${quoteQty} ${rules.quote} does not reach one step of ${step} ${rules.base}`);
+    }
     // Buy by qty: preview cost of the fillable part. Buy by dollars: the dollars.
     // Sell by qty: the coins. Sell by dollars: the coins the walk needs to raise them.
-    if (req.side === 'buy') plan.lockAmount = plan.qty ? walk.quote : plan.quoteQty!;
-    else plan.lockAmount = plan.qty ? plan.qty : walk.qty;
+    if (req.side === 'buy') plan.lockAmount = qty ? walk.quote : quoteQty!;
+    else plan.lockAmount = qty ? qty : walk.qty;
 
-    const free = balanceOf(this.s, 'spot', plan.lockAsset).free;
+    const free = freeOf(this.s, 'spot', plan.lockAsset);
     if (plan.lockAmount.gt(free)) {
       return fail(`Insufficient ${plan.lockAsset}: need ${plan.lockAmount}, available ${free}`);
     }
@@ -208,18 +243,19 @@ export class SpotEngine {
   }
 
   private arriveMarket(order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
-    const rules = ctx.market.rules(order.symbol);
     if (!ctx.market.isFresh(order.symbol)) {
-      return this.rejectPending(order, `Live data interrupted for ${order.symbol}`, ctx);
+      return rejectPending(this.s, order, `Live data interrupted for ${order.symbol}`, ctx);
     }
+    const rules = ctx.market.rules(order.symbol);
 
     const step = marketStep(rules);
     const book = ctx.market.book(order.symbol);
     const walk = walkBook(book, order.side, marketTarget(order), step);
     const need = order.side === 'buy' ? walk.quote : walk.qty;
-    const available = order.lockAmount.plus(balanceOf(this.s, 'spot', order.lockAsset).free);
+    const available = order.lockAmount.plus(freeOf(this.s, 'spot', order.lockAsset));
     if (need.gt(available)) {
-      return this.rejectPending(
+      return rejectPending(
+        this.s,
         order,
         `Insufficient funds at execution: price moved (need ${need}, available ${available})`,
         ctx,
@@ -230,7 +266,7 @@ export class SpotEngine {
     const events: EngineEvent[] = [];
     let current = order;
     if (walk.qty.gt(0)) {
-      const settled = this.settleTaker(order, walk, rules, thin ? 'partially_filled' : 'filled', ctx);
+      const settled = settleTaker(this.s, order, walk, rules, thin ? 'partially_filled' : 'filled', ctx);
       current = settled.order;
       events.push({ type: 'fill', time: ctx.now, fill: settled.fill, order: current });
     } else {
@@ -247,124 +283,6 @@ export class SpotEngine {
     this.s.orders.set(current.id, current);
     return events;
   }
-
-  /**
-   * Settle one taker fill for the walked amount: spend from the lock first (then free),
-   * credit the received asset net of the fee, and release whatever lock is left.
-   */
-  private settleTaker(
-    order: SpotOrder,
-    walk: WalkResult,
-    rules: SpotRules,
-    status: OrderStatus,
-    ctx: EngineCtx,
-  ): { order: SpotOrder; fill: Fill } {
-    const buy = order.side === 'buy';
-    const fee = spotFee(order.side, walk.qty, walk.quote, ctx.fees.taker, rules.base, rules.quote);
-    const unspent = spendFunds(this.s, order.lockAsset, buy ? walk.quote : walk.qty, order.lockAmount);
-    releaseFunds(this.s, order.lockAsset, unspent);
-    credit(this.s, fee.asset, (buy ? walk.qty : walk.quote).minus(fee.amount));
-
-    const fill: Fill = {
-      id: ctx.newId('f'),
-      orderId: order.id,
-      symbol: order.symbol,
-      side: order.side,
-      qty: walk.qty,
-      price: walk.avgPrice!,
-      quote: walk.quote,
-      liquidity: 'taker',
-      feeAsset: fee.asset,
-      fee: fee.amount,
-      feeUsd: fee.usd,
-      bestAtArrival: walk.bestPrice,
-      bestAtSubmit: order.bestAtSubmit,
-      slippageUsd: walk.slippageUsd,
-      driftUsd: drift(order.side, order.bestAtSubmit, walk.bestPrice, walk.qty),
-      triggerPrice: null,
-      realizedPnl: null,
-      roundTripId: null,
-      time: ctx.now,
-    };
-    const updated: SpotOrder = {
-      ...order,
-      status,
-      filledQty: order.filledQty.plus(walk.qty),
-      filledQuote: order.filledQuote.plus(walk.quote),
-      fee: order.fee.plus(fee.amount),
-      feeAsset: fee.asset,
-      lockAmount: D(0),
-    };
-    return { order: updated, fill };
-  }
-
-  // ---- shared helpers ----
-
-  private newOrder(
-    req: SpotOrderRequest,
-    rules: SpotRules,
-    qty: Decimal | null,
-    quoteQty: Decimal | null,
-    ctx: EngineCtx,
-  ): SpotOrder {
-    return {
-      id: ctx.newId('o'),
-      symbol: req.symbol,
-      side: req.side,
-      type: req.type,
-      qty,
-      quoteQty,
-      price: null,
-      triggerPrice: null,
-      status: 'pending',
-      filledQty: D(0),
-      filledQuote: D(0),
-      fee: D(0),
-      feeAsset: null,
-      lockAsset: req.side === 'buy' ? rules.quote : rules.base,
-      lockAmount: D(0),
-      ocoGroupId: null,
-      attach: null,
-      createdAt: ctx.now,
-      arrivesAt: null,
-      triggeredAt: null,
-      bestAtSubmit: null,
-      rejectReason: null,
-    };
-  }
-
-  /** Record a rejected order (nothing locked) and return its event. */
-  private rejectOrder(order: SpotOrder, reason: string, ctx: EngineCtx): EngineEvent[] {
-    const rejected: SpotOrder = { ...order, status: 'rejected', rejectReason: reason, lockAmount: D(0) };
-    this.s.orders.set(rejected.id, rejected);
-    return [{ type: 'order_rejected', time: ctx.now, order: rejected, reason }];
-  }
-
-  /** Reject an order that holds a lock: release it first. */
-  private rejectPending(order: SpotOrder, reason: string, ctx: EngineCtx): EngineEvent[] {
-    releaseFunds(this.s, order.lockAsset, order.lockAmount);
-    return this.rejectOrder(order, reason, ctx);
-  }
-
-  private openCounts(symbol: string): { openOrders: number; openAlgoOrders: number } {
-    let openOrders = 0;
-    let openAlgoOrders = 0;
-    for (const o of this.s.orders.values()) {
-      if (o.symbol !== symbol || !LIVE_STATUSES.has(o.status)) continue;
-      openOrders += 1;
-      if (o.type === 'stop_loss' || o.type === 'take_profit') openAlgoOrders += 1;
-    }
-    return { openOrders, openAlgoOrders };
-  }
-}
-
-function present(s: string | undefined): boolean {
-  return s !== undefined && s.trim() !== '';
-}
-
-/** 100–300 ms, uniform. */
-function arrivalDelay(ctx: EngineCtx): number {
-  return 100 + Math.floor(ctx.rng() * 201);
 }
 
 function marketStep(rules: SpotRules): Decimal {
@@ -375,12 +293,6 @@ function marketTarget(o: { qty: Decimal | null; quoteQty: Decimal | null }): { q
   return o.qty ? { qty: o.qty } : { quote: o.quoteQty! };
 }
 
-/** Signed delay drift in USD: positive means the price moved against the owner. */
-function drift(side: Side, atSubmit: Decimal | null, atArrival: Decimal | null, qty: Decimal): Decimal {
-  if (!atSubmit || !atArrival) return D(0);
-  return side === 'buy' ? atArrival.minus(atSubmit).mul(qty) : atSubmit.minus(atArrival).mul(qty);
-}
-
 /**
  * Quantity a thin book left unfilled. For dollar-sized orders the unspent dollars are
  * converted at the last walked price and floored to the step (0 if nothing was walked).
@@ -389,17 +301,4 @@ function unfilledQty(order: SpotOrder, walk: WalkResult, lastPrice: Decimal | nu
   if (order.qty) return order.qty.minus(walk.qty);
   if (!lastPrice) return D(0);
   return floorToStep(order.quoteQty!.minus(walk.quote).div(lastPrice), step);
-}
-
-function emptyPreview(rejectReason: string | null): OrderPreview {
-  return {
-    estAvgPrice: null,
-    estSlippageUsd: null,
-    estSlippagePct: null,
-    fee: { asset: null, amount: null, usd: null },
-    total: null,
-    receive: null,
-    exhausted: false,
-    rejectReason,
-  };
 }

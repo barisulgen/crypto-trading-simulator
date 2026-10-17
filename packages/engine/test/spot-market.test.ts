@@ -3,7 +3,7 @@ import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
 import { emptySpotState } from '../src/spot/state.ts';
-import type { EngineEvent, SpotOrder, SpotOrderRequest } from '../src/types.ts';
+import type { EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest } from '../src/types.ts';
 import { FakeMarket, testCtx } from './fixtures.ts';
 
 const NOW = 1_000_000;
@@ -50,6 +50,12 @@ function fillOf(events: EngineEvent[]) {
 
 const s = (x: Decimal | null | undefined) => (x == null ? x : x.toString());
 
+/** Arrive at the order's arrival time (arrive is a no-op before it). */
+function arriveNow(engine: SpotEngine, order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
+  ctx.now = Math.max(ctx.now, order.arrivesAt!);
+  return engine.arrive(order.id, ctx);
+}
+
 describe('arrival delay', () => {
   it('rng 0 → now + 100', () => {
     const { ctx, engine } = setup('1000', { rngValues: [0] });
@@ -81,8 +87,7 @@ describe('market buy by quantity', () => {
   it('arrive fills against the book and settles balances', () => {
     const { ctx, engine, bal } = setup('1000');
     const order = placed(engine.submit(buy({ qty: '1.2' }), ctx));
-    ctx.now = order.arrivesAt!;
-    const events = engine.arrive(order.id, ctx);
+    const events = arriveNow(engine, order, ctx);
     expect(events).toHaveLength(1);
     const fill = fillOf(events);
     expect(fill.id).toBe('f1');
@@ -120,17 +125,29 @@ describe('market buy by quantity', () => {
   it('arrive a second time, or for an unknown id, is a no-op', () => {
     const { ctx, engine, bal } = setup('1000');
     const order = placed(engine.submit(buy({ qty: '1.2' }), ctx));
-    engine.arrive(order.id, ctx);
-    expect(engine.arrive(order.id, ctx)).toEqual([]);
+    arriveNow(engine, order, ctx);
+    expect(arriveNow(engine, order, ctx)).toEqual([]);
     expect(engine.arrive('nope', ctx)).toEqual([]);
     expect(s(bal('BTC').free)).toBe('1.1988');
+  });
+
+  it('arrive before arrivesAt is a no-op (the delay is enforced by the engine)', () => {
+    const { ctx, engine, bal } = setup('1000');
+    const order = placed(engine.submit(buy({ qty: '1.2' }), ctx));
+    expect(engine.arrive(order.id, ctx)).toEqual([]);
+    ctx.now = order.arrivesAt! - 1;
+    expect(engine.arrive(order.id, ctx)).toEqual([]);
+    expect(engine.state.orders.get(order.id)!.status).toBe('pending');
+    expect(s(bal('USDT').locked)).toBe('120.07');
+    ctx.now = order.arrivesAt!;
+    expect(fillOf(engine.arrive(order.id, ctx)).qty.toString()).toBe('1.2');
   });
 
   it('delay drift: book moves up between submit and arrival', () => {
     const { market, ctx, engine, bal } = setup('1000');
     const order = placed(engine.submit(buy({ qty: '1.2' }), ctx));
     market.setBook('BTCUSDT', { asks: [{ price: D('100.10'), qty: D('5') }], bids: [] });
-    const fill = fillOf(engine.arrive(order.id, ctx));
+    const fill = fillOf(arriveNow(engine, order, ctx));
     expect(s(fill.price)).toBe('100.1');
     expect(s(fill.quote)).toBe('120.12');
     expect(s(fill.driftUsd)).toBe('0.12');
@@ -145,7 +162,7 @@ describe('market buy by quantity', () => {
     const { ctx, engine, bal } = setup('1000');
     const order = placed(engine.submit(buy({ qty: '5.0' }), ctx));
     expect(s(order.lockAmount)).toBe('351.1');
-    const events = engine.arrive(order.id, ctx);
+    const events = arriveNow(engine, order, ctx);
     expect(events.map((e) => e.type)).toEqual(['fill', 'order_cancelled']);
     expect(s(fillOf(events).qty)).toBe('3.5');
     const c = events[1]!;
@@ -163,7 +180,7 @@ describe('market buy by quantity', () => {
     const { market, ctx, engine, bal } = setup('1000');
     const order = placed(engine.submit(buy({ qty: '1.2' }), ctx));
     market.setBook('BTCUSDT', { asks: [], bids: [] });
-    const events = engine.arrive(order.id, ctx);
+    const events = arriveNow(engine, order, ctx);
     expect(events.map((e) => e.type)).toEqual(['order_cancelled']);
     const c = events[0]!;
     if (c.type !== 'order_cancelled') throw new Error('expected order_cancelled');
@@ -188,13 +205,23 @@ describe('staleness', () => {
     const { market, ctx, engine, bal } = setup('1000');
     const order = placed(engine.submit(buy({ qty: '1.2' }), ctx));
     market.setFresh('BTCUSDT', false);
-    const events = engine.arrive(order.id, ctx);
+    const events = arriveNow(engine, order, ctx);
     expect(rejectReason(events)).toBe('Live data interrupted for BTCUSDT');
     expect(s(bal('USDT').free)).toBe('1000');
     expect(s(bal('USDT').locked)).toBe('0');
     const stored = engine.state.orders.get(order.id)!;
     expect(stored.status).toBe('rejected');
     expect(s(stored.lockAmount)).toBe('0');
+  });
+
+  it('stale at arrival is decided before asking for the symbol rules', () => {
+    const { market, ctx, engine } = setup('1000');
+    const order = placed(engine.submit(buy({ qty: '1.2' }), ctx));
+    market.setFresh('BTCUSDT', false);
+    market.rules = () => {
+      throw new Error('rules unavailable while stale');
+    };
+    expect(rejectReason(arriveNow(engine, order, ctx))).toBe('Live data interrupted for BTCUSDT');
   });
 });
 
@@ -212,7 +239,7 @@ describe('funds', () => {
     const { market, ctx, engine, bal } = setup('125');
     const order = placed(engine.submit(buy({ qty: '1.2' }), ctx));
     market.setBook('BTCUSDT', { asks: [{ price: D('105'), qty: D('5') }], bids: [] });
-    const events = engine.arrive(order.id, ctx);
+    const events = arriveNow(engine, order, ctx);
     expect(rejectReason(events)).toBe('Insufficient funds at execution: price moved (need 126, available 125)');
     expect(s(bal('USDT').free)).toBe('125');
     expect(s(bal('USDT').locked)).toBe('0');
@@ -241,7 +268,7 @@ describe('market sell', () => {
     expect(s(order.lockAmount)).toBe('1.5');
     expect(s(order.bestAtSubmit)).toBe('99.9');
     expect(s(bal('BTC').locked)).toBe('1.5');
-    const fill = fillOf(engine.arrive(order.id, ctx));
+    const fill = fillOf(arriveNow(engine, order, ctx));
     expect(s(fill.quote)).toBe('149.66');
     expect(fill.feeAsset).toBe('USDT');
     expect(s(fill.fee)).toBe('0.14966');
@@ -255,7 +282,7 @@ describe('market sell', () => {
     const { market, ctx, engine } = setup('0', { btc: '2' });
     const order = placed(engine.submit(sell({ qty: '1' }), ctx));
     market.setBook('BTCUSDT', { asks: [], bids: [{ price: D('99.5'), qty: D('5') }] });
-    const fill = fillOf(engine.arrive(order.id, ctx));
+    const fill = fillOf(arriveNow(engine, order, ctx));
     expect(s(fill.driftUsd)).toBe('0.4');
     expect(s(fill.slippageUsd)).toBe('0');
   });
@@ -264,7 +291,7 @@ describe('market sell', () => {
     const { ctx, engine, bal } = setup('0', { btc: '2' });
     const order = placed(engine.submit(sell({ quoteQty: '50' }), ctx));
     expect(s(order.lockAmount)).toBe('0.5006');
-    const fill = fillOf(engine.arrive(order.id, ctx));
+    const fill = fillOf(arriveNow(engine, order, ctx));
     expect(s(fill.qty)).toBe('0.5006');
     expect(s(fill.quote)).toBe('49.99988');
     expect(s(fill.fee)).toBe('0.04999988');
@@ -282,7 +309,7 @@ describe('market buy by dollar amount', () => {
     expect(s(order.quoteQty)).toBe('100.1');
     expect(order.qty).toBeNull();
     expect(s(bal('USDT').free)).toBe('899.9');
-    const events = engine.arrive(order.id, ctx);
+    const events = arriveNow(engine, order, ctx);
     expect(events.map((e) => e.type)).toEqual(['fill']);
     const fill = fillOf(events);
     expect(s(fill.qty)).toBe('1.00049');
@@ -299,7 +326,7 @@ describe('market buy by dollar amount', () => {
     const { ctx, engine, bal } = setup('1000');
     const order = placed(engine.submit(buy({ quoteQty: '400' }), ctx));
     expect(s(order.lockAmount)).toBe('400');
-    const events = engine.arrive(order.id, ctx);
+    const events = arriveNow(engine, order, ctx);
     expect(events.map((e) => e.type)).toEqual(['fill', 'order_cancelled']);
     expect(s(fillOf(events).qty)).toBe('3.5');
     const c = events[1]!;
@@ -343,11 +370,31 @@ describe('request validation', () => {
     );
   });
 
-  it('non-market types are not supported yet', () => {
+  it('stop and take-profit types are not supported yet', () => {
     const { ctx, engine } = setup('1000');
-    expect(rejectReason(engine.submit(buy({ type: 'limit', qty: '1', price: '99' }), ctx))).toBe(
+    expect(rejectReason(engine.submit(buy({ type: 'stop_loss', qty: '1', triggerPrice: '99' }), ctx))).toBe(
       'Order type not supported yet',
     );
+  });
+
+  it('empty book side at submit → rejected, nothing locked (no zero-lock orders)', () => {
+    const { market, ctx, engine, bal } = setup('1000', { btc: '1' });
+    market.setBook('BTCUSDT', { asks: [], bids: [] });
+    expect(rejectReason(engine.submit(buy({ qty: '1' }), ctx))).toBe('Order book empty for BTCUSDT');
+    expect(rejectReason(engine.submit(buy({ quoteQty: '50' }), ctx))).toBe('Order book empty for BTCUSDT');
+    expect(rejectReason(engine.submit(sell({ qty: '0.5' }), ctx))).toBe('Order book empty for BTCUSDT');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('BTC').locked)).toBe('0');
+    expect(engine.preview(buy({ qty: '1' }), ctx).rejectReason).toBe('Order book empty for BTCUSDT');
+  });
+
+  it('dollar amount below one step at the best price → rejected, nothing locked', () => {
+    const { market, ctx, engine, bal } = setup('1000');
+    market.setBook('BTCUSDT', { asks: [{ price: D('600000'), qty: D('1') }], bids: [] });
+    expect(rejectReason(engine.submit(buy({ quoteQty: '5' }), ctx))).toBe(
+      'Amount too small: 5 USDT does not reach one step of 0.00001 BTC',
+    );
+    expect(s(bal('USDT').locked)).toBe('0');
   });
 });
 
@@ -391,5 +438,14 @@ describe('preview', () => {
     expect(stale.estAvgPrice).toBeNull();
     expect(stale.total).toBeNull();
     expect(engine.state.orders.size).toBe(0);
+  });
+
+  it('does not create balance rows for an asset the wallet has never held', () => {
+    const ctx = testCtx(new FakeMarket(), { now: NOW });
+    const engine = new SpotEngine(emptySpotState(['USDT']));
+    const before = JSON.stringify(engine.state.balances);
+    expect(engine.preview(sell({ qty: '1' }), ctx).rejectReason).toBe('Insufficient BTC: need 1, available 0');
+    expect(JSON.stringify(engine.state.balances)).toBe(before);
+    expect('BTC' in engine.state.balances.spot).toBe(false);
   });
 });

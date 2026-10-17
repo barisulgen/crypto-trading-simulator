@@ -60,6 +60,9 @@ export class FakeMarket implements MarketView {
   setLastPrice(symbol: string, price: Decimal | null): void {
     this.lastPrices.set(symbol, price);
   }
+  setRules(symbol: string, rules: SpotRules): void {
+    this.ruleSet.set(symbol, rules);
+  }
 
   isFresh(symbol: string): boolean {
     return this.freshness.get(symbol) ?? false;

@@ -6,3 +6,4 @@ export * from './book.ts';
 export * from './fees.ts';
 export * from './spot/state.ts';
 export * from './spot/engine.ts';
+export * from './spot/matching.ts';
