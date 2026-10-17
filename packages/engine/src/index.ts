@@ -4,3 +4,5 @@ export * from './types.ts';
 export * from './rules.ts';
 export * from './book.ts';
 export * from './fees.ts';
+export * from './spot/state.ts';
+export * from './spot/engine.ts';
