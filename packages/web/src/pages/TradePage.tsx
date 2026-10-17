@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { BottomTabs } from '../components/BottomTabs.tsx';
 import { CoinList } from '../components/CoinList.tsx';
 import { OrderBook } from '../components/OrderBook.tsx';
-import { Panel, SlotPlaceholder } from '../components/Panel.tsx';
+import { OrderForm } from '../components/OrderForm.tsx';
+import { Panel } from '../components/Panel.tsx';
 import { IntervalPicker, PriceChart } from '../components/PriceChart.tsx';
 import { RecentTrades } from '../components/RecentTrades.tsx';
 import type { Slot } from '../components/Panel.tsx';
@@ -41,6 +43,15 @@ export function TradePage() {
   const interval = useLive((s) => s.interval);
   const on = (slot: Slot) => tab === slot;
 
+  // Phones: a click on an order-book price opens the order form with that price filled in.
+  const priceSeq = useLive((s) => s.priceClick?.seq);
+  const seenPrice = useRef(priceSeq);
+  useEffect(() => {
+    if (priceSeq === undefined || priceSeq === seenPrice.current) return;
+    seenPrice.current = priceSeq;
+    setTab('form');
+  }, [priceSeq]);
+
   return (
     <div className="flex h-full min-h-0 flex-col desk:p-1.5">
       <div className="trade-grid min-h-0 flex-1">
@@ -61,13 +72,11 @@ export function TradePage() {
         </Panel>
 
         <Panel slot="form" active={on('form')} title="Place order">
-          {/* T15: <OrderForm /> */}
-          <SlotPlaceholder>The buy and sell form with its live cost preview goes here.</SlotPlaceholder>
+          <OrderForm />
         </Panel>
 
         <Panel slot="tabs" active={on('tabs')}>
-          {/* T15: <BottomTabs /> (open orders, holdings, recent fills) */}
-          <SlotPlaceholder>Open orders, holdings and recent fills go here.</SlotPlaceholder>
+          <BottomTabs />
         </Panel>
       </div>
 

@@ -42,8 +42,12 @@ export interface Ticker {
 
 export type HealthMap = Record<string, { fresh: boolean; reason: string | null }>;
 
-/** Account value plus the raw wallet balances. */
-export type AccountSnapshot = Wire<AccountValue> & { balances: Record<Wallet, Record<string, Wire<Balance>>> };
+/** Account value plus the raw wallet balances and each held coin's cost basis. */
+export type AccountSnapshot = Wire<AccountValue> & {
+  balances: Record<Wallet, Record<string, Wire<Balance>>>;
+  /** Per coin held: quantity and USDT cost (fees included). */
+  basis: Record<string, { qty: string; cost: string }>;
+};
 
 export interface NoticeMessage {
   kind: 'fill' | 'partial_fill' | 'rejected' | 'triggered' | 'thin_book' | 'feed_gap' | 'feed_restored';

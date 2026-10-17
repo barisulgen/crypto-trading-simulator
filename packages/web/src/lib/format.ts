@@ -110,6 +110,20 @@ export function fmtQty(symbol: string, value: Value): string {
   return fmtNum(value, step !== undefined ? tickDecimals(step) : ownDecimals(value));
 }
 
+/**
+ * A coin balance in full: the step-size decimals at least, more (up to 8) when the value has them,
+ * since a fee taken in the coin leaves sub-step remainders. Never rounded up.
+ */
+export function fmtBalance(symbol: string, value: Value): string {
+  if (value === null || value === undefined) return DASH;
+  const p = parse(value);
+  if (!p) return value;
+  const own = Math.min(p.frac.replace(/0+$/, '').length, 8);
+  const step = rulesBySymbol[symbol]?.stepSize;
+  const cut = `${p.negative ? '-' : ''}${p.int}.${p.frac.slice(0, 8)}`;
+  return fmtNum(cut, Math.max(own, step !== undefined ? tickDecimals(step) : 0));
+}
+
 /** US dollars: '$1,234.56', '-$12.35'; with `sign: true` gains get a '+'. */
 export function fmtUsd(value: Value, opts: { sign?: boolean } = {}): string {
   if (value === null || value === undefined) return DASH;

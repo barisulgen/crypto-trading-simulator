@@ -10,16 +10,19 @@ const TONES: Record<Tone, string> = {
   quiet: 'text-muted hover:text-fg',
 };
 
+const SIZES = { md: 'h-8 px-3 text-sm', sm: 'h-6 px-2 text-xs' } as const;
+
 export function Button({
   tone = 'plain',
+  size = 'md',
   className = '',
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: Tone }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: Tone; size?: keyof typeof SIZES }) {
   return (
     <button
       type="button"
       {...rest}
-      className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-ctl px-3 text-sm whitespace-nowrap disabled:opacity-50 ${TONES[tone]} ${className}`}
+      className={`inline-flex items-center justify-center gap-1.5 rounded-ctl whitespace-nowrap disabled:opacity-50 ${SIZES[size]} ${TONES[tone]} ${className}`}
     />
   );
 }
@@ -29,6 +32,8 @@ export interface SegmentOption<T extends string> {
   label: ReactNode;
   disabled?: boolean;
   title?: string;
+  /** Extra classes for this option (e.g. a column span when the control is a grid). */
+  className?: string;
 }
 
 /** A row of mutually exclusive choices (radio semantics). */
@@ -38,15 +43,22 @@ export function Segmented<T extends string>({
   options,
   onChange,
   className = '',
+  grid,
 }: {
   label: string;
   value: T;
   options: SegmentOption<T>[];
   onChange(v: T): void;
   className?: string;
+  /** Grid classes (e.g. 'grid-cols-6 gap-0.5') to lay the options out in rows instead of one flex row. */
+  grid?: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className={`flex rounded-ctl border border-line bg-canvas p-0.5 ${className}`}>
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className={`${grid ? `grid ${grid}` : 'flex'} rounded-ctl border border-line bg-canvas p-0.5 ${className}`}
+    >
       {options.map((o) => {
         const on = o.value === value;
         return (
@@ -58,9 +70,9 @@ export function Segmented<T extends string>({
             disabled={o.disabled}
             title={o.title}
             onClick={() => onChange(o.value)}
-            className={`flex h-7 flex-1 items-center justify-center gap-1 rounded-[3px] px-2 text-xs disabled:cursor-not-allowed ${
+            className={`flex h-7 flex-1 items-center justify-center gap-1 rounded-[3px] px-2 text-xs whitespace-nowrap disabled:cursor-not-allowed ${
               on ? 'bg-raised font-semibold text-fg shadow-[inset_0_-2px_0_var(--color-accent)]' : 'text-muted enabled:hover:text-fg'
-            }`}
+            } ${o.className ?? ''}`}
           >
             {o.label}
           </button>
@@ -70,23 +82,43 @@ export function Segmented<T extends string>({
   );
 }
 
-/** A labelled text input; `hint` sits under it. */
+/**
+ * A labelled text input; `hint` sits under it, `aside` at the right end of the label row (e.g. a
+ * unit switch) and `unit` inside the field at its right edge.
+ */
 export function TextField({
   label,
   hint,
+  aside,
+  unit,
   ...rest
-}: InputHTMLAttributes<HTMLInputElement> & { label: string; hint?: ReactNode }) {
+}: InputHTMLAttributes<HTMLInputElement> & { label: string; hint?: ReactNode; aside?: ReactNode; unit?: string }) {
   const id = useId();
+  const unitId = useId();
   return (
     <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-xs text-muted">
-        {label}
-      </label>
-      <input
-        id={id}
-        {...rest}
-        className="h-10 rounded-ctl border border-line bg-canvas px-3 text-base text-fg placeholder:text-faint focus:border-focus"
-      />
+      <div className="flex min-h-5 items-center justify-between gap-2">
+        <label htmlFor={id} className="text-xs text-muted">
+          {label}
+        </label>
+        {aside}
+      </div>
+      <div className="relative">
+        <input
+          id={id}
+          aria-describedby={unit ? unitId : undefined}
+          {...rest}
+          className={`h-10 w-full min-w-0 rounded-ctl border border-line bg-canvas px-3 text-base text-fg placeholder:text-faint focus:border-focus ${unit ? 'pr-14' : ''}`}
+        />
+        {unit && (
+          <span
+            id={unitId}
+            className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-faint"
+          >
+            {unit}
+          </span>
+        )}
+      </div>
       {hint !== undefined && <div className="text-xs text-faint">{hint}</div>}
     </div>
   );

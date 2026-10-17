@@ -22,6 +22,7 @@ const account: AccountSnapshot = {
     spot: { USDT: { free: '1000', locked: '0' } },
     leverage: { USDT: { free: '0', locked: '0' } },
   },
+  basis: {},
 };
 
 const trade = (id: number, price = '100'): WireAggTrade => ({ id, price, qty: '1', sellerInitiated: false, time: T0 + id });

@@ -101,6 +101,16 @@ describe('EngineRunner', () => {
     expect(account.account.total).toBe('1000');
   });
 
+  it('the account carries each held coin\'s cost basis (qty and cost) for holdings, also in the broadcast', () => {
+    const t = setup();
+    t.runner.start();
+    expect(JSON.parse(toJson(t.runner.account())).basis).toEqual({});
+    withBtc(t); // 1 BTC for 100.05 USDT, fee 0.001 BTC: 0.999 BTC held at a cost of 100.05
+    expect(JSON.parse(toJson(t.runner.account())).basis).toEqual({ BTC: { qty: '0.999', cost: '100.05' } });
+    const account = t.sent.filter((m) => m.type === 'account').at(-1)!;
+    expect(account.account.basis).toEqual({ BTC: { qty: '0.999', cost: '100.05' } });
+  });
+
   it('a market buy fills at its arrival time, is persisted and gives a fill notice', () => {
     const t = setup();
     t.runner.start();

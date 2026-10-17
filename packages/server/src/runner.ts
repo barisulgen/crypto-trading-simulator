@@ -50,9 +50,11 @@ export interface Notice {
   text: string;
 }
 
-/** Account value plus the raw wallet balances. */
+/** Account value plus the raw wallet balances and each held coin's average-cost basis. */
 export interface AccountSnapshot extends AccountValue {
   balances: SpotState['balances'];
+  /** Per coin with a holding: quantity and USDT cost (fees included), for average cost and unrealised P&L. */
+  basis: Record<string, { qty: Decimal; cost: Decimal }>;
 }
 
 export type RunnerMessage =
@@ -186,9 +188,14 @@ export class EngineRunner {
 
   account(): AccountSnapshot {
     const state = this.d.engine.state;
+    const basis: AccountSnapshot['basis'] = {};
+    for (const [asset, b] of Object.entries(state.basis)) {
+      if (b.qty.gt(0)) basis[asset] = { qty: b.qty, cost: b.cost };
+    }
     return {
       ...valueAccount(state, (s) => this.d.market.bestBid(s), this.d.symbols),
       balances: state.balances,
+      basis,
     };
   }
 

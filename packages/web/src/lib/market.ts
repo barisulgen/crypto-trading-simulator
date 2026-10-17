@@ -38,6 +38,56 @@ export function subDec(a: string, b: string): string {
   return unscaled(scaled(a, s) - scaled(b, s), s);
 }
 
+/** -1, 0 or 1 as a is below, equal to or above b (exact). */
+export function cmpDec(a: string, b: string): -1 | 0 | 1 {
+  const s = Math.max(scaleOf(a), scaleOf(b));
+  const d = scaled(a, s) - scaled(b, s);
+  return d < 0n ? -1 : d > 0n ? 1 : 0;
+}
+
+/** n / d rounded half away from zero (exact BigInt division; d must not be 0). */
+function divRound(n: bigint, d: bigint): bigint {
+  const q = n / d;
+  const r = n % d;
+  const twice = (r < 0n ? -r : r) * 2n;
+  if (twice < (d < 0n ? -d : d)) return q;
+  return (n < 0n) !== (d < 0n) ? q - 1n : q + 1n;
+}
+
+/** A scaled integer as a decimal string with exactly `dp` decimals (no '-0'). */
+function fixed(n: bigint, dp: number): string {
+  if (n === 0n) return dp > 0 ? `0.${'0'.repeat(dp)}` : '0';
+  const neg = n < 0n;
+  const digits = (neg ? -n : n).toString().padStart(dp + 1, '0');
+  const int = digits.slice(0, digits.length - dp);
+  return `${neg ? '-' : ''}${int}${dp > 0 ? '.' + digits.slice(digits.length - dp) : ''}`;
+}
+
+/** a / b with exactly `dp` decimals, rounded half away from zero. Throws if b is 0. */
+export function divDec(a: string, b: string, dp: number): string {
+  const s = Math.max(scaleOf(a), scaleOf(b));
+  const d = scaled(b, s);
+  if (d === 0n) throw new Error('Division by zero');
+  return fixed(divRound(scaled(a, s) * 10n ** BigInt(dp), d), dp);
+}
+
+/** A non-negative quantity rounded down to a multiple of `step` (as the exchange's LOT_SIZE wants it). */
+export function floorToStep(value: string, step: string): string {
+  const s = Math.max(scaleOf(value), scaleOf(step));
+  const st = scaled(step, s);
+  if (st <= 0n) return value;
+  const v = scaled(value, s);
+  return unscaled(v - (v % st), s);
+}
+
+/** part / whole * 100 with `dp` decimals (default 2), rounded half away from zero. */
+export function pctOf(part: string, whole: string, dp = 2): string {
+  const s = Math.max(scaleOf(part), scaleOf(whole));
+  const d = scaled(whole, s);
+  if (d === 0n) throw new Error('Division by zero');
+  return fixed(divRound(scaled(part, s) * 100n * 10n ** BigInt(dp), d), dp);
+}
+
 // ---- order book ----
 
 export interface DepthRow {

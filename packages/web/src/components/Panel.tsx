@@ -38,8 +38,3 @@ export function Panel({
     </section>
   );
 }
-
-/** What an empty slot shows until its task fills it. */
-export function SlotPlaceholder({ children }: { children: ReactNode }) {
-  return <div className="m-auto max-w-[28ch] p-6 text-center text-xs text-faint">{children}</div>;
-}

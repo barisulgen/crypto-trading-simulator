@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
+import { fmtBalance, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
 
 describe('tickDecimals', () => {
   it('counts the significant decimals of a tick or step size', () => {
@@ -49,6 +49,18 @@ describe('fmtPrice and fmtQty', () => {
     expect(fmtPrice('DOGEUSDT', '0.123456')).toBe('0.12346');
     expect(fmtQty('BTCUSDT', '0.5')).toBe('0.50000');
     expect(fmtQty('DOGEUSDT', '1500')).toBe('1,500');
+  });
+
+  it('fmtBalance shows a balance in full (step decimals at least, up to 8), never rounded up', () => {
+    setRules({
+      BTCUSDT: { tickSize: '0.01000000', stepSize: '0.00001000' },
+      DOGEUSDT: { tickSize: '0.00001000', stepSize: '1.00000000' },
+    });
+    expect(fmtBalance('BTCUSDT', '0.00121878')).toBe('0.00121878'); // fmtQty would say 0.00122
+    expect(fmtBalance('BTCUSDT', '0.5')).toBe('0.50000');
+    expect(fmtBalance('DOGEUSDT', '1498.5')).toBe('1,498.5');
+    expect(fmtBalance('DOGEUSDT', '1500')).toBe('1,500');
+    expect(fmtBalance('ETHUSDT', undefined)).toBe('-');
   });
 
   it('fall back to the value as given (trailing zeros trimmed) without rules, and a dash for no value', () => {
