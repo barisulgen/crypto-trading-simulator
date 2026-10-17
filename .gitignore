@@ -1,0 +1,21 @@
+.env.local
+
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# dependencies & build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# local database & runtime data
+data/
+*.sqlite
+*.sqlite-journal
+*.db
+*.db-wal
+*.db-shm
+logs/
