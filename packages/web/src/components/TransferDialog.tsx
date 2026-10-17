@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import type { Wallet } from '../lib/api.ts';
-import { fmtUsd } from '../lib/format.ts';
+import { fmtUsdFloor } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
 import { Button, Dialog, ErrorText, TextField } from './ui.tsx';
 
@@ -78,7 +78,7 @@ export function TransferDialog({ open, onClose }: { open: boolean; onClose(): vo
           onChange={(e) => setAmount(e.target.value)}
           hint={
             <span className="flex items-center justify-between gap-2">
-              <span>Free in the {from} wallet: {fmtUsd(free)}</span>
+              <span>Free in the {from} wallet: {fmtUsdFloor(free)}</span>
               {free !== undefined && (
                 <button type="button" className="text-accent underline-offset-2 hover:underline" onClick={() => setAmount(free)}>
                   Use all

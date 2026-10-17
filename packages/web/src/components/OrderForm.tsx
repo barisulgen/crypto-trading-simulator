@@ -4,88 +4,39 @@ import type { FormEvent, ReactNode } from 'react';
 import type { OrderType, Side } from '@sim/engine';
 import { api, ApiError } from '../lib/api.ts';
 import type { WirePreview } from '../lib/api.ts';
-import { fmtBalance, fmtNum, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
+import { fmtBalance, fmtFloor, fmtNum, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
 import {
   ORDER_TYPES,
   buildOrderRequest,
   canAttach,
-  createLatest,
   fillable,
   hasPrice,
   hasTrigger,
   missingInput,
 } from '../lib/orderForm.ts';
 import type { OrderFormFields } from '../lib/orderForm.ts';
+import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
+import type { PreviewState } from '../lib/previewLoop.ts';
 import { Segmented, TextField } from './ui.tsx';
 
-/** Preview after the owner stops typing for this long. */
-const EDIT_DEBOUNCE_MS = 250;
-/** While an amount is entered, book updates refresh the preview at most this often. */
-const BOOK_REFRESH_MS = 500;
-
-interface PreviewState {
-  /** The request (JSON) this answer is for. */
-  key: string | null;
-  preview: WirePreview | null;
-  /** An input or server error (HTTP 4xx/5xx) instead of a preview. */
-  error: string | null;
-}
-
-const NO_PREVIEW: PreviewState = { key: null, preview: null, error: null };
-
 /**
- * POST /api/orders/preview for `key` (a request as JSON; null = nothing to preview): 250 ms after
- * the last edit, and again on order-book updates at most twice a second. Only the latest
- * request's answer is shown; an older one arriving late is ignored.
+ * POST /api/orders/preview for `key` (a request as JSON; null = nothing to preview), driven by a
+ * PreviewLoop: 250 ms after the last edit, and on order-book updates at most twice a second.
  */
 function usePreview(key: string | null): PreviewState {
   const [state, setState] = useState<PreviewState>(NO_PREVIEW);
-  const [latest] = useState(createLatest);
-  const keyRef = useRef(key);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastRun = useRef(0);
-
+  const [loop] = useState(() => new PreviewLoop((k) => api.preview(JSON.parse(k)), setState));
   useEffect(() => {
-    const clear = () => {
-      if (timer.current !== null) clearTimeout(timer.current);
-      timer.current = null;
-    };
-    const run = async () => {
-      timer.current = null;
-      const k = keyRef.current;
-      if (k === null) return;
-      lastRun.current = Date.now();
-      const outcome = await latest.run(api.preview(JSON.parse(k)));
-      if (outcome === null) return; // a newer request is on its way
-      if (outcome.ok) setState({ key: k, preview: outcome.value, error: null });
-      else {
-        const e = outcome.error;
-        setState({ key: k, preview: null, error: e instanceof ApiError ? e.message : String(e) });
-      }
-    };
-
-    keyRef.current = key;
-    clear();
-    // The form changed: an answer still on its way is for an older version of it.
-    latest.cancel();
-    if (key === null) {
-      setState(NO_PREVIEW);
-      return;
-    }
-    timer.current = setTimeout(() => void run(), EDIT_DEBOUNCE_MS);
-    // Book updates: refresh, throttled; a pending edit debounce already covers them.
     const unsubscribe = useLive.subscribe((s, prev) => {
-      if (s.book === prev.book || timer.current !== null || keyRef.current === null) return;
-      const wait = Math.max(0, lastRun.current + BOOK_REFRESH_MS - Date.now());
-      timer.current = setTimeout(() => void run(), wait);
+      if (s.book !== prev.book) loop.bookChanged();
     });
     return () => {
       unsubscribe();
-      clear();
+      loop.dispose();
     };
-  }, [key, latest]);
-
+  }, [loop]);
+  useEffect(() => loop.setKey(key), [loop, key]);
   return state;
 }
 
@@ -176,14 +127,14 @@ function Estimate({
         )}
       </dl>
       {p.exhausted && (
-        <p className="rounded-ctl border border-accent/50 bg-accent-soft px-2.5 py-1.5 text-xs text-fg">
+        <p role="status" className="rounded-ctl border border-accent/50 bg-accent-soft px-2.5 py-1.5 text-xs text-fg">
           Book too thin: only {thin === null ? 'nothing' : thin.unit === 'coin' ? `${thin.amount} ${base}` : fmtUsd(thin.amount)}{' '}
           fillable
         </p>
       )}
       {p.note && <p className="text-xs text-muted">{p.note}</p>}
       {p.rejectReason && (
-        <p className="rounded-ctl border border-down/40 bg-down-soft px-2.5 py-1.5 text-xs text-fg">
+        <p role="status" className="rounded-ctl border border-down/40 bg-down-soft px-2.5 py-1.5 text-xs text-fg">
           <span className="font-semibold">Would be rejected: </span>
           {p.rejectReason}
           <span className="mt-0.5 block text-muted">Submitting records the rejection in history.</span>
@@ -352,7 +303,7 @@ export function OrderForm() {
         name="amount"
         inputMode="decimal"
         autoComplete="off"
-        placeholder="0"
+        placeholder="0.00"
         value={amount}
         onChange={(e) => setAmount(e.target.value)}
         aside={
@@ -371,7 +322,7 @@ export function OrderForm() {
           <>
             Available{' '}
             <span className="text-muted">
-              {free === undefined ? '-' : spend === quote ? `${fmtNum(free, 2)} ${quote}` : `${fmtBalance(symbol, free)} ${base}`}
+              {free === undefined ? '-' : spend === quote ? `${fmtFloor(free, 2)} ${quote}` : `${fmtBalance(symbol, free)} ${base}`}
             </span>
           </>
         }
@@ -417,7 +368,8 @@ export function OrderForm() {
         </fieldset>
       )}
 
-      <section aria-label="Estimate" aria-live="polite" className="rounded-ctl border border-line bg-canvas px-3 py-2.5">
+      {/* Not a live region as a whole: it refreshes with the book. Only the problem messages inside are (role=status). */}
+      <section aria-label="Estimate" className="rounded-ctl border border-line bg-canvas px-3 py-2.5">
         <Estimate
           symbol={symbol}
           side={side}

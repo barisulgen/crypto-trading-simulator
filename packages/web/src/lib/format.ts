@@ -124,6 +124,33 @@ export function fmtBalance(symbol: string, value: Value): string {
   return fmtNum(cut, Math.max(own, step !== undefined ? tickDecimals(step) : 0));
 }
 
+/** A balance cut down to `dp` decimals with separators: never shows more than there is. */
+export function fmtFloor(value: Value, dp: number): string {
+  if (value === null || value === undefined) return DASH;
+  const p = parse(value);
+  if (!p) return value;
+  return fmtNum(`${p.negative ? '-' : ''}${p.int}.${p.frac.slice(0, dp)}`, dp);
+}
+
+/** A wallet balance in dollars, cut (never rounded up) to cents: '$802.21' for 802.2167722. */
+export function fmtUsdFloor(value: Value): string {
+  if (value === null || value === undefined) return DASH;
+  const f = fmtFloor(value, 2);
+  return f.startsWith('-') ? `-$${f.slice(1)}` : `$${f}`;
+}
+
+/**
+ * Delay drift of a fill in words: the engine stores a cost to the owner as positive, so
+ * 'cost $0.07' or 'gain $0.03'; '$0.00' when it shows as zero.
+ */
+export function fmtDrift(value: Value): string {
+  if (value === null || value === undefined) return DASH;
+  const s = signOf(value, 2);
+  if (s === 0) return '$0.00';
+  const abs = value.trim().replace(/^[+-]/, '');
+  return `${s > 0 ? 'cost' : 'gain'} ${fmtUsd(abs)}`;
+}
+
 /** US dollars: '$1,234.56', '-$12.35'; with `sign: true` gains get a '+'. */
 export function fmtUsd(value: Value, opts: { sign?: boolean } = {}): string {
   if (value === null || value === undefined) return DASH;

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { fmtPct, fmtUsd } from '../lib/format.ts';
+import { fmtPct, fmtUsd, fmtUsdFloor } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
 import { changeClass } from './CoinList.tsx';
 import { DepositDialog } from './DepositDialog.tsx';
@@ -21,10 +21,10 @@ function Stat({ label, children, className = '' }: { label: ReactNode; children:
 function WalletStat({ label, free, locked }: { label: string; free?: string; locked?: string }) {
   return (
     <Stat label={label}>
-      {fmtUsd(free)}
+      {fmtUsdFloor(free)}
       <span className="text-muted"> free</span>
       <span className="block text-xs text-muted desk:ml-2 desk:inline">
-        {fmtUsd(locked)} <span>locked</span>
+        {fmtUsdFloor(locked)} <span>locked</span>
       </span>
     </Stat>
   );

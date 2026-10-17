@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { fmtBalance, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
+import { fmtBalance, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
 
 describe('tickDecimals', () => {
   it('counts the significant decimals of a tick or step size', () => {
@@ -102,5 +102,31 @@ describe('fmtPct and signOf', () => {
     expect(signOf('-0.004', 2)).toBe(0);
     expect(signOf('-0.005', 2)).toBe(-1);
     expect(signOf(null)).toBe(0);
+  });
+});
+
+describe('fmtFloor', () => {
+  it('cuts a balance down to the decimals shown, never rounding it up', () => {
+    expect(fmtFloor('802.2167722', 2)).toBe('802.21');
+    expect(fmtFloor('1234.999', 2)).toBe('1,234.99');
+    expect(fmtFloor('1000', 2)).toBe('1,000.00');
+    expect(fmtFloor('0.009', 2)).toBe('0.00');
+    expect(fmtFloor(undefined, 2)).toBe('-');
+  });
+
+  it('fmtUsdFloor shows a wallet balance in dollars without rounding it up', () => {
+    expect(fmtUsdFloor('802.2167722')).toBe('$802.21');
+    expect(fmtUsdFloor('1000')).toBe('$1,000.00');
+    expect(fmtUsdFloor(undefined)).toBe('-');
+  });
+});
+
+describe('fmtDrift', () => {
+  it('says cost or gain in words (the engine stores a cost as positive), $0.00 when it shows as zero', () => {
+    expect(fmtDrift('0.0712')).toBe('cost $0.07');
+    expect(fmtDrift('-0.026')).toBe('gain $0.03');
+    expect(fmtDrift('0')).toBe('$0.00');
+    expect(fmtDrift('-0.004')).toBe('$0.00');
+    expect(fmtDrift('1234.5')).toBe('cost $1,234.50');
   });
 });

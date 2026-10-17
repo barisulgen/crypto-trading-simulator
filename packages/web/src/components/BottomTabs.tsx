@@ -3,11 +3,11 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import type { WireFill, WireOrder } from '../lib/api.ts';
-import { fmtBalance, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, tickDecimals } from '../lib/format.ts';
+import { fmtBalance, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { avgFill, holdingRows } from '../lib/holdings.ts';
 import type { HoldingRow } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
-import { cmpDec, floorToStep, fmtClock, fmtChartTime, subDec } from '../lib/market.ts';
+import { cmpDec, floorToStep, fmtClock, fmtChartTime } from '../lib/market.ts';
 import { AttachPairDialog } from './AttachPairDialog.tsx';
 import type { PairTarget } from './AttachPairDialog.tsx';
 import { changeClass } from './CoinList.tsx';
@@ -369,17 +369,17 @@ const FILL_COLS: Col[] = [
   { label: 'Price', right: true },
   { label: 'Best at arrival', right: true },
   { label: 'Slippage', right: true, title: 'Average price against the best price at arrival (a cost)' },
-  { label: 'Delay drift', right: true, title: 'Best price moving during the arrival delay (+ in your favour)' },
+  { label: 'Delay drift', right: true, title: 'The best price moving during the arrival delay: a cost or a gain to you' },
   { label: 'Role' },
   { label: 'Fee', right: true },
 ];
 const FILL_TEMPLATE =
-  '4.5rem minmax(2.5rem,0.6fr) 2.5rem minmax(4.5rem,1fr) minmax(5.5rem,1.2fr) minmax(5rem,1fr) minmax(3.5rem,0.8fr) minmax(3.5rem,0.8fr) 3rem minmax(6rem,1.3fr)';
+  '4.5rem minmax(2.5rem,0.6fr) 2.5rem minmax(4.5rem,1fr) minmax(5.5rem,1.2fr) minmax(5rem,1fr) minmax(3.5rem,0.8fr) minmax(4.5rem,0.9fr) 3rem minmax(6rem,1.3fr)';
 
-/** A cost or gain to the owner as a signed dollar amount: '-$0.07' costs, '+$0.02' helps. */
-function effect(costUsd: string): ReactNode {
-  const v = subDec('0', costUsd);
-  return <span className={changeClass(v)}>{fmtUsd(v, { sign: true })}</span>;
+/** Delay drift in words ('cost $0.07' / 'gain $0.03'), coloured as its effect on the owner. */
+function drift(driftUsd: string): ReactNode {
+  const s = signOf(driftUsd, 2);
+  return <span className={s > 0 ? 'text-down' : s < 0 ? 'text-up' : 'text-muted'}>{fmtDrift(driftUsd)}</span>;
 }
 
 function FillLine({ f }: { f: WireFill }) {
@@ -406,10 +406,11 @@ function FillLine({ f }: { f: WireFill }) {
         {fmtPrice(f.symbol, f.bestAtArrival)}
       </Cell>
       <Cell width={w} label="Slippage" right>
-        {effect(f.slippageUsd)}
+        {/* An unsigned cost (always >= 0), as in the preview and the fill notices. */}
+        <span className={signOf(f.slippageUsd, 2) > 0 ? '' : 'text-muted'}>{fmtUsd(f.slippageUsd)}</span>
       </Cell>
       <Cell width={w} label="Delay drift" right>
-        {effect(f.driftUsd)}
+        {drift(f.driftUsd)}
       </Cell>
       <Cell width={w} label="Role" head>
         {f.liquidity === 'maker' ? 'Maker' : 'Taker'}

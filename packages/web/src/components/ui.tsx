@@ -10,7 +10,8 @@ const TONES: Record<Tone, string> = {
   quiet: 'text-muted hover:text-fg',
 };
 
-const SIZES = { md: 'h-8 px-3 text-sm', sm: 'h-6 px-2 text-xs' } as const;
+/** `sm` is compact on desktop only: under 900 px it stays a 36 px touch target. */
+const SIZES = { md: 'h-8 px-3 text-sm', sm: 'h-9 px-3 text-xs desk:h-6 desk:px-2' } as const;
 
 export function Button({
   tone = 'plain',
