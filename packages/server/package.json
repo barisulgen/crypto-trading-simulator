@@ -9,8 +9,11 @@
     "feed:smoke": "tsx scripts/feed-smoke.ts"
   },
   "dependencies": {
+    "@fastify/static": "10.1.6",
+    "@fastify/websocket": "11.3.4",
     "@sim/engine": "*",
     "better-sqlite3": "^13.0.3",
+    "fastify": "5.12.7",
     "ws": "8.22.0"
   },
   "devDependencies": {

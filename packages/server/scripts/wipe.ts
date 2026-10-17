@@ -19,7 +19,7 @@ if (answer === 'WIPE') {
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (code !== 'EBUSY' && code !== 'EPERM') throw e;
-      console.error('Database is in use — stop the server first');
+      console.error('Database is in use - stop the server first');
       process.exit(1);
     }
   }

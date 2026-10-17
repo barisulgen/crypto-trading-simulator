@@ -31,7 +31,7 @@ export interface HistoryRow {
 // ---- Decimal <-> string ----
 
 /** JSON with every Decimal written via toString() (JSON.stringify would call valueOf, giving '-0'). */
-function toJson(value: unknown): string {
+export function toJson(value: unknown): string {
   // JSON.stringify calls Decimal.toJSON before the replacer, so test the holder's raw value instead.
   return JSON.stringify(value, function (this: Record<string, unknown>, key: string, v: unknown) {
     const raw = this[key];
@@ -317,6 +317,50 @@ export function queryHistory(db: Db, q: HistoryQuery): { rows: HistoryRow[]; nex
   return { rows, nextBefore: rows.length === q.limit && last ? last.id : null };
 }
 
+/** The season's most recently updated orders, any status, as stored (decimals as strings). */
+export function recentOrders(db: Db, seasonId: number, limit: number): unknown[] {
+  const rows = db
+    .prepare('SELECT data FROM orders WHERE season_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?')
+    .all(seasonId, limit) as { data: string }[];
+  return rows.map((r) => JSON.parse(r.data) as unknown);
+}
+
+export interface FillRow {
+  id: string;
+  orderId: string;
+  symbol: string;
+  side: string;
+  qty: string;
+  price: string;
+  quote: string;
+  liquidity: string;
+  feeAsset: string;
+  fee: string;
+  feeUsd: string;
+  bestAtArrival: string | null;
+  bestAtSubmit: string | null;
+  slippageUsd: string;
+  driftUsd: string;
+  triggerPrice: string | null;
+  realizedPnl: string | null;
+  roundTripId: string | null;
+  time: number;
+}
+
+/** The season's fills, newest first, optionally for one symbol. */
+export function queryFills(db: Db, seasonId: number, q: { symbol?: string; limit: number }): FillRow[] {
+  const bySymbol = q.symbol !== undefined;
+  return db
+    .prepare(
+      `SELECT id, order_id AS orderId, symbol, side, qty, price, quote, liquidity, fee_asset AS feeAsset, fee,
+         fee_usd AS feeUsd, best_at_arrival AS bestAtArrival, best_at_submit AS bestAtSubmit,
+         slippage_usd AS slippageUsd, drift_usd AS driftUsd, trigger_price AS triggerPrice,
+         realized_pnl AS realizedPnl, round_trip_id AS roundTripId, time
+       FROM fills WHERE season_id = ?${bySymbol ? ' AND symbol = ?' : ''} ORDER BY time DESC, rowid DESC LIMIT ?`,
+    )
+    .all(...(bySymbol ? [seasonId, q.symbol!, q.limit] : [seasonId, q.limit])) as FillRow[];
+}
+
 // ---- equity, heartbeat ----
 
 export function insertEquitySnapshot(db: Db, seasonId: number, v: AccountValue, now: number): void {
@@ -330,4 +374,9 @@ export function touchAlive(db: Db, now: number): void {
   db.prepare(
     `INSERT INTO meta (key, value) VALUES ('last_alive', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
   ).run(String(now));
+}
+
+export function lastAlive(db: Db): number | null {
+  const row = db.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get() as { value: string } | undefined;
+  return row ? Number(row.value) : null;
 }

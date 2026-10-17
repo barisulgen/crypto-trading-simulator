@@ -40,5 +40,8 @@ describe('loadConfig', () => {
     const c = loadConfig(fx('host.env'), { APP_PASSWORD: 'pw' });
     expect(c.host).toBe('0.0.0.0');
     expect(c.secrets).toEqual(['pw']);
+    expect(c.appPassword).toBe('pw');
+    expect(Object.keys(c)).not.toContain('appPassword');
+    expect(JSON.stringify(c)).not.toContain('pw');
   });
 });
