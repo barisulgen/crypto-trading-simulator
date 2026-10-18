@@ -1,23 +1,44 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { fmtPct, fmtUsd, fmtUsdFloor } from '../lib/format.ts';
+import { pricesPausedLabel } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
 import { changeClass } from './CoinList.tsx';
 import { DepositDialog } from './DepositDialog.tsx';
 import { TransferDialog } from './TransferDialog.tsx';
 import { Button } from './ui.tsx';
 
-function Stat({ label, children, className = '' }: { label: ReactNode; children: ReactNode; className?: string }) {
+function Stat({
+  label,
+  children,
+  className = '',
+  dim = false,
+  title,
+}: {
+  label: ReactNode;
+  children: ReactNode;
+  className?: string;
+  dim?: boolean;
+  title?: string;
+}) {
   return (
-    <div className={`flex min-w-0 flex-col desk:flex-none ${className}`}>
+    <div className={`flex min-w-0 flex-col desk:flex-none ${className}`} title={title}>
       <span className="text-2xs text-faint desk:text-xs">{label}</span>
       {/*
         Money is never cut off: each amount is one unbreakable piece (nowrap), the words around it
         may wrap, and on desktop the bar wraps onto a second row before anything is hidden.
-        Dimmed while the bar is frozen (no live connection to the simulator).
+        Dimmed while the bar is frozen (no live connection to the simulator), or when `dim`.
       */}
-      <div className="group-data-frozen/bar:opacity-45">{children}</div>
+      <div className={`group-data-frozen/bar:opacity-45 ${dim ? 'opacity-45' : ''}`}>{children}</div>
     </div>
+  );
+}
+
+function Badge({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <span title={title} className="rounded-ctl border border-down px-1 text-2xs font-semibold whitespace-nowrap text-down">
+      {children}
+    </span>
   );
 }
 
@@ -43,6 +64,11 @@ export function AccountBar() {
   const a = useLive((s) => s.account);
   // Our server connection is down: the numbers are the last ones received, dimmed and labelled.
   const frozen = useLive((s) => s.conn === 'down');
+  // Some held coin has no live bid (feed interrupted): total value and net P&L are not live either.
+  const paused = a ? pricesPausedLabel(a) : null;
+  const pausedTitle = paused
+    ? `No live bid for ${a!.pricesPaused.join(', ')}: valued at the last real bid received (a coin with no price yet counts as $0)`
+    : undefined;
   const [dialog, setDialog] = useState<'deposit' | 'transfer' | null>(null);
   const lev = a?.balances.leverage.USDT;
 
@@ -55,23 +81,22 @@ export function AccountBar() {
         {/* Phones: Net P&L wraps under the total when the buttons leave too little room. */}
         <div className="flex min-w-0 flex-wrap items-end gap-x-4 gap-y-1 desk:contents">
           <Stat
+            dim={paused !== null}
+            title={pausedTitle}
             label={
-              <span className="flex items-center gap-1.5">
+              <span className="flex flex-wrap items-center gap-x-1.5">
                 Total value
-                {frozen && (
-                  <span
-                    title="Connection to the simulator lost - showing the last values received"
-                    className="rounded-ctl border border-down px-1 text-2xs font-semibold text-down"
-                  >
-                    Not live
-                  </span>
+                {frozen ? (
+                  <Badge title="Connection to the simulator lost - showing the last values received">Not live</Badge>
+                ) : (
+                  paused && <Badge title={pausedTitle!}>{paused}</Badge>
                 )}
               </span>
             }
           >
             <span className="text-lg font-semibold whitespace-nowrap [font-stretch:108%] min-[80rem]:text-xl">{fmtUsd(a?.total)}</span>
           </Stat>
-          <Stat label="Net P&L">
+          <Stat label="Net P&L" dim={paused !== null} title={pausedTitle}>
             <span className={`text-base font-semibold whitespace-nowrap ${changeClass(a?.netPnl)}`}>{fmtUsd(a?.netPnl, { sign: true })}</span>
             <span className={`ml-1.5 text-xs whitespace-nowrap ${changeClass(a?.netPnlPct)}`}>
               {a ? (a.netPnlPct === null ? 'no deposits yet' : fmtPct(a.netPnlPct)) : ''}

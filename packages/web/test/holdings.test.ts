@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountSnapshot } from '../src/lib/api.ts';
-import { avgFill, holdingRows } from '../src/lib/holdings.ts';
+import { avgFill, holdingRows, pricesPausedLabel, valueTitle } from '../src/lib/holdings.ts';
 import { divDec, floorToStep, pctOf } from '../src/lib/market.ts';
 
 describe('decimal division', () => {
@@ -63,6 +63,8 @@ describe('holdings', () => {
         bid: '101',
         value: '100.899',
         fresh: true,
+        priced: true,
+        bidAt: 1000,
         cost: '100.05',
         avgCost: '100.15',
         pnl: '0.849',
@@ -99,12 +101,37 @@ describe('holdings', () => {
       account({ coins: [{ asset: 'BTC', qty: '0.999', bid: '0', value: '0', fresh: false, bidAt: null }] }),
       () => 2,
     );
-    expect(rows[0]).toMatchObject({ avgCost: '100.15', pnl: null, pnlPct: null, fresh: false });
+    expect(rows[0]).toMatchObject({ avgCost: '100.15', pnl: null, pnlPct: null, fresh: false, priced: false, bidAt: null });
+  });
+
+  it('a stale bid is the last real one: still valued and compared, and the value says when it was received', () => {
+    const at = new Date(2026, 9, 18, 9, 5, 7).getTime();
+    const [stale] = holdingRows(
+      account({ coins: [{ asset: 'BTC', qty: '0.999', bid: '99', value: '98.901', fresh: false, bidAt: at }] }),
+      () => 2,
+    );
+    expect(stale).toMatchObject({ value: '98.901', fresh: false, priced: true, bidAt: at, pnl: '-1.149' });
+    expect(valueTitle(stale!)).toBe('Last real bid at 09:05:07 — live data interrupted');
+
+    const [never] = holdingRows(
+      account({ coins: [{ asset: 'BTC', qty: '0.999', bid: '0', value: '0', fresh: false, bidAt: null }] }),
+      () => 2,
+    );
+    expect(valueTitle(never!)).toBe('No price yet');
+    expect(valueTitle(holdingRows(account(), () => 2)[0]!)).toBeUndefined();
   });
 
   it('without a cost basis there is no average cost or P&L', () => {
     const rows = holdingRows(account({ basis: {} }), () => 2);
     expect(rows[0]).toMatchObject({ cost: null, avgCost: null, pnl: null, pnlPct: null });
+  });
+});
+
+describe('prices paused label', () => {
+  it('names how many held coins are valued without a live bid, null when all are live', () => {
+    expect(pricesPausedLabel(account())).toBeNull();
+    expect(pricesPausedLabel(account({ pricesPaused: ['BTC'] }))).toBe('Prices paused (1 coin)');
+    expect(pricesPausedLabel(account({ pricesPaused: ['BTC', 'ETH'] }))).toBe('Prices paused (2 coins)');
   });
 });
 

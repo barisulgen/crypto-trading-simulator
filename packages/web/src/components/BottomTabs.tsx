@@ -4,7 +4,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import type { WireFill, WireOrder } from '../lib/api.ts';
 import { ORDER_TYPE_LABEL, fmtBalance, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
-import { avgFill, holdingRows } from '../lib/holdings.ts';
+import { avgFill, holdingRows, valueTitle } from '../lib/holdings.ts';
 import type { HoldingRow } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
 import { cmpDec, floorToStep, fmtClock, fmtChartTime } from '../lib/market.ts';
@@ -300,12 +300,24 @@ function HoldingLine({ h, onAttach }: { h: HoldingRow; onAttach(h: HoldingRow, q
       <Cell label="Avg cost" right>
         {h.avgCost === null ? '-' : fmtNum(h.avgCost, tickDecimals(tick ?? '0.01'))}
       </Cell>
-      <Cell label="Value at bid" right title={h.fresh ? undefined : 'No live bid: last value received'}>
-        <span className={h.fresh ? '' : 'text-muted'}>{fmtUsd(h.value)}</span>
+      <Cell label="Value at bid" right title={valueTitle(h)}>
+        {h.priced ? (
+          <span className={h.fresh ? '' : 'text-muted'}>{fmtUsd(h.value)}</span>
+        ) : (
+          <span className="text-muted">No price yet</span>
+        )}
+        {/* Visible on touch screens too, where the tooltip is not. */}
+        {h.priced && !h.fresh && (
+          <span className="block text-2xs whitespace-nowrap text-faint">
+            {h.bidAt === null ? 'last bid' : `last bid ${fmtClock(h.bidAt)}`}
+          </span>
+        )}
       </Cell>
-      <Cell label="Unrealised P&L" right>
-        <span className={changeClass(h.pnl)}>{fmtUsd(h.pnl, { sign: true })}</span>
-        {h.pnlPct !== null && <span className={`ml-1.5 ${changeClass(h.pnlPct)}`}>{fmtPct(h.pnlPct)}</span>}
+      <Cell label="Unrealised P&L" right title={valueTitle(h)}>
+        <span className={h.fresh ? '' : 'opacity-60'}>
+          <span className={changeClass(h.pnl)}>{fmtUsd(h.pnl, { sign: true })}</span>
+          {h.pnlPct !== null && <span className={`ml-1.5 ${changeClass(h.pnlPct)}`}>{fmtPct(h.pnlPct)}</span>}
+        </span>
       </Cell>
       <Actions>
         <Button
