@@ -1,5 +1,6 @@
 import type { Logger } from '../log.ts';
 import type { BinanceRest } from '../binance/rest.ts';
+import { ControlQueue } from './controlQueue.ts';
 import { defaultSetTimer, defaultWsFactory, rawToString } from './ws.ts';
 import type { SetTimer, WsFactory, WsLike } from './ws.ts';
 
@@ -30,6 +31,8 @@ const WATCHDOG_MS = 30_000;
 const WATCHDOG_CHECK_MS = 5000;
 const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
+/** A socket without streams stays open this long, so switching chart symbol does not reconnect. */
+const IDLE_CLOSE_MS = 10_000;
 
 function checkInterval(i: string): asserts i is Interval {
   if (!(INTERVALS as readonly string[]).includes(i)) throw new Error(`Unsupported interval ${i}`);
@@ -48,7 +51,9 @@ export class CandleService {
   private readonly cache = new Map<string, { at: number; value: Promise<Candle[]> }>();
   private readonly subs = new Map<string, Set<(c: Candle) => void>>();
   private ws: WsLike | null = null;
-  private open = false;
+  /** Control messages for the open socket; null while it is connecting (all streams go out on open). */
+  private queue: ControlQueue | null = null;
+  private cancelIdleClose: (() => void) | null = null;
   private closed = false;
   private nextId = 1;
   private backoff = BACKOFF_START_MS;
@@ -96,8 +101,10 @@ export class CandleService {
     if (!set) {
       set = new Set();
       this.subs.set(stream, set);
+      this.cancelIdleClose?.();
+      this.cancelIdleClose = null;
       this.ensureSocket();
-      this.sendOp('SUBSCRIBE', [stream]);
+      this.queue?.subscribe([stream]);
     }
     // wrap so the same cb can be subscribed twice and unsubscribed independently
     const entry = (c: Candle) => cb(c);
@@ -111,8 +118,13 @@ export class CandleService {
       cur.delete(entry);
       if (cur.size === 0) {
         this.subs.delete(stream);
-        this.sendOp('UNSUBSCRIBE', [stream]);
-        if (this.subs.size === 0) this.teardown();
+        this.queue?.unsubscribe([stream]);
+        if (this.subs.size === 0 && !this.cancelIdleClose) {
+          this.cancelIdleClose = this.setTimer(() => {
+            this.cancelIdleClose = null;
+            if (this.subs.size === 0) this.teardown();
+          }, IDLE_CLOSE_MS);
+        }
       }
     };
   }
@@ -126,19 +138,17 @@ export class CandleService {
   private teardown(): void {
     this.cancelReconnect?.();
     this.cancelReconnect = null;
+    this.cancelIdleClose?.();
+    this.cancelIdleClose = null;
+    this.queue?.close();
+    this.queue = null;
     const ws = this.ws;
     this.ws = null;
-    this.open = false;
     try {
       ws?.close();
     } catch {
       // already closed
     }
-  }
-
-  private sendOp(method: 'SUBSCRIBE' | 'UNSUBSCRIBE', params: string[]): void {
-    if (!this.ws || !this.open) return; // resent in full on open
-    this.ws.send(JSON.stringify({ method, params, id: this.nextId++ }));
   }
 
   private ensureSocket(): void {
@@ -154,7 +164,8 @@ export class CandleService {
       cancelWatchdog();
       if (this.ws === ws) {
         this.ws = null;
-        this.open = false;
+        this.queue?.close();
+        this.queue = null;
       }
       try {
         ws.close();
@@ -166,7 +177,7 @@ export class CandleService {
       this.backoff = Math.min(this.backoff * 2, BACKOFF_MAX_MS);
       this.cancelReconnect = this.setTimer(() => {
         this.cancelReconnect = null;
-        this.ensureSocket();
+        if (this.subs.size > 0) this.ensureSocket();
       }, delay);
     };
     // Half-open / silent sockets never emit 'close': kill them so the normal reconnect runs.
@@ -192,11 +203,20 @@ export class CandleService {
     ws.on('open', () => {
       lastFrame = this.now();
       if (dead || this.ws !== ws) return;
-      this.open = true;
       this.backoff = BACKOFF_START_MS;
-      if (this.subs.size > 0) {
-        ws.send(JSON.stringify({ method: 'SUBSCRIBE', params: [...this.subs.keys()], id: this.nextId++ }));
-      }
+      // Every control message on this connection, including this resubscribe-all, is rate-limited.
+      this.queue = new ControlQueue({
+        send: (method, params) => {
+          try {
+            ws.send(JSON.stringify({ method, params, id: this.nextId++ }));
+          } catch (e) {
+            this.log.warn(`kline ${method} failed: ${(e as Error).message}`); // a dead socket reconnects and resubscribes
+          }
+        },
+        now: this.now,
+        setTimer: this.setTimer,
+      });
+      this.queue.subscribe(this.subs.keys());
     });
     ws.on('message', (raw: unknown) => {
       if (dead) return;

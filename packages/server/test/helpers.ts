@@ -34,6 +34,8 @@ export function fakeTimers() {
 
 export class FakeWs extends EventEmitter {
   sent: string[] = [];
+  /** Client pings sent; our code must never send any on Binance sockets. */
+  pings = 0;
   closed = false;
   terminated = false;
   constructor(public url: string) {
@@ -41,6 +43,9 @@ export class FakeWs extends EventEmitter {
   }
   send(d: string) {
     this.sent.push(d);
+  }
+  ping() {
+    this.pings++;
   }
   close() {
     this.closed = true;

@@ -6,7 +6,7 @@ import { LocalBook } from '../src/market/localBook.ts';
 import { MarketData } from '../src/market/marketData.ts';
 import { SpotFeed } from '../src/market/spotFeed.ts';
 import { CandleService } from '../src/market/candles.ts';
-import { fakeTimers, FakeWs, tick } from './helpers.ts';
+import { FakeClock, fakeTimers, FakeWs, tick } from './helpers.ts';
 import { parseSpotRules } from '../src/binance/parseRules.ts';
 import exchangeInfo from './fixtures/btcusdt-exchangeinfo.json' with { type: 'json' };
 
@@ -486,12 +486,12 @@ describe('CandleService', () => {
 
   it('subscribe ref-counts streams on one WS and resubscribes after reconnect', () => {
     const sockets: FakeWs[] = [];
-    const timers = fakeTimers();
+    const clock = new FakeClock(0);
     const svc = new CandleService({
       rest: {} as any,
       logger: silent,
-      now: () => 0,
-      setTimer: timers.setTimer,
+      now: () => clock.now,
+      setTimer: clock.setTimer,
       wsFactory: (u) => {
         const w = new FakeWs(u);
         sockets.push(w);
@@ -504,18 +504,22 @@ describe('CandleService', () => {
     expect(sockets).toHaveLength(1);
     expect(sockets[0]!.url).toBe('wss://stream.binance.com:9443/ws');
     sockets[0]!.open();
+    clock.advance(250); // control messages are debounced
     expect(sockets[0]!.sent.map((s) => JSON.parse(s))).toEqual([
       { method: 'SUBSCRIBE', params: ['btcusdt@kline_1m'], id: 1 },
     ]);
     sockets[0]!.msg({ e: 'kline', s: 'BTCUSDT', k: { t: 60000, i: '1m', o: '1', h: '2', l: '0.5', c: '1.5', v: '10', x: false } });
     expect(got[0]).toEqual({ time: 60000, open: '1', high: '2', low: '0.5', close: '1.5', volume: '10' });
     u1();
+    clock.advance(1000);
     expect(sockets[0]!.sent).toHaveLength(1); // still one subscriber
     sockets[0]!.drop();
-    timers.fire();
+    clock.advance(1000); // reconnect backoff
     sockets[1]!.open();
+    clock.advance(250);
     expect(JSON.parse(sockets[1]!.sent[0]!).params).toEqual(['btcusdt@kline_1m']);
     u2();
+    clock.advance(250);
     expect(JSON.parse(sockets[1]!.sent[1]!)).toMatchObject({ method: 'UNSUBSCRIBE', params: ['btcusdt@kline_1m'] });
     svc.close();
   });
