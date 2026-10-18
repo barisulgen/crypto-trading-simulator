@@ -151,11 +151,13 @@ export class SpotEngine {
    * waiting attached pairs, executes due triggered orders), so nothing waits on a missed onFresh;
    * then triggers the armed stops its price reached; then fills the resting limit and post-only
    * orders it went through. A trade id at or below the last one processed for the symbol is a
-   * replay and is ignored, so no trade is ever counted twice.
+   * replay and is ignored, so no trade is ever counted twice. A trade that arrives while the
+   * symbol is stale is skipped without moving that cursor, so a later replay of it is processed.
    */
   onTrade(symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
     const lastId = this.s.lastTradeId[symbol];
     if (lastId !== undefined && trade.id <= lastId) return [];
+    if (!ctx.market.isFresh(symbol)) return [];
     const events = [
       ...this.onFresh(symbol, ctx),
       ...triggerStops(this.s, symbol, trade, ctx),

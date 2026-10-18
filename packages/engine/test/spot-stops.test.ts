@@ -805,6 +805,26 @@ describe('replay guard', () => {
     expect(stored(stopId).status).toBe('triggered');
     expect(engine.onTrade('BTCUSDT', low, ctx)).toEqual([]);
   });
+
+  it('trades skipped while stale leave the cursor untouched; replayed later while fresh they are processed', () => {
+    const { market, ctx, engine, stored } = setup();
+    const resting = placed(engine.submit(limit('buy', '99.50', '1'), ctx));
+    arriveNow(engine, resting, ctx);
+    const before = trade('99.60', '1', true); // above the limit: no fill, but processed
+    expect(engine.onTrade('BTCUSDT', before, ctx)).toEqual([]);
+    expect(engine.state.lastTradeId).toEqual({ BTCUSDT: before.id });
+
+    market.setFresh('BTCUSDT', false);
+    const gap = trade('99.40', '1', true); // goes through the limit, but matching is paused
+    expect(engine.onTrade('BTCUSDT', gap, ctx)).toEqual([]);
+    expect(engine.state.lastTradeId).toEqual({ BTCUSDT: before.id });
+    expect(s(stored(resting.id).filledQty)).toBe('0');
+
+    market.setFresh('BTCUSDT', true);
+    expect(engine.onTrade('BTCUSDT', gap, ctx).map((e) => e.type)).toEqual(['fill']);
+    expect(s(stored(resting.id).filledQty)).toBe('1');
+    expect(engine.state.lastTradeId).toEqual({ BTCUSDT: gap.id });
+  });
 });
 
 describe('preview', () => {
