@@ -103,6 +103,8 @@ export class EngineRunner {
   private readonly timers = new Set<() => void>();
   /** Per symbol, since when (and why) the data is stale; seeded with last_alive at startup. */
   private readonly staleSince = new Map<string, { at: number; reason: string }>();
+  /** Per symbol, the pending orders re-sent after a restart: they wait for its first fresh data. */
+  private readonly awaitingFresh = new Map<string, Set<string>>();
   /** Integrity violations of the loaded state; when set, nothing trades. */
   private readonly violations: string[];
   private dead = false;
@@ -334,24 +336,22 @@ export class EngineRunner {
 
   /**
    * Startup: pending market orders are rejected (engine.rejectRestartedMarket); other pending
-   * orders are sent again with a fresh arrival delay (a pair's legs share one). Every order with
-   * an arrival time - re-armed, or triggered before the restart - gets its arrive() scheduled;
+   * orders are sent again once their symbol's data is first fresh, with a fresh arrival delay
+   * (rearmWhenFresh). Triggered orders with an arrival time get their arrive() scheduled;
    * triggered orders and attached pairs waiting for data (arrivesAt null) are left to onFresh.
    */
   private recover(): void {
     const state = this.d.engine.state;
     const ctx = this.ctx();
     const events: EngineEvent[] = [];
-    const rearmed = new Map<string, number>();
     for (const o of [...state.orders.values()]) {
       if (o.status !== 'pending') continue;
       if (o.type === 'market') {
         events.push(...this.d.engine.rejectRestartedMarket(o.id, ctx));
       } else if (o.arrivesAt !== null) {
-        const key = o.ocoGroupId ?? o.id;
-        const at = rearmed.get(key) ?? ctx.now + arrivalDelay(ctx);
-        rearmed.set(key, at);
-        state.orders.set(o.id, { ...o, arrivesAt: at });
+        const ids = this.awaitingFresh.get(o.symbol) ?? new Set<string>();
+        ids.add(o.id);
+        this.awaitingFresh.set(o.symbol, ids);
       }
     }
     try {
@@ -360,19 +360,51 @@ export class EngineRunner {
       return; // fatal, already reported
     }
     for (const o of state.orders.values()) {
-      if ((o.status === 'pending' || o.status === 'triggered') && o.arrivesAt !== null) {
-        this.scheduleArrival(o.id, o.arrivesAt);
+      if (o.status === 'triggered' && o.arrivesAt !== null) this.scheduleArrival(o.id, o.arrivesAt);
+    }
+  }
+
+  /**
+   * Re-sends the pending orders recover() held back, for each symbol whose data is now fresh:
+   * a fresh arrival delay from now (a pair's legs share one), persisted, then arrive() scheduled.
+   * Until then they keep their old arrival time and nothing arrives them.
+   */
+  private rearmWhenFresh(): void {
+    if (this.awaitingFresh.size === 0) return;
+    const state = this.d.engine.state;
+    const ctx = this.ctx();
+    const delays = new Map<string, number>();
+    const armed: { id: string; at: number }[] = [];
+    for (const [symbol, ids] of this.awaitingFresh) {
+      if (!this.d.market.isFresh(symbol)) continue;
+      this.awaitingFresh.delete(symbol);
+      for (const id of ids) {
+        const o = state.orders.get(id);
+        if (!o || o.status !== 'pending') continue; // cancelled meanwhile
+        const key = o.ocoGroupId ?? o.id;
+        const at = delays.get(key) ?? ctx.now + arrivalDelay(ctx);
+        delays.set(key, at);
+        state.orders.set(id, { ...o, arrivesAt: at });
+        armed.push({ id, at });
       }
     }
+    if (armed.length === 0) return;
+    this.commit([]);
+    for (const { id, at } of armed) this.scheduleArrival(id, at);
+  }
+
+  /** Every second: feed-health transitions, then orders held back since startup whose data is now fresh. */
+  private pollHealth(): void {
+    const transitions = this.d.health.poll(this.d.now());
+    if (transitions.length > 0) this.applyTransitions(transitions);
+    this.rearmWhenFresh();
   }
 
   /**
    * Feed-health transitions: a stale transition starts a gap; the next fresh one records it as a
    * feed_gap (in the same transaction as onFresh, which runs on every stale -> fresh transition).
    */
-  private pollHealth(): void {
-    const transitions = this.d.health.poll(this.d.now());
-    if (transitions.length === 0) return;
+  private applyTransitions(transitions: HealthTransition[]): void {
     for (const t of transitions) {
       if (!t.fresh) {
         const reason = t.reason ?? 'Data stale';

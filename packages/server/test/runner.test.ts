@@ -218,11 +218,45 @@ describe('EngineRunner', () => {
     expect(b.eventsOf('order_rejected').map((e) => e.payload.reason)).toEqual(['Server restarted before execution']);
     expect(b.engine.state.balances.spot.USDT!.locked.toString()).toBe('99.5'); // the limit's lock only
 
-    const l = b.engine.state.orders.get(limit.id)!;
-    expect(l.status).toBe('pending');
-    expect(l.arrivesAt).toBe(a.clock.now + 100);
+    expect(b.engine.state.orders.get(limit.id)!.status).toBe('pending');
+    // Not sent again before the symbol's data is first fresh after startup (not started: no health poll).
+    b.clock.advance(5000);
+    expect(b.orderRow(limit.id)!.status).toBe('pending');
+    b.runner.start(); // first poll: fresh, so a fresh arrival delay from now
+    expect(b.engine.state.orders.get(limit.id)!.arrivesAt).toBe(b.clock.now + 100);
+    expect(JSON.parse(b.orderRow(limit.id)!.data).arrivesAt).toBe(b.clock.now + 100);
+    b.clock.advance(99);
+    expect(b.orderRow(limit.id)!.status).toBe('pending');
+    b.clock.advance(1);
+    expect(b.orderRow(limit.id)!.status).toBe('open');
+  });
+
+  it('restart: re-armed pending orders wait while the data is stale, then get a fresh delay (a pair shares one)', () => {
+    const a = setup();
+    a.runner.start();
+    withBtc(a);
+    const limit = submittedOrder(a.runner.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'limit', price: '99.50', qty: '1' }));
+    const pair = a.runner.attachOco({ symbol: 'BTCUSDT', qty: '0.5', stopLoss: '95', takeProfit: '110' });
+    const legs = pair.flatMap((e) => (e.type === 'order_placed' ? [e.order.id] : []));
+    expect(legs).toHaveLength(2);
+    a.runner.stop();
+
+    a.clock.advance(60_000);
+    const market = new TestMarket(SYMBOLS);
+    market.setFresh('BTCUSDT', false); // books not synced yet after the restart
+    const b = setup({ db: a.db, clock: a.clock, market });
+    b.runner.start();
+    b.clock.advance(10_000);
+    for (const id of [limit.id, ...legs]) expect(b.orderRow(id)!.status).toBe('pending'); // waiting, not rejected
+
+    market.setFresh('BTCUSDT', true);
+    b.clock.advance(1000); // the next health poll sees fresh data
+    const at = b.clock.now + 100;
+    for (const id of [limit.id, ...legs]) expect(b.engine.state.orders.get(id)!.arrivesAt).toBe(at);
     b.clock.advance(100);
     expect(b.orderRow(limit.id)!.status).toBe('open');
+    for (const id of legs) expect(b.orderRow(id)!.status).toBe('open');
+    expect(b.fatal).toEqual([]);
   });
 
   it('restart: the first fresh poll records a Server offline gap from last_alive and runs onFresh', () => {
