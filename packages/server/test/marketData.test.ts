@@ -146,6 +146,33 @@ describe('MarketData', () => {
     expect(md.bestBid('BTCUSDT')!.fresh).toBe(false);
   });
 
+  it('bestBid keeps the last real bid, stale and timed, after the book is emptied; null only before any bid', async () => {
+    const rest: any = {};
+    loadRules(rest);
+    const { clock, health, books, feed, md } = setup(rest);
+    await md.refreshRules();
+    expect(md.bestBid('BTCUSDT')).toBeNull(); // never had a bid since start
+
+    const book = books.get('BTCUSDT')!;
+    health.onConnect(clock.t);
+    book.applySnapshot({ lastUpdateId: 1, bids: [['100', '1']], asks: [['101', '1']] });
+    expect(book.applyDiff({ U: 2, u: 2, b: [['100.5', '1']], a: [] })).toBe('applied');
+    health.setBookValid('BTCUSDT', true);
+    health.onDepth('BTCUSDT', clock.t, clock.t);
+    feed.emit('book', 'BTCUSDT'); // SpotFeed emits this after every applied diff
+    const live = md.bestBid('BTCUSDT')!;
+    expect([live.price.toString(), live.fresh, live.at]).toEqual(['100.5', true, clock.t]);
+    const syncedAt = clock.t;
+
+    // Disconnect (or a sequence-gap resync): SpotFeed empties the book until the next snapshot.
+    clock.t += 3000;
+    health.onDisconnect(clock.t);
+    book.applySnapshot({ lastUpdateId: 0, bids: [], asks: [] });
+    expect(book.bestBid()).toBeNull();
+    const stale = md.bestBid('BTCUSDT')!;
+    expect([stale.price.toString(), stale.fresh, stale.at]).toEqual(['100.5', false, syncedAt]);
+  });
+
   it('clock offset = serverTime - midpoint of the request', async () => {
     const clock = { t: 1000 };
     const rest = {

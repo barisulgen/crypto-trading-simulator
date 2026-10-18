@@ -45,6 +45,8 @@ export class MarketData extends EventEmitter implements MarketView {
   private readonly status = new Map<string, string>();
   private readonly avg = new Map<string, { price: Decimal; at: number }>();
   private readonly last = new Map<string, Decimal>();
+  /** The last best bid of a synced book and when it was seen; kept while the book is emptied. */
+  private readonly lastBid = new Map<string, { price: Decimal; at: number }>();
   private readonly tick = new Map<string, Ticker>();
   private readonly trades = new Map<string, AggTrade[]>();
   private cancels = new Set<() => void>();
@@ -72,7 +74,11 @@ export class MarketData extends EventEmitter implements MarketView {
       this.tick.set(symbol, t);
       this.emit('ticker', symbol, t);
     });
-    d.feed.on('book', (symbol: string) => this.emit('book', symbol));
+    d.feed.on('book', (symbol: string) => {
+      const bid = this.books.get(symbol)?.bestBid();
+      if (bid) this.lastBid.set(symbol, { price: bid.price, at: this.now() });
+      this.emit('book', symbol);
+    });
   }
 
   /** Loads rules, measures the clock offset and starts the pollers. Idempotent; stop() then start() restarts. */
@@ -199,9 +205,18 @@ export class MarketData extends EventEmitter implements MarketView {
   }
 
   // Extras for the API and UI
-  bestBid(symbol: string): { price: Decimal; fresh: boolean } | null {
+  /**
+   * The best bid and when it was received. While the symbol is stale (its book may be emptied
+   * until the next snapshot) it is the last real bid of the synced book, never an invented one;
+   * null only when there has been no bid since start.
+   */
+  bestBid(symbol: string): { price: Decimal; fresh: boolean; at: number } | null {
     const lvl: PriceLevel | null = this.bookOf(symbol).bestBid();
-    return lvl ? { price: lvl.price, fresh: this.isFresh(symbol) } : null;
+    if (lvl && this.isFresh(symbol)) return { price: lvl.price, fresh: true, at: this.now() };
+    const last = this.lastBid.get(symbol);
+    if (last) return { price: last.price, fresh: false, at: last.at };
+    // A snapshot not yet bridged by a diff: real bids, just fetched.
+    return lvl ? { price: lvl.price, fresh: false, at: this.now() } : null;
   }
 
   tickers(): Record<string, Ticker> {

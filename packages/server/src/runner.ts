@@ -65,7 +65,8 @@ export type RunnerMessage =
 
 /** What the runner reads from MarketData beyond the engine's MarketView. */
 export interface RunnerMarket extends MarketView {
-  bestBid(symbol: string): { price: Decimal; fresh: boolean } | null;
+  /** While stale: the last real bid received, with `at` saying when; null only before any bid. */
+  bestBid(symbol: string): { price: Decimal; fresh: boolean; at?: number } | null;
   healthSnapshot(): HealthMap;
   on(event: 'trade', cb: (symbol: string, trade: AggTrade) => void): unknown;
   off(event: 'trade', cb: (symbol: string, trade: AggTrade) => void): unknown;
