@@ -4,7 +4,7 @@ import type { FormEvent, ReactNode } from 'react';
 import type { OrderType, Side } from '@sim/engine';
 import { api, ApiError } from '../lib/api.ts';
 import type { WirePreview } from '../lib/api.ts';
-import { fmtBalance, fmtFloor, fmtNum, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
+import { fmtNum, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
 import {
   ORDER_TYPES,
@@ -18,6 +18,9 @@ import {
 import type { OrderFormFields } from '../lib/orderForm.ts';
 import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
 import type { PreviewState } from '../lib/previewLoop.ts';
+import { NO_QUICK, amountStep, quickAmount, quickHint, quickStep, spotFree } from '../lib/quickAmount.ts';
+import type { Pct, QuickEvent, QuickState } from '../lib/quickAmount.ts';
+import { Available, QuickAmounts } from './QuickAmounts.tsx';
 import { Segmented, TextField } from './ui.tsx';
 
 /**
@@ -170,6 +173,7 @@ export function OrderForm() {
   const [takeProfit, setTakeProfit] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [quick, setQuick] = useState<QuickState>(NO_QUICK);
 
   const fields: OrderFormFields = { symbol, side, type, amountIn, amount, price, trigger, attach, stopLoss, takeProfit };
   const missing = missingInput(fields);
@@ -179,11 +183,41 @@ export function OrderForm() {
   const free = useFree(spend);
   const attachable = canAttach(fields);
 
+  // Quick amounts: sized against the book and balances as they are at this moment (read, not
+  // subscribed, so a book tick never changes the field under the owner).
+  function sizeQuick(pct: Pct) {
+    const s = useLive.getState();
+    if (!rules || !s.account) return null;
+    const book = s.book?.symbol === symbol ? s.book : null;
+    return quickAmount({
+      side,
+      unit: amountIn,
+      pct,
+      type,
+      freeBase: spotFree(s.account, base),
+      freeQuote: spotFree(s.account, quote),
+      bids: book?.bids ?? [],
+      asks: book?.asks ?? [],
+      price,
+      trigger,
+      step: amountStep(rules, type),
+    });
+  }
+  function quickEvent(event: QuickEvent) {
+    const next = quickStep(quick, event, sizeQuick);
+    setQuick(next.state);
+    if (next.amount !== undefined) setAmount(next.amount);
+  }
+  // An active percentage follows the unit, order type, limit price and trigger.
+  useEffect(() => quickEvent({ type: 'reprice' }), [amountIn, type, price, trigger]);
+  const hint = rules ? quickHint(quick, amountStep(rules, type), base) : null;
+
   // Another coin: prices and amounts belong to the old one.
   const shownSymbol = useRef(symbol);
   useEffect(() => {
     if (shownSymbol.current === symbol) return;
     shownSymbol.current = symbol;
+    setQuick(NO_QUICK);
     setAmount('');
     setPrice('');
     setTrigger('');
@@ -222,6 +256,7 @@ export function OrderForm() {
       // The outcome (placed, filled, rejected) arrives as the server's notice and order updates.
       await api.placeOrder(buildOrderRequest(fields));
       setAmount('');
+      setQuick(NO_QUICK);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
     } finally {
@@ -249,7 +284,11 @@ export function OrderForm() {
               type="button"
               role="radio"
               aria-checked={on}
-              onClick={() => setSide(s)}
+              onClick={() => {
+                if (s === side) return;
+                setSide(s);
+                quickEvent({ type: 'reset' });
+              }}
               className={`h-8 rounded-[3px] text-sm font-semibold ${on ? colour : 'text-muted hover:text-fg'}`}
             >
               {s === 'buy' ? 'Buy' : 'Sell'}
@@ -305,7 +344,10 @@ export function OrderForm() {
         autoComplete="off"
         placeholder="0.00"
         value={amount}
-        onChange={(e) => setAmount(e.target.value)}
+        onChange={(e) => {
+          setAmount(e.target.value);
+          quickEvent({ type: 'edit' });
+        }}
         aside={
           <Segmented<'coin' | 'usd'>
             label="Amount in"
@@ -319,12 +361,23 @@ export function OrderForm() {
           />
         }
         hint={
-          <>
-            Available{' '}
-            <span className="text-muted">
-              {free === undefined ? '-' : spend === quote ? `${fmtFloor(free, 2)} ${quote}` : `${fmtBalance(symbol, free)} ${base}`}
-            </span>
-          </>
+          <div className="flex flex-col gap-1.5 pt-0.5">
+            <QuickAmounts
+              active={quick.pct}
+              disabled={!rules || free === undefined}
+              of={spend}
+              onPick={(pct) => quickEvent({ type: 'pick', pct })}
+            />
+            <Available
+              side={side}
+              symbol={symbol}
+              base={base}
+              quote={quote}
+              stepSize={rules?.stepSize ?? '0.00000001'}
+              free={free}
+            />
+            {hint !== null && <p className="text-muted">{hint}</p>}
+          </div>
         }
       />
 

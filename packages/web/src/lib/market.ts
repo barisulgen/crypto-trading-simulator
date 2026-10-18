@@ -80,6 +80,26 @@ export function floorToStep(value: string, step: string): string {
   return unscaled(v - (v % st), s);
 }
 
+/** a * b, exact. */
+export function mulDec(a: string, b: string): string {
+  const sa = scaleOf(a);
+  const sb = scaleOf(b);
+  return unscaled(scaled(a, sa) * scaled(b, sb), sa + sb);
+}
+
+/**
+ * a / b rounded down to a multiple of `step` (exact BigInt division): how many whole steps of a
+ * coin a budget `a` buys at price `b`. Both non-negative; throws if b or step is not positive.
+ */
+export function floorDivToStep(a: string, b: string, step: string): string {
+  const s = Math.max(scaleOf(a), scaleOf(b), scaleOf(step));
+  const d = scaled(b, s);
+  const st = scaled(step, s);
+  if (d <= 0n || st <= 0n) throw new Error('Division by zero');
+  const steps = (scaled(a, s) * 10n ** BigInt(s)) / (d * st);
+  return unscaled(steps * st, s);
+}
+
 /** part / whole * 100 with `dp` decimals (default 2), rounded half away from zero. */
 export function pctOf(part: string, whole: string, dp = 2): string {
   const s = Math.max(scaleOf(part), scaleOf(whole));
