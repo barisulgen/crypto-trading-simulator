@@ -27,7 +27,7 @@ const db = openDb(config.dbPath);
 const seasonId = currentSeasonId(db);
 const engine = new SpotEngine(loadSpotState(db, seasonId, ['USDT', ...config.coins]));
 
-const rest = new BinanceRest();
+const rest = new BinanceRest(fetch, Date.now, { logger });
 const health = new FeedHealth(config.symbols, config.health);
 const books = new Map(config.symbols.map((s) => [s, new LocalBook()]));
 const feed = new SpotFeed({ symbols: config.symbols, rest, health, books, logger });

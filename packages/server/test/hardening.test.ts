@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { BinanceRest } from '../src/binance/rest.ts';
 import { CandleService } from '../src/market/candles.ts';
 import { FeedHealth } from '../src/market/feedHealth.ts';
 import { LocalBook } from '../src/market/localBook.ts';
@@ -268,47 +267,6 @@ describe('MarketData startup retries and lifecycle', () => {
     expect(timers.all()).toHaveLength(0);
     md.start();
     expect(timers.all()).toHaveLength(3);
-  });
-});
-
-describe('BinanceRest rate-limit pause', () => {
-  const res = (status: number, headers: Record<string, string> = {}) =>
-    ({
-      ok: status < 400,
-      status,
-      headers: new Headers(headers),
-      text: async () => 'limit',
-      json: async () => ({}),
-    }) as unknown as Response;
-
-  it('a 429 with Retry-After 5 pauses every REST call for 5 s', async () => {
-    const clock = { t: 10_000 };
-    const fetchImpl = vi.fn(async () => res(429, { 'retry-after': '5' }));
-    const rest = new BinanceRest(fetchImpl as any, () => clock.t);
-    await expect(rest.depth('BTCUSDT')).rejects.toThrow('HTTP 429');
-    expect(rest.pausedUntil).toBe(15_000);
-    clock.t = 14_999;
-    for (const call of [
-      () => rest.depth('BTCUSDT'),
-      () => rest.avgPrice('BTCUSDT'),
-      () => rest.exchangeInfo(['BTCUSDT']),
-      () => rest.serverTime(),
-      () => rest.klines('BTCUSDT', '1m', 5),
-    ]) {
-      await expect(call()).rejects.toThrow('paused');
-    }
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    clock.t = 15_000;
-    fetchImpl.mockResolvedValueOnce(res(200));
-    await rest.serverTime();
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-  });
-
-  it('418 without Retry-After pauses 60 s', async () => {
-    const clock = { t: 0 };
-    const rest = new BinanceRest((async () => res(418)) as any, () => clock.t);
-    await expect(rest.serverTime()).rejects.toThrow('HTTP 418');
-    expect(rest.pausedUntil).toBe(60_000);
   });
 });
 

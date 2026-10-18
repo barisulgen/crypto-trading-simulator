@@ -1,4 +1,4 @@
-// Live check of the spot feed: runs 20 s against Binance, prints one line per coin, exits 0.
+// Live check of the spot feed: runs 20 s against Binance, prints one line per coin and the REST weight used, exits 0.
 // Needs no secrets: deliberately does not load .env.local or loadConfig.
 import { BinanceRest } from '../src/binance/rest.ts';
 import { COINS } from '../src/config.ts';
@@ -11,7 +11,7 @@ import { SpotFeed } from '../src/market/spotFeed.ts';
 const RUN_MS = 20_000;
 const symbols = COINS.map((c) => `${c}USDT`);
 const logger = createLogger([]);
-const rest = new BinanceRest();
+const rest = new BinanceRest(fetch, Date.now, { logger });
 const health = new FeedHealth(symbols, { silentMs: 15000, lagMs: 5000, noUpdateMs: 120000 });
 const books = new Map(symbols.map((s) => [s, new LocalBook()]));
 const feed = new SpotFeed({ symbols, rest, health, books, logger });
@@ -33,6 +33,7 @@ setTimeout(() => {
       `${s.padEnd(9)} fresh=${fresh} bid=${bid?.toString() ?? 'n/a'} ask=${ask?.toString() ?? 'n/a'} spread=${spread} trades=${trades.get(s)}${fresh ? '' : ` reason="${health.reason(s, Date.now())}"`}`,
     );
   }
+  console.log(`REST weight used ${rest.usedWeight}/${rest.budget} (last 60 s)`);
   md.stop();
   feed.close();
   process.exit(0);
