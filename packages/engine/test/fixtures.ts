@@ -64,6 +64,10 @@ export class FakeMarket implements MarketView {
   setRules(symbol: string, rules: SpotRules): void {
     this.ruleSet.set(symbol, rules);
   }
+  /** As before exchangeInfo has loaded: rules() throws for the symbol. */
+  clearRules(symbol: string): void {
+    this.ruleSet.delete(symbol);
+  }
 
   isFresh(symbol: string): boolean {
     return this.freshness.get(symbol) ?? false;

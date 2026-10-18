@@ -49,6 +49,7 @@ import { isStopType } from './triggers.ts';
 
 export const UNKNOWN_ORDER_TYPE = 'Unknown order type';
 export const RESTART_REASON = 'Server restarted before execution';
+export const RULES_NOT_LOADED = 'Exchange rules not loaded yet; try again in a moment';
 
 /** Everything submit and preview work out for a market order before touching state. */
 interface MarketPlan {
@@ -195,6 +196,7 @@ export class SpotEngine {
     if (order.status === 'triggered' || order.type === 'market') {
       return { ok: false, reason: 'Order is already executing and cannot be cancelled' };
     }
+    if (cancelNeedsRules(order) && !rulesLoaded(order.symbol, ctx)) return { ok: false, reason: RULES_NOT_LOADED };
     if (isStopType(order.type)) return { ok: true, events: cancelStop(this.s, order, ctx) };
     releaseFunds(this.s, order.lockAsset, order.lockAmount);
     const cancelled: SpotOrder = { ...order, status: 'cancelled', lockAmount: D(0) };
@@ -320,5 +322,23 @@ export class SpotEngine {
       );
     }
     return fillOrThin(this.s, order, walk, book, rules, ctx);
+  }
+}
+
+/**
+ * Cancels that need the symbol's exchange rules: a dollar-sized stop reports the coins its dollars
+ * buy (floored to the step size), and a part-filled buy with an attached pair places that pair.
+ */
+function cancelNeedsRules(order: SpotOrder): boolean {
+  if (isStopType(order.type)) return order.qty === null;
+  return order.attach !== null && order.filledQty.gt(0);
+}
+
+function rulesLoaded(symbol: string, ctx: EngineCtx): boolean {
+  try {
+    ctx.market.rules(symbol);
+    return true;
+  } catch {
+    return false;
   }
 }

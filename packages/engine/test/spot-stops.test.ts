@@ -483,6 +483,27 @@ describe('cancel', () => {
     expect(s(bal('USDT').locked)).toBe('0');
     expect(s(bal('USDT').free)).toBe('1000');
   });
+
+  it('cancels that need the exchange rules are refused, with no state change, before the rules load', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const buyStopId = arm(engine, stop('buy', 'stop_loss', '101', { quoteQty: '50.5' }), ctx);
+    const parent = placed(engine.submit(limit('buy', '99.50', '1', { attach: { stopLoss: '95', takeProfit: '110' } }), ctx));
+    arriveNow(engine, parent, ctx);
+    engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
+    expect(stored(parent.id).status).toBe('partially_filled');
+    const sellStopId = arm(engine, sellStop('99', '0.5'), ctx);
+
+    market.clearRules('BTCUSDT');
+    const before = JSON.stringify([...engine.state.orders.values(), engine.state.balances]);
+    const refused = { ok: false, reason: 'Exchange rules not loaded yet; try again in a moment' };
+    expect(engine.cancel(buyStopId, ctx)).toEqual(refused);
+    expect(engine.cancel(parent.id, ctx)).toEqual(refused);
+    expect(JSON.stringify([...engine.state.orders.values(), engine.state.balances])).toBe(before);
+    expect(s(bal('USDT').locked)).not.toBe('0');
+
+    // A cancel that needs no rules still works.
+    expect(engine.cancel(sellStopId, ctx).ok).toBe(true);
+  });
 });
 
 describe('linked SL/TP pair (attachOco)', () => {

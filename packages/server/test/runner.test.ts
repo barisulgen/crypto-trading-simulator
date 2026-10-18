@@ -307,6 +307,21 @@ describe('EngineRunner', () => {
     expect(t.fatal).toHaveLength(1);
   });
 
+  it('cancelling a dollar-sized buy stop before the rules load is refused, not fatal', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    const order = submittedOrder(
+      t.runner.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'stop_loss', triggerPrice: '101', quoteQty: '50.5' }),
+    );
+    t.clock.advance(100);
+    expect(t.orderRow(order.id)!.status).toBe('open');
+    t.market.clearRules('BTCUSDT');
+    expect(t.runner.cancel(order.id)).toEqual({ ok: false, reason: 'Exchange rules not loaded yet; try again in a moment' });
+    expect(t.fatal).toEqual([]);
+    expect(t.orderRow(order.id)!.status).toBe('open');
+  });
+
   it('refuses order submission when the loaded state fails its integrity check', () => {
     const a = setup();
     a.runner.deposit('spot', D('1000'));
