@@ -1,6 +1,10 @@
 {
   "name": "crypto-trading-simulator",
   "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12"
+  },
   "type": "module",
   "workspaces": [
     "packages/*"
