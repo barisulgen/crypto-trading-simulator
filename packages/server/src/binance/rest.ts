@@ -1,7 +1,7 @@
 import type { Logger } from '../log.ts';
 import { defaultSetTimer } from '../market/ws.ts';
 import type { SetTimer } from '../market/ws.ts';
-import { requestWeight, WEIGHT_LIMIT_1M, WeightBudget } from './weightBudget.ts';
+import { CLIENT_CLOSED, requestLane, requestWeight, WEIGHT_LIMIT_1M, WeightBudget } from './weightBudget.ts';
 
 const BASE = 'https://api.binance.com';
 const DEFAULT_429_PAUSE_S = 60;
@@ -32,6 +32,7 @@ function retryAfter(res: Response): number | null {
  */
 export class BinanceRest {
   private pausedUntilMs = 0;
+  private disposed = false;
   private readonly weights: WeightBudget;
   private readonly log: Logger;
   /** Consecutive 429s with no successful response in between. */
@@ -68,11 +69,18 @@ export class BinanceRest {
     return this.weights.budget;
   }
 
+  /** Rejects queued requests and every later call; for shutdown. */
+  dispose(): void {
+    this.disposed = true;
+    this.weights.dispose();
+  }
+
   private pausedMessage(): string {
     return `Binance REST paused for ${Math.ceil((this.pausedUntilMs - this.now()) / 1000)}s (rate limited)`;
   }
 
   private assertNotPaused(): void {
+    if (this.disposed) throw new Error(CLIENT_CLOSED);
     if (this.now() < this.pausedUntilMs) throw new Error(this.pausedMessage());
   }
 
@@ -107,7 +115,7 @@ export class BinanceRest {
 
   private async get(path: string, query: string): Promise<RawJson> {
     this.assertNotPaused();
-    const ticket = await this.weights.acquire(requestWeight(path, query));
+    const ticket = await this.weights.acquire(requestWeight(path, query), requestLane(path));
     this.assertNotPaused();
     const sentAt = this.now();
     this.weights.markSent(ticket);
@@ -116,13 +124,14 @@ export class BinanceRest {
     });
     const used = Number(res.headers?.get?.('x-mbx-used-weight-1m') ?? Number.NaN);
     const header = Number.isFinite(used) && used >= 0 ? used : null;
-    if (header !== null) this.weights.recordHeader(header, ticket);
+    if (header !== null) this.weights.recordHeader(header, ticket, sentAt);
     if (res.status === 429 || res.status === 418) this.onRateLimited(res.status, res, sentAt, header);
     if (!res.ok) {
       const body = (await res.text().catch(() => '')).slice(0, 200);
       throw new Error(`Binance ${path} HTTP ${res.status}: ${body}`);
     }
-    this.strikes = 0;
+    // Only a request sent after the last 429 pause proves the limit has cleared.
+    if (sentAt >= this.strikePauseEnd) this.strikes = 0;
     return res.json();
   }
 

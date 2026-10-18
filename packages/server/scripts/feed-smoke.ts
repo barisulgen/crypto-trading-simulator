@@ -36,5 +36,6 @@ setTimeout(() => {
   console.log(`REST weight used ${rest.usedWeight}/${rest.budget} (last 60 s)`);
   md.stop();
   feed.close();
+  rest.dispose();
   process.exit(0);
 }, RUN_MS);

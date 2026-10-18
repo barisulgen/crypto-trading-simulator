@@ -46,6 +46,7 @@ async function shutdown(code: number): Promise<void> {
   feed.close();
   market.stop();
   candles.close();
+  rest.dispose(); // queued REST requests are dropped, never sent after shutdown began
   await app?.close().catch(() => {});
   db.close();
   process.exit(code);

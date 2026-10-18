@@ -37,9 +37,9 @@ function client(answer?: (url: string) => Response | Promise<Response>, logger: 
   return { clock, rest, ...f };
 }
 
-/** Uses `weight` of the budget with depth(1000) calls (weight 50 each) and avgPrice (2). */
+/** Uses `weight` of the budget with exchangeInfo (20) and avgPrice (2): critical requests, which may fill all 4800. */
 async function spend(rest: BinanceRest, weight: number) {
-  for (; weight >= 50; weight -= 50) await rest.depth('BTCUSDT', 1000);
+  for (; weight >= 20; weight -= 20) await rest.exchangeInfo(['BTCUSDT']);
   for (; weight >= 2; weight -= 2) await rest.avgPrice('BTCUSDT');
 }
 
@@ -75,25 +75,37 @@ describe('request weights', () => {
 });
 
 describe('REST weight budget', () => {
-  it('a request over budget waits (FIFO, not an error) and is sent when weight frees up', async () => {
+  it('a request over budget waits (FIFO within its lane, not an error) and is sent when weight frees up', async () => {
     const { rest, clock, calls } = client();
     await spend(rest, 2400);
     clock.advance(40_000);
-    await spend(rest, 2390); // 4790 used
+    await spend(rest, 1960); // 4360 used; depth may fill up to 4400
     clock.advance(5_000);
     const order: string[] = [];
-    const depth = rest.depth('BTCUSDT', 1000).then(() => order.push('depth'));
-    const time = rest.serverTime().then(() => order.push('time')); // would fit, but waits its turn
+    const big = rest.depth('BTCUSDT', 1000).then(() => order.push('depth 1000')); // 4410: waits
+    const small = rest.depth('BTCUSDT', 100).then(() => order.push('depth 100')); // 4365 would fit, but waits its turn
     const sent = calls.length;
+    await rest.serverTime(); // critical: not behind the waiting snapshots
+    expect(calls.length).toBe(sent + 1);
     clock.advance(14_999); // t = 59.999 s: the first 2400 are still in the window
     await tick();
-    expect(calls.length).toBe(sent);
+    expect(calls.length).toBe(sent + 1);
     expect(order).toEqual([]);
     clock.advance(1);
+    await Promise.all([big, small]);
+    expect(order).toEqual(['depth 1000', 'depth 100']);
+    expect(calls.slice(sent + 1).map((u) => new URL(u).searchParams.get('limit'))).toEqual(['1000', '100']);
+  });
+
+  it('depth snapshots stop 400 short of the budget; critical requests may use it all', async () => {
+    const { rest, calls } = client();
+    await spend(rest, 4360);
+    rest.depth('BTCUSDT', 1000).catch(() => {}); // 4410 > 4400: waits
     await tick();
-    await Promise.all([depth, time]);
-    expect(order).toEqual(['depth', 'time']);
-    expect(calls.slice(sent).map((u) => new URL(u).pathname)).toEqual(['/api/v3/depth', '/api/v3/time']);
+    expect(calls.filter((u) => u.includes('depth'))).toHaveLength(0);
+    await spend(rest, 440); // critical requests still get through, up to the full budget
+    expect(rest.usedWeight).toBe(4800);
+    expect(calls.filter((u) => u.includes('depth'))).toHaveLength(0);
   });
 
   it('a waiting request rejects after 30 s with the budget message and is never sent', async () => {
@@ -134,29 +146,107 @@ describe('REST weight budget', () => {
     let hold: ((r: Response) => void) | null = null;
     let header = '4700';
     const { rest, clock, calls } = client((url) =>
-      url.includes('depth') && !hold ? new Promise<Response>((r) => (hold = r)) : res(200, { 'X-MBX-USED-WEIGHT-1M': header }),
+      url.includes('exchangeInfo') && !hold ? new Promise<Response>((r) => (hold = r)) : res(200, { 'X-MBX-USED-WEIGHT-1M': header }),
     );
-    const avgCalls = () => calls.filter((u) => u.includes('avgPrice')).length;
+    const infoCalls = () => calls.filter((u) => u.includes('exchangeInfo')).length;
     clock.advance(40_000);
     await rest.avgPrice('BTCUSDT'); // local estimate 2, Binance says 4700
     expect(rest.usedWeight).toBe(4700);
-    const inFlight = rest.depth('BTCUSDT', 1000); // reserved after the header was taken: counted on top
+    const inFlight = rest.exchangeInfo(['BTCUSDT']); // reserved after the header was taken: counted on top
     await tick();
-    expect(rest.usedWeight).toBe(4750);
-    header = '4800';
-    await rest.depth('BTCUSDT', 1000); // 4750 + 50 fits exactly
-    expect(rest.usedWeight).toBe(4800);
-    const blocked = rest.avgPrice('BTCUSDT'); // 4802 would not, although the local estimate is 102
+    expect(rest.usedWeight).toBe(4720);
+    header = '4798';
+    await rest.avgPrice('BTCUSDT');
+    expect(rest.usedWeight).toBe(4798);
+    const blocked = rest.exchangeInfo(['BTCUSDT']); // 4818 would not fit, although the local estimate is 24
     await tick();
-    expect(avgCalls()).toBe(1);
-    hold!(res(200, { 'x-mbx-used-weight-1m': '4750' })); // an older reading does not replace a newer one
+    expect(infoCalls()).toBe(1);
+    hold!(res(200, { 'x-mbx-used-weight-1m': '4750' })); // a lower reading does not lower the minute's maximum
     await inFlight;
-    expect(rest.usedWeight).toBe(4800);
-    header = '2'; // what Binance reports in the new minute
+    expect(rest.usedWeight).toBe(4798);
+    header = '20'; // what Binance reports in the new minute
     clock.advance(20_000); // next minute: the old header no longer counts; the local estimate rules
     await blocked;
-    expect(avgCalls()).toBe(2);
-    expect(rest.usedWeight).toBe(104);
+    expect(infoCalls()).toBe(2);
+    expect(rest.usedWeight).toBe(44);
+  });
+});
+
+describe('weight header attribution', () => {
+  it('a response straddling a minute boundary counts for the minute it was sent in, not the next', async () => {
+    // Fake Binance: fixed-minute accounting by arrival (= send) time.
+    const used = new Map<number, number>();
+    let hold: (() => void) | null = null;
+    const { rest, clock, calls } = client((url) => {
+      const m = Math.floor(clock.now / 60_000);
+      const u = (used.get(m) ?? 0) + requestWeight(new URL(url).pathname, new URL(url).search.slice(1));
+      used.set(m, u);
+      const r = res(200, { 'X-MBX-USED-WEIGHT-1M': String(u) });
+      return url.includes('avgPrice') && clock.now === T0 + 59_900 ? new Promise<Response>((ok) => (hold = () => ok(r))) : r;
+    });
+    await spend(rest, 4750); // minute M
+    clock.advance(59_900);
+    const late = rest.avgPrice('BTCUSDT'); // sent at M+59.9 s, carries minute M's 4752 ...
+    await tick();
+    clock.advance(200);
+    hold!(); // ... but arrives at M+60.1 s
+    await late;
+    clock.advance(5000);
+    const before = calls.length;
+    const depth = rest.depth('BTCUSDT', 1000);
+    await tick();
+    expect(calls.length).toBe(before + 1); // not blocked by the previous minute's reading
+    await depth;
+    expect(rest.usedWeight).toBe(52);
+  });
+
+  it("a lower reading later in the same minute does not lower that minute's maximum", async () => {
+    let header = '4000';
+    const { rest } = client(() => res(200, { 'X-MBX-USED-WEIGHT-1M': header }));
+    await rest.serverTime();
+    expect(rest.usedWeight).toBe(4000);
+    header = '3000';
+    await rest.avgPrice('BTCUSDT');
+    expect(rest.usedWeight).toBe(4002); // the 4000 reading plus what was sent after it
+  });
+});
+
+describe('request lanes', () => {
+  it('avgPrice, exchangeInfo, time and klines waiting for budget go before waiting depth snapshots; FIFO within a lane', async () => {
+    const { rest, clock, calls } = client();
+    await spend(rest, 4800);
+    clock.advance(40_000);
+    const order: string[] = [];
+    const track = (name: string, p: Promise<unknown>) => p.then(() => order.push(name));
+    const all = [
+      track('depth BTC', rest.depth('BTCUSDT', 1000)),
+      track('depth ETH', rest.depth('ETHUSDT', 1000)),
+      track('avg BTC', rest.avgPrice('BTCUSDT')),
+      track('info', rest.exchangeInfo(['BTCUSDT'])),
+      track('time', rest.serverTime()),
+      track('klines', rest.klines('BTCUSDT', '1m', 500)),
+      track('avg ETH', rest.avgPrice('ETHUSDT')),
+    ];
+    const sent = calls.length;
+    clock.advance(20_000); // the spent weight leaves the window
+    await Promise.all(all);
+    expect(order).toEqual(['avg BTC', 'info', 'time', 'klines', 'avg ETH', 'depth BTC', 'depth ETH']);
+    expect(calls.length).toBe(sent + 7);
+  });
+});
+
+describe('dispose', () => {
+  it('rejects queued requests, sends nothing later and rejects later calls', async () => {
+    const { rest, clock, calls } = client();
+    await spend(rest, 4800);
+    const queued = [rest.depth('BTCUSDT', 1000), rest.avgPrice('BTCUSDT')].map((p) => p.catch((e: Error) => e.message));
+    const sent = calls.length;
+    rest.dispose();
+    expect(await Promise.all(queued)).toEqual(['Binance REST client closed', 'Binance REST client closed']);
+    clock.advance(120_000);
+    await tick();
+    await expect(rest.serverTime()).rejects.toThrow('Binance REST client closed');
+    expect(calls.length).toBe(sent);
   });
 });
 
@@ -210,6 +300,23 @@ describe('HTTP 429 / 418', () => {
     clock.advance(5000);
     await expect(rest.serverTime()).rejects.toThrow('HTTP 429');
     expect(rest.pausedUntil - clock.now).toBe(120_000); // escalation beats a short Retry-After
+  });
+
+  it('a 200 for a request sent before a 429 does not reset the escalation', async () => {
+    const holds: ((r: Response) => void)[] = [];
+    let next: Response | null = null;
+    const { rest, clock } = client(() => next ?? new Promise<Response>((r) => holds.push(r)));
+    const a = rest.serverTime();
+    const b = rest.serverTime();
+    await tick();
+    holds[0]!(res(429));
+    await expect(a).rejects.toThrow('HTTP 429');
+    holds[1]!(res(200)); // in flight before the pause: says nothing about the limit now
+    await b;
+    clock.advance(60_000);
+    next = res(429);
+    await expect(rest.serverTime()).rejects.toThrow('HTTP 429');
+    expect(rest.pausedUntil - clock.now).toBe(120_000);
   });
 
   it('429s for requests already in flight when the pause began do not escalate it', async () => {
@@ -270,7 +377,7 @@ describe('HTTP 429 / 418', () => {
 });
 
 describe('resync storm', () => {
-  it('10 books gapping every 200 ms for 5 minutes plus pollers stay within the weight budget and never starve', async () => {
+  it('10 books gapping every 200 ms for 5 minutes plus pollers stay within the weight budget, never starve, and avgPrice never lapses', async () => {
     const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'NEARUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'SUIUSDT', 'HYPEUSDT', 'AVAXUSDT'];
     const clock = new FakeClock(T0 + 17_300); // not on a minute boundary
     const start = clock.now;
@@ -280,6 +387,9 @@ describe('resync storm', () => {
     const minuteUsed = new Map<number, number>();
     const sent: { at: number; weight: number }[] = [];
     const statuses: number[] = [];
+    const avgSent = new Map<string, number[]>(SYMBOLS.map((s) => [s, []]));
+    const avgFirst = new Map<string, number>();
+    const avgLost: string[] = [];
     const fetchImpl = (async (url: string) => {
       const u = new URL(url);
       const q = u.searchParams;
@@ -299,6 +409,7 @@ describe('resync storm', () => {
       const used = (minuteUsed.get(minute) ?? 0) + weight;
       minuteUsed.set(minute, used);
       sent.push({ at: clock.now, weight });
+      if (u.pathname === '/api/v3/avgPrice') avgSent.get(q.get('symbol')!)!.push(clock.now);
       const headers = { 'X-MBX-USED-WEIGHT-1M': String(used) };
       const status = used > 6000 ? 429 : 200;
       statuses.push(status);
@@ -359,6 +470,10 @@ describe('resync storm', () => {
         }
       }
       maxLocal = Math.max(maxLocal, rest.usedWeight);
+      for (const s of SYMBOLS) {
+        if (md.avgPrice(s) !== null) avgFirst.set(s, avgFirst.get(s) ?? clock.now);
+        else if (avgFirst.has(s)) avgLost.push(`${s} at +${clock.now - start} ms`);
+      }
     }
     md.stop();
     feed.close();
@@ -382,8 +497,14 @@ describe('resync storm', () => {
         expect(syncs.get(s)!.some((t) => t >= lo && t < lo + 60_000), `${s} in minute ${m}`).toBe(true);
       }
     }
-    // avgPrice and exchangeInfo polling kept running (slowed down by the budget, not stopped).
-    expect(sent.filter((r) => r.weight === 2).length).toBeGreaterThan(50);
+    // avgPrice goes before snapshots: every symbol has one within 20 s and never loses it.
+    for (const s of SYMBOLS) expect(avgFirst.get(s)! - start, s).toBeLessThan(20_000);
+    expect(avgLost).toEqual([]);
+    for (const [s, ts] of avgSent) {
+      // AVG_PRICE_MAX_AGE_MS is 60 s; the 10 s poll must keep its pace, not merely scrape under it.
+      for (let i = 1; i < ts.length; i++) expect(ts[i]! - ts[i - 1]!, s).toBeLessThan(15_000);
+      expect(ts.length, s).toBeGreaterThanOrEqual(25); // about every 10 s
+    }
     expect(sent.filter((r) => r.weight === 20).length).toBeGreaterThan(4);
   }, 30_000);
 });

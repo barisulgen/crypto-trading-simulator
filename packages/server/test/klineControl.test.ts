@@ -174,6 +174,7 @@ describe('combined market-data socket', () => {
     const sockets: FakeWs[] = [];
     const books = new Map([['BTCUSDT', new LocalBook()]]);
     let id = 100;
+    let sendCalls = 0; // every attempt counts, even one a caller might catch
     const feed = new SpotFeed({
       symbols: ['BTCUSDT'],
       rest: { depth: async () => ({ lastUpdateId: id, bids: [['100', '1']], asks: [['101', '1']] }) } as any,
@@ -185,6 +186,7 @@ describe('combined market-data socket', () => {
       wsFactory: (u) => {
         const w = new FakeWs(u);
         w.send = () => {
+          sendCalls++;
           throw new Error('SpotFeed must not send');
         };
         sockets.push(w);
@@ -195,29 +197,39 @@ describe('combined market-data socket', () => {
       stream: 'btcusdt@depth@100ms',
       data: { e: 'depthUpdate', E: clock.now, s: 'BTCUSDT', U, u, b: [], a: [] },
     });
+    const sync = async (ws: FakeWs, from: number) => {
+      id = from;
+      clock.advance(1000);
+      await tick();
+      ws.msg(diff(from + 1, from + 1));
+      expect(books.get('BTCUSDT')!.valid).toBe(true);
+    };
     feed.start();
-    sockets[0]!.open();
-    sockets[0]!.emit('ping');
-    clock.advance(0);
-    await tick();
-    sockets[0]!.msg(diff(100, 101));
-    expect(books.get('BTCUSDT')!.valid).toBe(true);
-    sockets[0]!.msg(diff(200, 201)); // gap -> resync
-    id = 201;
+    const ws0 = sockets[0]!;
+    ws0.open();
+    ws0.emit('ping');
+    await sync(ws0, 100);
+    ws0.msg({ stream: 'btcusdt@aggTrade', data: { a: 1, p: '100', q: '1', T: 1, m: false } });
+    ws0.msg({ stream: 'btcusdt@miniTicker', data: { c: '100', o: '99' } });
+    ws0.msg({ stream: 'btcusdt@depth@100ms', data: { bad: true } }); // malformed -> resync
+    await sync(ws0, 300);
+    ws0.msg(diff(500, 501)); // gap -> resync
+    await sync(ws0, 600);
+    ws0.drop(); // reconnect
     clock.advance(1000);
-    await tick();
-    sockets[0]!.msg(diff(202, 202));
-    expect(books.get('BTCUSDT')!.valid).toBe(true);
-    sockets[0]!.drop();
-    clock.advance(1000);
-    sockets[1]!.open();
-    clock.advance(1000);
-    await tick();
+    const ws1 = sockets[1]!;
+    ws1.open();
+    await sync(ws1, 700);
+    clock.advance(36_000); // silent socket: the 5 s watchdog check terminates it, then it reconnects
+    expect(ws1.terminated).toBe(true);
+    clock.advance(2000);
+    sockets[2]!.open();
+    await sync(sockets[2]!, 800);
     feed.close();
-    expect(sockets).toHaveLength(2);
-    for (const w of sockets) {
-      expect(w.sent).toEqual([]);
-      expect(w.pings).toBe(0);
-    }
+    clock.advance(60_000);
+    await tick();
+    expect(sockets).toHaveLength(3);
+    expect(sendCalls).toBe(0);
+    for (const w of sockets) expect(w.pings).toBe(0);
   });
 });
