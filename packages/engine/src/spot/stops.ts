@@ -409,7 +409,11 @@ function pairReason(
       { avgPrice, openOrders: counts.openOrders + extra, openAlgoOrders: counts.openAlgoOrders + extra },
     );
   const triggerNow = sl.parentId === null || canArmNow(symbol, ctx);
-  const invalid = check(sl, 0) ?? check(tp, 1) ?? (triggerNow ? armReason([sl, tp], ctx) : null);
+  const algoFull =
+    counts.openAlgoOrders + 2 > rules.maxNumAlgoOrders
+      ? `MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but ${counts.openAlgoOrders} of ${rules.maxNumAlgoOrders} are in use on ${symbol}`
+      : null;
+  const invalid = algoFull ?? check(sl, 0) ?? check(tp, 1) ?? (triggerNow ? armReason([sl, tp], ctx) : null);
   if (invalid) return invalid;
   const free = freeOf(s, 'spot', rules.base);
   if (sl.qty!.gt(free)) return `Insufficient ${rules.base}: need ${sl.qty}, available ${free}`;

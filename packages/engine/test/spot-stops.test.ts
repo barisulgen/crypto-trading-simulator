@@ -600,10 +600,11 @@ describe('linked SL/TP pair (attachOco)', () => {
   it('a pair counts as two algo orders', () => {
     const { ctx, engine } = setup();
     for (const t of ['98', '97', '96', '94']) placed(engine.submit(sellStop(t, '0.1'), ctx));
-    expect(reasons(pair(engine, ctx, '0.5'))).toEqual([
-      'MAX_NUM_ALGO_ORDERS: already 5 open stop/take-profit orders on BTCUSDT (maximum 5)',
-      'MAX_NUM_ALGO_ORDERS: already 5 open stop/take-profit orders on BTCUSDT (maximum 5)',
-    ]);
+    const full = 'MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but 4 of 5 are in use on BTCUSDT';
+    expect(reasons(pair(engine, ctx, '0.5'))).toEqual([full, full]);
+    placed(engine.submit(sellStop('93', '0.1'), ctx));
+    const none = 'MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but 5 of 5 are in use on BTCUSDT';
+    expect(reasons(pair(engine, ctx, '0.5'))).toEqual([none, none]);
   });
 
   it('stale at arrival rejects both legs and releases the lock', () => {
