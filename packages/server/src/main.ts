@@ -17,6 +17,7 @@ import { MarketData } from './market/marketData.ts';
 import { SpotFeed } from './market/spotFeed.ts';
 import { defaultSetTimer } from './market/ws.ts';
 import { EngineRunner } from './runner.ts';
+import { onShutdownSignals } from './shutdownSignals.ts';
 
 const WEB_DIST = fileURLToPath(new URL('../../web/dist/', import.meta.url));
 
@@ -89,8 +90,7 @@ hub.start();
 market.start();
 feed.start();
 
-process.on('SIGINT', () => void shutdown(0));
-process.on('SIGTERM', () => void shutdown(0));
+onShutdownSignals(process, () => void shutdown(0));
 
 try {
   await app.listen({ host: config.host, port: config.port });
