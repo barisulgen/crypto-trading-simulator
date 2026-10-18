@@ -18,6 +18,7 @@ const account: AccountSnapshot = {
   totalDeposited: '1000',
   netPnl: '0',
   netPnlPct: '0',
+  pricesPaused: [],
   balances: {
     spot: { USDT: { free: '1000', locked: '0' } },
     leverage: { USDT: { free: '0', locked: '0' } },

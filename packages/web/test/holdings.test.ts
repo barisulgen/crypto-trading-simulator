@@ -37,11 +37,12 @@ const account = (over: Partial<AccountSnapshot> = {}): AccountSnapshot =>
     spotUsdtFree: '899.95',
     spotUsdtLocked: '0',
     leverageUsdt: '0',
-    coins: [{ asset: 'BTC', qty: '0.999', bid: '101', value: '100.899', fresh: true }],
+    coins: [{ asset: 'BTC', qty: '0.999', bid: '101', value: '100.899', fresh: true, bidAt: 1000 }],
     total: '1000.849',
     totalDeposited: '1000',
     netPnl: '0.849',
     netPnlPct: '0.0849',
+    pricesPaused: [],
     balances: {
       spot: { USDT: { free: '899.95', locked: '0' }, BTC: { free: '0.499', locked: '0.5' } },
       leverage: { USDT: { free: '0', locked: '0' } },
@@ -72,7 +73,7 @@ describe('holdings', () => {
 
   it('a loss is negative in dollars and percent', () => {
     const rows = holdingRows(
-      account({ coins: [{ asset: 'BTC', qty: '0.999', bid: '99', value: '98.901', fresh: true }] }),
+      account({ coins: [{ asset: 'BTC', qty: '0.999', bid: '99', value: '98.901', fresh: true, bidAt: 1000 }] }),
       () => 2,
     );
     expect(rows[0]).toMatchObject({ pnl: '-1.149', pnlPct: '-1.15' });
@@ -81,7 +82,7 @@ describe('holdings', () => {
   it('uses the symbol\'s price decimals for the average cost', () => {
     const rows = holdingRows(
       account({
-        coins: [{ asset: 'DOGE', qty: '300', bid: '0.07824', value: '23.472', fresh: true }],
+        coins: [{ asset: 'DOGE', qty: '300', bid: '0.07824', value: '23.472', fresh: true, bidAt: 1000 }],
         balances: {
           spot: { USDT: { free: '0', locked: '0' }, DOGE: { free: '300', locked: '0' } },
           leverage: { USDT: { free: '0', locked: '0' } },
@@ -95,7 +96,7 @@ describe('holdings', () => {
 
   it('without a bid there is no value to compare, so no P&L (never against a zero price)', () => {
     const rows = holdingRows(
-      account({ coins: [{ asset: 'BTC', qty: '0.999', bid: '0', value: '0', fresh: false }] }),
+      account({ coins: [{ asset: 'BTC', qty: '0.999', bid: '0', value: '0', fresh: false, bidAt: null }] }),
       () => 2,
     );
     expect(rows[0]).toMatchObject({ avgCost: '100.15', pnl: null, pnlPct: null, fresh: false });

@@ -127,11 +127,13 @@ export interface CoinValue {
   asset: string;
   /** Spot holding, free + locked. */
   qty: Decimal;
-  /** Best bid; 0 when there is none (never invented). */
+  /** Best bid (while stale, the last real one received); 0 when there has been none (never invented). */
   bid: Decimal;
   value: Decimal;
   /** False when the bid is stale or missing. */
   fresh: boolean;
+  /** When the bid was received (ms); null when there has been none or the source does not say. */
+  bidAt: number | null;
 }
 
 export interface AccountValue {
@@ -145,6 +147,8 @@ export interface AccountValue {
   netPnl: Decimal;
   /** Percent of the deposits (−0.03 means −0.03 %); null when nothing has been deposited. */
   netPnlPct: Decimal | null;
+  /** Held coins whose bid is stale or missing: total value and net P&L are not live while non-empty. */
+  pricesPaused: string[];
 }
 
 /**
@@ -154,7 +158,7 @@ export interface AccountValue {
  */
 export function valueAccount(
   state: SpotState,
-  bestBid: (symbol: string) => { price: Decimal; fresh: boolean } | null,
+  bestBid: (symbol: string) => { price: Decimal; fresh: boolean; at?: number } | null,
   symbols: string[],
 ): AccountValue {
   const spot = state.balances.spot;
@@ -172,8 +176,8 @@ export function valueAccount(
     .map(([asset, b]): CoinValue => {
       const qty = b.free.plus(b.locked);
       const bid = bestBid(`${asset}USDT`);
-      if (!bid) return { asset, qty, bid: D(0), value: D(0), fresh: false };
-      return { asset, qty, bid: bid.price, value: qty.mul(bid.price), fresh: bid.fresh };
+      if (!bid) return { asset, qty, bid: D(0), value: D(0), fresh: false, bidAt: null };
+      return { asset, qty, bid: bid.price, value: qty.mul(bid.price), fresh: bid.fresh, bidAt: bid.at ?? null };
     });
 
   const total = coins.reduce((sum, c) => sum.plus(c.value), usdt.free.plus(usdt.locked).plus(leverageUsdt));
@@ -187,5 +191,6 @@ export function valueAccount(
     totalDeposited: state.totalDeposited,
     netPnl,
     netPnlPct: state.totalDeposited.isZero() ? null : netPnl.div(state.totalDeposited).mul(100),
+    pricesPaused: coins.filter((c) => !c.fresh).map((c) => c.asset),
   };
 }

@@ -290,6 +290,7 @@ describe('valueAccount', () => {
     expect(s(v.totalDeposited)).toBe('1000');
     expect(s(v.netPnl)).toBe('-0.30988');
     expect(s(v.netPnlPct)).toBe('-0.030988');
+    expect(v.pricesPaused).toEqual([]);
   });
 
   it('locked funds and the leverage wallet count; a transfer is not P&L', () => {
@@ -314,10 +315,32 @@ describe('valueAccount', () => {
     market.setFresh('BTCUSDT', false);
     const stale = valueAccount(engine.state, bestBidOf(market), ['BTCUSDT']);
     expect([s(stale.coins[0]!.value), stale.coins[0]!.fresh]).toEqual(['119.76012', false]);
+    expect(stale.pricesPaused).toEqual(['BTC']);
 
     const none = valueAccount(engine.state, () => null, ['BTCUSDT']);
     expect([s(none.coins[0]!.bid), s(none.coins[0]!.value), none.coins[0]!.fresh]).toEqual(['0', '0', false]);
+    expect(none.coins[0]!.bidAt).toBeNull();
     expect(s(none.total)).toBe('879.93');
+    expect(none.pricesPaused).toEqual(['BTC']);
+  });
+
+  it('each coin carries when its bid was received; pricesPaused lists every coin whose bid is stale or missing', () => {
+    const state = emptySpotState(['USDT', 'BTC', 'ETH', 'SOL']);
+    state.balances.spot.BTC!.free = D('1');
+    state.balances.spot.ETH!.free = D('1');
+    state.balances.spot.SOL!.free = D('1');
+    const bids: Record<string, { price: Decimal; fresh: boolean; at: number } | null> = {
+      BTCUSDT: { price: D('100'), fresh: true, at: 5000 },
+      ETHUSDT: { price: D('10'), fresh: false, at: 4000 }, // the last real bid, kept through an outage
+      SOLUSDT: null, // never priced since start
+    };
+    const v = valueAccount(state, (sym) => bids[sym] ?? null, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+    expect(v.coins.map((c) => [c.asset, s(c.value), c.fresh, c.bidAt])).toEqual([
+      ['BTC', '100', true, 5000],
+      ['ETH', '10', false, 4000],
+      ['SOL', '0', false, null],
+    ]);
+    expect(v.pricesPaused).toEqual(['ETH', 'SOL']);
   });
 
   it('coins with a zero balance are left out and the rest follow the symbol order', () => {
