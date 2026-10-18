@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { parseSpotRules } from '../src/binance/parseRules.ts';
+import { parseSpotRules, parseSymbolStatus } from '../src/binance/parseRules.ts';
 import { BinanceRest } from '../src/binance/rest.ts';
 
 const info = JSON.parse(readFileSync(new URL('./fixtures/btcusdt-exchangeinfo.json', import.meta.url), 'utf8'));
@@ -24,6 +24,30 @@ describe('parseSpotRules', () => {
   it('throws a clear error on a missing filter', () => {
     const bad = { ...info.symbols[0], filters: info.symbols[0].filters.filter((f: any) => f.filterType !== 'NOTIONAL') };
     expect(() => parseSpotRules(bad)).toThrow(/NOTIONAL/);
+  });
+  it('refuses a symbol entry without base/quote assets or with non-integer order limits', () => {
+    const sym = info.symbols[0];
+    const withFilter = (type: string, patch: object) => ({
+      ...sym,
+      filters: sym.filters.map((f: any) => (f.filterType === type ? { ...f, ...patch } : f)),
+    });
+    expect(() => parseSpotRules({ ...sym, baseAsset: undefined })).toThrow(
+      'parseSpotRules: BTCUSDT has no baseAsset',
+    );
+    expect(() => parseSpotRules({ ...sym, quoteAsset: '' })).toThrow('parseSpotRules: BTCUSDT has no quoteAsset');
+    expect(() => parseSpotRules(withFilter('MAX_NUM_ORDERS', { maxNumOrders: undefined }))).toThrow(
+      'parseSpotRules: BTCUSDT MAX_NUM_ORDERS.maxNumOrders is not a positive integer (undefined)',
+    );
+    expect(() => parseSpotRules(withFilter('MAX_NUM_ALGO_ORDERS', { maxNumAlgoOrders: 'x' }))).toThrow(
+      'parseSpotRules: BTCUSDT MAX_NUM_ALGO_ORDERS.maxNumAlgoOrders is not a positive integer (x)',
+    );
+  });
+  it('parseSymbolStatus reads the trading status and refuses an entry without one', () => {
+    expect(parseSymbolStatus(info.symbols[0])).toBe('TRADING');
+    expect(parseSymbolStatus({ ...info.symbols[0], status: 'BREAK' })).toBe('BREAK');
+    expect(() => parseSymbolStatus({ ...info.symbols[0], status: undefined })).toThrow(
+      'parseSymbolStatus: BTCUSDT has no status',
+    );
   });
 });
 

@@ -63,6 +63,23 @@ describe('MarketData', () => {
     expect(md.healthSnapshot().BTCUSDT).toEqual({ fresh: false, reason: 'Connection silent for 15s' });
   });
 
+  it('a symbol not TRADING on Binance is not fresh, with the halt as its reason', async () => {
+    const rest: any = {};
+    let status = 'BREAK';
+    rest.exchangeInfo = async () => ({ symbols: [{ ...(exchangeInfo as any).symbols[0], status }] });
+    const { clock, health, md } = setup(rest);
+    health.onConnect(clock.t);
+    health.setBookValid('BTCUSDT', true);
+    health.onDepth('BTCUSDT', clock.t, clock.t);
+    await md.refreshRules();
+    expect(md.isFresh('BTCUSDT')).toBe(false);
+    expect(md.healthSnapshot().BTCUSDT).toEqual({ fresh: false, reason: 'Trading halted on Binance (BREAK)' });
+    status = 'TRADING';
+    await md.refreshRules();
+    expect(md.isFresh('BTCUSDT')).toBe(true);
+    expect(md.healthSnapshot().BTCUSDT).toEqual({ fresh: true, reason: null });
+  });
+
   it('rules equal parseSpotRules of the exchangeInfo symbol', async () => {
     const rest: any = {};
     loadRules(rest);

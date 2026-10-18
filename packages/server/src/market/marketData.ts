@@ -3,7 +3,7 @@ import { D } from '@sim/engine';
 import type { AggTrade, BookSnapshot, Decimal, MarketView, PriceLevel, SpotRules } from '@sim/engine';
 import type { Logger } from '../log.ts';
 import type { BinanceRest } from '../binance/rest.ts';
-import { parseSpotRules } from '../binance/parseRules.ts';
+import { parseSpotRules, parseSymbolStatus } from '../binance/parseRules.ts';
 import type { FeedHealth } from './feedHealth.ts';
 import type { LocalBook } from './localBook.ts';
 import type { Ticker } from './spotFeed.ts';
@@ -41,6 +41,8 @@ export class MarketData extends EventEmitter implements MarketView {
   private readonly now: () => number;
   private readonly setTimer: SetTimer;
   private readonly ruleMap = new Map<string, SpotRules>();
+  /** Binance trading status per symbol, from the same exchangeInfo entry as its rules. */
+  private readonly status = new Map<string, string>();
   private readonly avg = new Map<string, { price: Decimal; at: number }>();
   private readonly last = new Map<string, Decimal>();
   private readonly tick = new Map<string, Ticker>();
@@ -126,7 +128,11 @@ export class MarketData extends EventEmitter implements MarketView {
       for (const raw of info?.symbols ?? []) {
         try {
           const rules = parseSpotRules(raw);
-          if (this.symbols.includes(rules.symbol)) this.ruleMap.set(rules.symbol, rules);
+          const status = parseSymbolStatus(raw);
+          if (this.symbols.includes(rules.symbol)) {
+            this.ruleMap.set(rules.symbol, rules);
+            this.status.set(rules.symbol, status);
+          }
         } catch (e) {
           this.log.warn(`exchangeInfo: ${(e as Error).message}`);
         }
@@ -164,7 +170,13 @@ export class MarketData extends EventEmitter implements MarketView {
 
   // MarketView
   isFresh(symbol: string): boolean {
-    return this.ruleMap.has(symbol) && this.health.isFresh(symbol, this.now());
+    return this.ruleMap.has(symbol) && this.halted(symbol) === null && this.health.isFresh(symbol, this.now());
+  }
+
+  /** Why Binance is not trading the symbol, or null when it is (or its status is not known yet). */
+  private halted(symbol: string): string | null {
+    const st = this.status.get(symbol);
+    return st === undefined || st === 'TRADING' ? null : `Trading halted on Binance (${st})`;
   }
 
   book(symbol: string): BookSnapshot {
@@ -208,7 +220,8 @@ export class MarketData extends EventEmitter implements MarketView {
     const now = this.now();
     const out: Record<string, { fresh: boolean; reason: string | null }> = {};
     for (const s of this.symbols) {
-      const reason = this.health.reason(s, now);
+      // A halt first: the depth stream goes quiet during one, which would otherwise hide it.
+      const reason = this.halted(s) ?? this.health.reason(s, now);
       out[s] = { fresh: reason === null && this.ruleMap.has(s), reason: reason ?? (this.ruleMap.has(s) ? null : 'Trading rules not loaded') };
     }
     return out;
