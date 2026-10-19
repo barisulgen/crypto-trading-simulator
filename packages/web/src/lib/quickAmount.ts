@@ -221,7 +221,7 @@ export type QuickEvent =
   | { type: 'reset' };
 
 /**
- * The next highlight state and the amount the field should now show (undefined: leave it).
+ * The next highlight state and the amount the field should now show (undefined: leave it; '' empties it).
  * `compute` sizes a percentage against the form as it is now (null: nothing to price it with).
  * Book updates are not an event: the field never changes under the owner.
  */
@@ -234,7 +234,9 @@ export function quickStep(
   const pct = event.type === 'pick' ? event.pct : state.pct;
   if (pct === null) return { state };
   const r = compute(pct);
-  if (r === null) return { state: event.type === 'pick' ? state : NO_QUICK };
+  // A pick that cannot be priced changes nothing. A reprice that cannot be priced clears the
+  // field too: the old amount would now read in the wrong unit or for the wrong price.
+  if (r === null) return event.type === 'pick' ? { state } : { state: NO_QUICK, amount: '' };
   return { state: { pct, belowStep: r.belowStep, belowCent: r.belowCent }, amount: r.amount };
 }
 

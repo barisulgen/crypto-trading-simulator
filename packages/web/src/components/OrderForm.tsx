@@ -376,7 +376,9 @@ export function OrderForm() {
               stepSize={rules?.stepSize ?? '0.00000001'}
               free={free}
             />
-            {hint !== null && <p className="text-muted">{hint}</p>}
+            <p aria-live="polite" className="text-muted empty:hidden">
+              {hint}
+            </p>
           </div>
         }
       />

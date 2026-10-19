@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountSnapshot, WireLevel } from '../src/lib/api.ts';
 import { setRules } from '../src/lib/format.ts';
-import { floorDivToStep, mulDec } from '../src/lib/market.ts';
+import { floorDivToStep, mulDec, subDec } from '../src/lib/market.ts';
 import {
   NO_QUICK,
   amountStep,
@@ -61,8 +61,7 @@ describe('quick amount: step flooring', () => {
   it('100% leaves the sub-step dust behind', () => {
     const r = quickAmount(input({ pct: 100, freeBase: '0.00120879' }))!;
     expect(r.amount).toBe('0.0012');
-    expect(mulDec('1', '0.00120879')).toBe('0.00120879');
-    expect(r.amount).not.toBe('0.00120879');
+    expect(subDec('0.00120879', r.amount)).toBe('0.00000879');
   });
 
   it('market orders use the market step, others the lot step', () => {
@@ -335,12 +334,12 @@ describe('quick amount highlight state', () => {
     expect(r.amount).toBeUndefined();
   });
 
-  it('a reprice that can no longer be priced clears the highlight', () => {
+  it('a reprice that can no longer be priced clears the highlight and empties the amount (it would be in the wrong unit)', () => {
     unit = 'coin';
     const picked = quickStep(NO_QUICK, { type: 'pick', pct: 25 }, compute).state;
     const r = quickStep(picked, { type: 'reprice' }, () => null);
     expect(r.state).toEqual(NO_QUICK);
-    expect(r.amount).toBeUndefined();
+    expect(r.amount).toBe('');
   });
 });
 
