@@ -9,6 +9,7 @@ import type {
   EngineCtx,
   EngineEvent,
   OrderPreview,
+  OrderStatus,
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
@@ -17,6 +18,7 @@ import type {
 import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import {
   amountTooSmall,
+  arrivalDelay,
   emptyPreview,
   fillOrThin,
   marketStep,
@@ -39,6 +41,7 @@ import {
   arriveStop,
   arriveTriggered,
   attachOco,
+  cancelRequested,
   cancelStop,
   executeDue,
   expectedNetQty,
@@ -53,6 +56,10 @@ import { isStopType } from './triggers.ts';
 export const UNKNOWN_ORDER_TYPE = 'Unknown order type';
 export const RESTART_REASON = 'Server restarted before execution';
 export const RULES_NOT_LOADED = 'Exchange rules not loaded yet; try again in a moment';
+export const CANCEL_REQUESTED = 'Cancel already requested';
+
+/** Statuses an owner cancel still acts on when it reaches the exchange. */
+const CANCELLABLE: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled']);
 
 /** Everything submit and preview work out for a market order before touching state. */
 interface MarketPlan {
@@ -151,19 +158,20 @@ export class SpotEngine {
   }
 
   /**
-   * A real trade on `symbol`. While the symbol is fresh it first does what onFresh does (arms
-   * waiting attached pairs, executes due triggered orders), so nothing waits on a missed onFresh;
-   * then triggers the armed stops its price reached; then fills the resting limit and post-only
-   * orders it went through. A trade id at or below the last one processed for the symbol is a
-   * replay and is ignored, so no trade is ever counted twice. A trade that arrives while the
-   * symbol is stale is skipped without moving that cursor, so a later replay of it is processed.
+   * A real trade on `symbol`. While the symbol is fresh it first does what onFresh does (delivers
+   * due cancels, arms waiting attached pairs, executes due triggered orders), so nothing waits on
+   * a missed onFresh or a late cancel timer; then triggers the armed stops its price reached; then
+   * fills the resting limit and post-only orders it went through. A trade id at or below the last
+   * one processed for the symbol is a replay and is ignored, so no trade is ever counted twice. A
+   * trade that arrives while the symbol is stale is skipped without moving that cursor, so a later
+   * replay of it is processed.
    */
   onTrade(symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
     const lastId = this.s.lastTradeId[symbol];
     if (lastId !== undefined && trade.id <= lastId) return [];
     if (!ctx.market.isFresh(symbol)) return [];
     const events = [
-      ...this.onFresh(symbol, ctx),
+      ...this.freshWork(symbol, ctx),
       ...triggerStops(this.s, symbol, trade, ctx),
       ...matchTrade(this.s, symbol, trade, ctx),
     ];
@@ -172,12 +180,26 @@ export class SpotEngine {
   }
 
   /**
-   * The symbol's book is fresh again: attached pairs that waited for fresh data arm (or are
-   * rejected if they would trigger now), and triggered orders that are due execute against it.
-   * A no-op while the symbol is stale.
+   * The symbol's book is fresh again: cancels whose arrival time has passed are delivered (one
+   * that waited for the exchange rules included), attached pairs that waited for fresh data arm
+   * (or are rejected if they would trigger now), and triggered orders that are due execute
+   * against it. A no-op while the symbol is stale.
    */
   onFresh(symbol: string, ctx: EngineCtx): EngineEvent[] {
-    return [...armWaitingPairs(this.s, symbol, ctx), ...executeDue(this.s, symbol, ctx)];
+    return activateAttachedPairs(this.s, this.freshWork(symbol, ctx), ctx);
+  }
+
+  /** onFresh without activating attached pairs: the caller activates them once for all its events. */
+  private freshWork(symbol: string, ctx: EngineCtx): EngineEvent[] {
+    if (!ctx.market.isFresh(symbol)) return [];
+    const dueCancels = [...this.s.orders.values()].filter(
+      (o) => o.symbol === symbol && o.cancelArrivesAt !== null && o.cancelArrivesAt <= ctx.now,
+    );
+    return [
+      ...dueCancels.flatMap((o) => this.deliverCancel(o.id, ctx)),
+      ...armWaitingPairs(this.s, symbol, ctx),
+      ...executeDue(this.s, symbol, ctx),
+    ];
   }
 
   /** Attach a linked stop-loss / take-profit pair (both sells) to coins already held. */
@@ -186,9 +208,11 @@ export class SpotEngine {
   }
 
   /**
-   * Cancel by the owner. Pending, open and partially filled limit/post-only orders and
-   * untriggered stops can be cancelled (a cancelled pending order never arrives; a pair is
-   * cancelled as a whole); market orders in flight and triggered stops are already executing.
+   * The owner asks to cancel. Pending, open and partially filled limit/post-only orders and
+   * untriggered stops can be cancelled (a pair as a whole); market orders in flight and triggered
+   * stops are already executing. Like an order, the request reaches the exchange after an arrival
+   * delay (cancelArrivesAt) and takes effect then, in arriveCancel: until then the order stays
+   * live and can still fill or trigger. One cancel per order, or per pair, can be in flight.
    */
   cancel(orderId: string, ctx: EngineCtx): ActionResult {
     const order = this.s.orders.get(orderId);
@@ -199,16 +223,41 @@ export class SpotEngine {
     if (order.status === 'triggered' || order.type === 'market') {
       return { ok: false, reason: 'Order is already executing and cannot be cancelled' };
     }
+    if (cancelRequested(this.s, order)) return { ok: false, reason: CANCEL_REQUESTED };
     if (cancelNeedsRules(order) && !rulesLoaded(order.symbol, ctx)) return { ok: false, reason: RULES_NOT_LOADED };
-    if (isStopType(order.type)) return { ok: true, events: cancelStop(this.s, order, ctx) };
+    this.s.orders.set(order.id, { ...order, cancelArrivesAt: ctx.now + arrivalDelay(ctx) });
+    return { ok: true, events: [] };
+  }
+
+  /**
+   * The owner's cancel reaches the exchange; a no-op before its cancelArrivesAt or with no cancel
+   * in flight. An order that can still be cancelled is cancelled (a pending one never arrives, a
+   * pair goes as a whole, a part-filled buy activates its attached pair). One that filled,
+   * triggered, was rejected or was cancelled meanwhile stays as it is, and the late cancel is
+   * recorded as cancel_rejected. A cancel that needs the exchange rules while they are not loaded
+   * stays in flight; onFresh delivers it once the symbol's data is fresh.
+   */
+  arriveCancel(orderId: string, ctx: EngineCtx): EngineEvent[] {
+    return activateAttachedPairs(this.s, this.deliverCancel(orderId, ctx), ctx);
+  }
+
+  /** arriveCancel without activating attached pairs. */
+  private deliverCancel(orderId: string, ctx: EngineCtx): EngineEvent[] {
+    const order = this.s.orders.get(orderId);
+    if (!order || order.cancelArrivesAt === null || ctx.now < order.cancelArrivesAt) return [];
+    const arrived: SpotOrder = { ...order, cancelArrivesAt: null };
+    if (!CANCELLABLE.has(order.status)) {
+      this.s.orders.set(arrived.id, arrived);
+      const reason = `Cancel arrived too late: order already ${order.status}`;
+      return [{ type: 'cancel_rejected', time: ctx.now, order: arrived, reason }];
+    }
+    if (cancelNeedsRules(order) && !rulesLoaded(order.symbol, ctx)) return [];
+    if (isStopType(order.type)) return cancelStop(this.s, arrived, ctx);
     releaseFunds(this.s, order.lockAsset, order.lockAmount);
-    const cancelled: SpotOrder = { ...order, status: 'cancelled', lockAmount: D(0) };
+    const cancelled: SpotOrder = { ...arrived, status: 'cancelled', lockAmount: D(0) };
     this.s.orders.set(cancelled.id, cancelled);
     const cancelledQty = order.qty!.minus(order.filledQty);
-    const events: EngineEvent[] = [
-      { type: 'order_cancelled', time: ctx.now, order: cancelled, reason: 'user', cancelledQty },
-    ];
-    return { ok: true, events: activateAttachedPairs(this.s, events, ctx) };
+    return [{ type: 'order_cancelled', time: ctx.now, order: cancelled, reason: 'user', cancelledQty }];
   }
 
   /**

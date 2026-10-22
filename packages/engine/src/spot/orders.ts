@@ -110,6 +110,7 @@ export function newOrder(req: SpotOrderRequest, rules: SpotRules, fields: Reques
     attach: fields.attach,
     createdAt: ctx.now,
     arrivesAt: null,
+    cancelArrivesAt: null,
     triggeredAt: null,
     bestAtSubmit: null,
     rejectReason: null,

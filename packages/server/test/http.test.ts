@@ -319,9 +319,14 @@ describe('REST', () => {
 
     const limit = await t.call('POST', '/api/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'limit', qty: '1', price: '99.50' });
     t.clock.advance(300);
+    // The cancel is a request: accepted, it arrives after its delay; the order is still open meanwhile.
     const cancel = await t.call('DELETE', `/api/orders/${limit.body.order.id}`);
     expect(cancel.status).toBe(200);
-    expect(cancel.body.order).toMatchObject({ status: 'cancelled' });
+    expect(cancel.body.order).toMatchObject({ status: 'open', cancelArrivesAt: t.clock.now + 100 });
+    const again = await t.call('DELETE', `/api/orders/${limit.body.order.id}`);
+    expect([again.status, again.body]).toEqual([400, { error: 'Cancel already requested' }]);
+    t.clock.advance(100);
+    expect(t.runner.state.orders.get(limit.body.order.id)!.status).toBe('cancelled');
     expect((await t.call('DELETE', `/api/orders/${limit.body.order.id}`)).body).toEqual({ error: 'Order is not open' });
     expect((await t.call('DELETE', '/api/orders/nope')).status).toBe(404);
 

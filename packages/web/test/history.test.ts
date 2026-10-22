@@ -3,6 +3,7 @@ import type { HistoryRow } from '../src/lib/api.ts';
 import { setRules } from '../src/lib/format.ts';
 import {
   EMPTY_FILTERS,
+  EVENT_TYPES,
   describeEvent,
   filterParams,
   fmtDuration,
@@ -141,6 +142,7 @@ describe('history rows', () => {
     attach: null,
     createdAt: T,
     arrivesAt: T + 150,
+    cancelArrivesAt: null,
     triggeredAt: null,
     bestAtSubmit: '81000',
     rejectReason: null,
@@ -222,6 +224,28 @@ describe('history rows', () => {
     expect(lines(cancel('thin_book'))).toContain('Cancelled: book too thin');
     expect(lines(cancel('oco'))).toContain('Cancelled: other leg of the pair triggered');
     expect(lines(cancel('parent_cancelled'))).toContain('Cancelled: parent cancelled');
+  });
+
+  it('cancel failed: a cancel that arrived too late, with its reason; filterable by its own type', () => {
+    const reason = 'Cancel arrived too late: order already filled';
+    const v = describeEvent(
+      row('cancel_rejected', {
+        type: 'cancel_rejected',
+        time: T,
+        order: order({ status: 'filled', filledQty: '0.0002', cancelArrivesAt: null }),
+        reason,
+      }),
+    );
+    expect(v.label).toBe('Cancel failed');
+    expect(v.tone).toBe('down');
+    expect(v.coin).toBe('BTC');
+    expect(lines(v)).toEqual(['Side: Buy', 'Type: Limit', 'Price: 78,000.00', 'Amount: 0.00020 BTC']);
+    expect(v.note).toEqual({ label: 'Reason', text: reason });
+    expect(EVENT_TYPES.find((t) => t.type === 'cancel_rejected')?.label).toBe('Cancels failed');
+    expect(parseFilters(new URLSearchParams('types=cancel_rejected,order_cancelled')).types).toEqual([
+      'order_cancelled',
+      'cancel_rejected',
+    ]);
   });
 
   it('order rejected: the reason verbatim; a triggered stop that could not execute says so', () => {

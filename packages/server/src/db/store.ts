@@ -45,12 +45,13 @@ const ORDER_DECIMALS = [
 
 const dec = (v: unknown): Decimal | null => (v === null || v === undefined ? null : D(v as string));
 
-/** Revive a SpotOrder parsed from JSON (Decimal fields by name). */
+/** Revive a SpotOrder parsed from JSON (Decimal fields by name; a row from before cancelArrivesAt has none in flight). */
 function reviveOrder(raw: Record<string, unknown>): SpotOrder {
   const o = { ...raw };
   for (const k of ORDER_DECIMALS) o[k] = dec(o[k]);
   const attach = o.attach as { stopLoss: string; takeProfit: string } | null | undefined;
   o.attach = attach ? { stopLoss: D(attach.stopLoss), takeProfit: D(attach.takeProfit) } : null;
+  o.cancelArrivesAt = typeof o.cancelArrivesAt === 'number' ? o.cancelArrivesAt : null;
   return o as unknown as SpotOrder;
 }
 

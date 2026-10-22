@@ -156,6 +156,11 @@ function cancellable(o: WireOrder): boolean {
   return o.status !== 'triggered' && o.type !== 'market';
 }
 
+/** A cancel is on its way to the exchange (it takes an arrival delay): shown instead of the Cancel button. */
+function Cancelling() {
+  return <span className="text-2xs whitespace-nowrap text-muted">Cancelling…</span>;
+}
+
 const ORDER_COLS: Col[] = [
   { label: 'Coin' },
   { label: 'Type' },
@@ -212,11 +217,15 @@ function OrderRow({ o, onCancel, cancel = true }: { o: WireOrder; onCancel(o: Wi
         <span className={o.status === 'triggered' ? 'font-semibold text-accent' : 'text-muted'}>{statusLabel(o)}</span>
       </Cell>
       <Actions>
-        {cancel && cancellable(o) && (
-          <Button tone="quiet" size="sm" onClick={() => onCancel(o)}>
-            Cancel
-          </Button>
-        )}
+        {cancel &&
+          cancellable(o) &&
+          (o.cancelArrivesAt !== null ? (
+            <Cancelling />
+          ) : (
+            <Button tone="quiet" size="sm" onClick={() => onCancel(o)}>
+              Cancel
+            </Button>
+          ))}
       </Actions>
     </Row>
   );
@@ -249,15 +258,20 @@ function OpenOrders() {
       .filter((l) => l.ocoGroupId === o.ocoGroupId)
       .sort((a, b) => (a.type === b.type ? 0 : a.type === 'stop_loss' ? -1 : 1));
     const executing = legs.some((l) => !cancellable(l));
+    // One cancel covers the pair, whichever leg it was sent for.
+    const cancelling = legs.some((l) => l.cancelArrivesAt !== null);
     items.push(
       <div key={o.ocoGroupId} role="group" aria-label="Linked pair" className="border-l-2 border-faint">
         <div className="flex items-center justify-between gap-2 px-3 pt-1.5 text-2xs text-muted">
           <span>Linked pair - when one triggers, the other is cancelled</span>
-          {!executing && (
-            <Button tone="quiet" size="sm" onClick={() => void cancel(legs[0]!)}>
-              Cancel pair
-            </Button>
-          )}
+          {!executing &&
+            (cancelling ? (
+              <Cancelling />
+            ) : (
+              <Button tone="quiet" size="sm" onClick={() => void cancel(legs[0]!)}>
+                Cancel pair
+              </Button>
+            ))}
         </div>
         {legs.map((l) => (
           <OrderRow key={l.id} o={l} onCancel={cancel} cancel={false} />

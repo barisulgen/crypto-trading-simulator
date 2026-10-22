@@ -74,6 +74,15 @@ function arm(engine: SpotEngine, r: SpotOrderRequest, ctx: EngineCtx): string {
   return order.id;
 }
 
+/** Request a cancel and deliver it at its arrival time; returns what its arrival did. */
+function cancelNow(engine: SpotEngine, id: string, ctx: EngineCtx): EngineEvent[] {
+  const r = engine.cancel(id, ctx);
+  if (!r.ok) throw new Error(r.reason);
+  expect(r.events).toEqual([]);
+  ctx.now = Math.max(ctx.now, engine.state.orders.get(id)!.cancelArrivesAt!);
+  return engine.arriveCancel(id, ctx);
+}
+
 /** Arm, then trigger with a trade at `at`; returns the triggered order. */
 function armAndTrigger(engine: SpotEngine, r: SpotOrderRequest, at: string, ctx: EngineCtx): SpotOrder {
   const id = arm(engine, r, ctx);
@@ -207,7 +216,7 @@ describe('placing a stop', () => {
     expect(rejectReason(engine.submit(sellStop('96', '0.1'), ctx))).toBe(
       'MAX_NUM_ALGO_ORDERS: already 5 open stop/take-profit orders on BTCUSDT (maximum 5)',
     );
-    expect(engine.cancel(fifth.id, ctx).ok).toBe(true);
+    expect(only(cancelNow(engine, fifth.id, ctx), 'order_cancelled').reason).toBe('user');
     placed(engine.submit(sellStop('96', '0.1'), ctx));
   });
 });
@@ -481,16 +490,14 @@ describe('cancel', () => {
   it('pending and open stops can be cancelled; triggered ones are already executing', () => {
     const { ctx, engine, bal, stored } = setup();
     const pending = placed(engine.submit(sellStop('99', '0.5'), ctx));
-    const r1 = engine.cancel(pending.id, ctx);
-    if (!r1.ok) throw new Error(r1.reason);
-    const c1 = only(r1.events, 'order_cancelled');
+    const c1 = only(cancelNow(engine, pending.id, ctx), 'order_cancelled');
     expect(c1.reason).toBe('user');
     expect(s(c1.cancelledQty)).toBe('0.5');
     expect(arriveNow(engine, pending, ctx)).toEqual([]);
     expect(stored(pending.id).status).toBe('cancelled');
 
     const open = arm(engine, sellStop('99', '1'), ctx);
-    expect(engine.cancel(open, ctx).ok).toBe(true);
+    expect(only(cancelNow(engine, open, ctx), 'order_cancelled').reason).toBe('user');
     expect(s(bal('BTC').locked)).toBe('0');
     expect(s(bal('BTC').free)).toBe('2');
     expect(engine.onTrade('BTCUSDT', trade('98'), ctx)).toEqual([]);
@@ -503,11 +510,55 @@ describe('cancel', () => {
   it('dollar-sized buy stop: cancel releases the dollars and reports the coins they would buy', () => {
     const { ctx, engine, bal } = setup();
     const id = arm(engine, stop('buy', 'stop_loss', '101', { quoteQty: '50.5' }), ctx);
-    const r = engine.cancel(id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    expect(s(only(r.events, 'order_cancelled').cancelledQty)).toBe('0.5');
+    expect(s(only(cancelNow(engine, id, ctx), 'order_cancelled').cancelledQty)).toBe('0.5');
     expect(s(bal('USDT').locked)).toBe('0');
     expect(s(bal('USDT').free)).toBe('1000');
+  });
+
+  it('a stop that triggers during the cancel delay: the cancel is too late and the triggered order still executes', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const id = arm(engine, sellStop('99.00', '1'), ctx);
+    const t = ctx.now;
+    expect(engine.cancel(id, ctx)).toEqual({ ok: true, events: [] });
+    expect(stored(id).cancelArrivesAt).toBe(t + 100);
+
+    ctx.now = t + 1;
+    const triggered = only(engine.onTrade('BTCUSDT', trade('99.00'), ctx), 'order_triggered').order;
+    expect(triggered.arrivesAt).toBe(t + 101);
+
+    ctx.now = t + 100;
+    const e = only(engine.arriveCancel(id, ctx), 'cancel_rejected');
+    expect(e.reason).toBe('Cancel arrived too late: order already triggered');
+    expect(e.order.status).toBe('triggered');
+    expect(e.order.cancelArrivesAt).toBeNull();
+    expect(stored(id)).toEqual(e.order);
+    expect(s(bal('BTC').locked)).toBe('1');
+
+    const { fill, order } = fillOf(arriveNow(engine, stored(id), ctx));
+    expect(s(fill.qty)).toBe('1');
+    expect(order.status).toBe('filled');
+    expect(s(bal('BTC').locked)).toBe('0');
+  });
+
+  it('a cancel that needs the exchange rules waits in flight while they are missing; onFresh delivers it', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const id = arm(engine, stop('buy', 'stop_loss', '101', { quoteQty: '50.5' }), ctx);
+    expect(engine.cancel(id, ctx).ok).toBe(true);
+    const at = stored(id).cancelArrivesAt!;
+
+    market.clearRules('BTCUSDT');
+    ctx.now = at + 5_000;
+    expect(engine.arriveCancel(id, ctx)).toEqual([]);
+    expect(stored(id).status).toBe('open');
+    expect(stored(id).cancelArrivesAt).toBe(at);
+    expect(s(bal('USDT').locked)).toBe('50.5');
+
+    market.setRules('BTCUSDT', btcRules);
+    const e = only(engine.onFresh('BTCUSDT', ctx), 'order_cancelled');
+    expect(e.reason).toBe('user');
+    expect(s(e.cancelledQty)).toBe('0.5');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(engine.arriveCancel(id, ctx)).toEqual([]);
   });
 
   it('cancels that need the exchange rules are refused, with no state change, before the rules load', () => {
@@ -604,12 +655,17 @@ describe('linked SL/TP pair (attachOco)', () => {
     expect(s(bal('BTC').locked)).toBe('1');
   });
 
-  it('cancelling either untriggered leg cancels both and releases the lock once', () => {
+  it('cancelling either untriggered leg cancels both when the cancel arrives and releases the lock once', () => {
     const { ctx, engine, bal, stored } = setup();
     const [sl, tp] = armPair(engine, ctx);
-    const r = engine.cancel(tp.id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    expect(r.events.map((e) => (e.type === 'order_cancelled' ? [e.order.id, e.reason] : e.type))).toEqual([
+    expect(engine.cancel(tp.id, ctx)).toEqual({ ok: true, events: [] });
+    expect([stored(sl.id).status, stored(tp.id).status]).toEqual(['open', 'open']);
+    // The pair has one cancel in flight: the other leg cannot be cancelled again.
+    expect(engine.cancel(sl.id, ctx)).toEqual({ ok: false, reason: 'Cancel already requested' });
+
+    ctx.now = stored(tp.id).cancelArrivesAt!;
+    const events = engine.arriveCancel(tp.id, ctx);
+    expect(events.map((e) => (e.type === 'order_cancelled' ? [e.order.id, e.reason] : e.type))).toEqual([
       [tp.id, 'user'],
       [sl.id, 'oco'],
     ]);
@@ -620,10 +676,27 @@ describe('linked SL/TP pair (attachOco)', () => {
 
     // Cancelling a pending pair (by its SL leg) works the same way.
     const [pSl, pTp] = placedOrders(pair(engine, ctx)) as [SpotOrder, SpotOrder];
-    expect(engine.cancel(pSl.id, ctx).ok).toBe(true);
+    expect(cancelNow(engine, pSl.id, ctx).map((e) => e.type)).toEqual(['order_cancelled', 'order_cancelled']);
     expect(stored(pTp.id).status).toBe('cancelled');
     expect(s(bal('BTC').locked)).toBe('0');
     expect(arriveNow(engine, pSl, ctx)).toEqual([]);
+  });
+
+  it('a leg that triggers during the cancel delay: its partner is cancelled by the trigger and the cancel is too late', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const [sl, tp] = armPair(engine, ctx);
+    engine.cancel(sl.id, ctx);
+    ctx.now += 1;
+    expect(engine.onTrade('BTCUSDT', trade('110'), ctx).map((e) => e.type)).toEqual([
+      'order_triggered',
+      'order_cancelled',
+    ]);
+    ctx.now = stored(sl.id).cancelArrivesAt!;
+    expect(only(engine.arriveCancel(sl.id, ctx), 'cancel_rejected').reason).toBe(
+      'Cancel arrived too late: order already cancelled',
+    );
+    expect(stored(tp.id).status).toBe('triggered');
+    expect(s(bal('BTC').locked)).toBe('1');
   });
 
   it('a leg that would trigger now rejects the whole pair, nothing locked', () => {
@@ -693,16 +766,25 @@ describe('pair attached to a buy', () => {
     const parent = placed(engine.submit(limitBuy('1'), ctx));
     arriveNow(engine, parent, ctx);
     engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
-    const r = engine.cancel(parent.id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    expect(r.events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
-    expect(placedOrders(r.events).map((o) => s(o.qty))).toEqual(['0.4995', '0.4995']);
+    const events = cancelNow(engine, parent.id, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
+    expect(placedOrders(events).map((o) => s(o.qty))).toEqual(['0.4995', '0.4995']);
 
     const unfilled = placed(engine.submit(limitBuy('1'), ctx));
     arriveNow(engine, unfilled, ctx);
-    const r2 = engine.cancel(unfilled.id, ctx);
-    if (!r2.ok) throw new Error(r2.reason);
-    expect(r2.events.map((e) => e.type)).toEqual(['order_cancelled']);
+    expect(cancelNow(engine, unfilled.id, ctx).map((e) => e.type)).toEqual(['order_cancelled']);
+  });
+
+  it('a part-filled parent whose cancel is delivered by a later trade activates its pair once', () => {
+    const { ctx, engine } = setup();
+    const parent = placed(engine.submit(limitBuy('1'), ctx));
+    arriveNow(engine, parent, ctx);
+    engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
+    engine.cancel(parent.id, ctx);
+    ctx.now = engine.state.orders.get(parent.id)!.cancelArrivesAt!;
+    const events = engine.onTrade('BTCUSDT', trade('99.40', '1', true), ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
+    expect(placedOrders(events).map((o) => s(o.qty))).toEqual(['0.4995', '0.4995']);
   });
 
   it('parent cancelled after a partial fill while stale → pair waits pending; armed on the next onFresh', () => {
@@ -711,10 +793,9 @@ describe('pair attached to a buy', () => {
     arriveNow(engine, parent, ctx);
     engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
     market.setFresh('BTCUSDT', false);
-    const r = engine.cancel(parent.id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    expect(r.events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
-    const [sl, tp] = placedOrders(r.events) as [SpotOrder, SpotOrder];
+    const events = cancelNow(engine, parent.id, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
+    const [sl, tp] = placedOrders(events) as [SpotOrder, SpotOrder];
     for (const leg of [sl, tp]) {
       expect([leg.status, leg.arrivesAt, leg.parentId, s(leg.qty)]).toEqual(['pending', null, parent.id, '0.4995']);
     }
@@ -761,10 +842,9 @@ describe('pair attached to a buy', () => {
     engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
     market.setFresh('BTCUSDT', false);
     market.setAvgPrice('BTCUSDT', null);
-    const r = engine.cancel(parent.id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    expect(r.events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
-    const [sl, tp] = placedOrders(r.events) as [SpotOrder, SpotOrder];
+    const events = cancelNow(engine, parent.id, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_cancelled', 'order_placed', 'order_placed']);
+    const [sl, tp] = placedOrders(events) as [SpotOrder, SpotOrder];
     expect([sl.status, sl.arrivesAt]).toEqual(['pending', null]);
 
     market.setFresh('BTCUSDT', true); // the average price is still missing: stops do not need it

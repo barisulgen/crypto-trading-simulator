@@ -6,6 +6,7 @@ import type { Db } from '../src/db/db.ts';
 import { loadSpotState, toJson } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import { EngineRunner, RefusedError, RESTART_REASON, submittedOrder } from '../src/runner.ts';
+import { btcRules } from '../../engine/test/fixtures.ts';
 import { FakeClock, FakeHealth, TestMarket } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
@@ -23,6 +24,7 @@ const trade = (price: string, qty = '1'): AggTrade => ({
 });
 
 const marketBuy = (qty: string): SpotOrderRequest => ({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty });
+const limitBuy = (price: string, qty: string): SpotOrderRequest => ({ symbol: 'BTCUSDT', side: 'buy', type: 'limit', price, qty });
 const stopSell = (qty: string, triggerPrice: string): SpotOrderRequest => ({
   symbol: 'BTCUSDT',
   side: 'sell',
@@ -354,6 +356,132 @@ describe('EngineRunner', () => {
     expect(t.runner.cancel(order.id)).toEqual({ ok: false, reason: 'Exchange rules not loaded yet; try again in a moment' });
     expect(t.fatal).toEqual([]);
     expect(t.orderRow(order.id)!.status).toBe('open');
+  });
+
+  it('a cancel is a request: the order stays open until the cancel arrives 100 ms later, then it is cancelled', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    const order = submittedOrder(t.runner.submit(limitBuy('99.50', '1')));
+    t.clock.advance(100);
+    expect(t.orderRow(order.id)!.status).toBe('open');
+
+    t.sent.length = 0;
+    expect(t.runner.cancel(order.id)).toEqual({ ok: true, events: [] });
+    const at = t.clock.now + 100;
+    expect(t.orderRow(order.id)!.status).toBe('open');
+    expect(JSON.parse(t.orderRow(order.id)!.data).cancelArrivesAt).toBe(at);
+    const orders = t.sent.filter((m) => m.type === 'orders').at(-1)!;
+    expect(orders.orders).toEqual([expect.objectContaining({ id: order.id, status: 'open', cancelArrivesAt: at })]);
+    expect(t.runner.cancel(order.id)).toEqual({ ok: false, reason: 'Cancel already requested' });
+
+    t.clock.advance(99);
+    expect(t.orderRow(order.id)!.status).toBe('open');
+    t.clock.advance(1);
+    expect(t.orderRow(order.id)!.status).toBe('cancelled');
+    expect(t.eventsOf('order_cancelled').map((e) => [e.time, e.payload.reason])).toEqual([[at, 'user']]);
+    expect(t.runner.openOrders()).toEqual([]);
+    expect(t.engine.state.balances.spot.USDT!.locked.toString()).toBe('0');
+    expect(t.fatal).toEqual([]);
+  });
+
+  it('a trade during the cancel delay fills the order; the late cancel is recorded and gives an error notice', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    const order = submittedOrder(t.runner.submit(limitBuy('99.50', '1')));
+    t.clock.advance(100);
+    t.runner.cancel(order.id);
+    t.clock.advance(1);
+    t.market.trade('BTCUSDT', trade('99.00', '5'));
+    expect(t.orderRow(order.id)!.status).toBe('filled');
+
+    t.clock.advance(99);
+    expect(t.eventsOf('cancel_rejected').map((e) => e.payload.reason)).toEqual([
+      'Cancel arrived too late: order already filled',
+    ]);
+    expect(t.sent.filter((m) => m.type === 'notice' && m.kind === 'cancel_rejected')).toEqual([
+      { type: 'notice', kind: 'cancel_rejected', level: 'error', text: 'Cancel arrived too late: order already filled' },
+    ]);
+    expect(JSON.parse(t.orderRow(order.id)!.data).cancelArrivesAt).toBeNull();
+    expect(t.orderRow(order.id)!.status).toBe('filled');
+  });
+
+  it('restart: a cancel in flight when the server stopped reached the exchange meanwhile: cancelled during startup recovery', () => {
+    const a = setup();
+    a.runner.start();
+    a.runner.deposit('spot', D('1000'));
+    const limit = submittedOrder(a.runner.submit(limitBuy('99.50', '1')));
+    a.clock.advance(100);
+    expect(a.runner.cancel(limit.id).ok).toBe(true);
+    // A pending order whose cancel is in flight too: cancelled, never re-sent.
+    const pending = submittedOrder(a.runner.submit(limitBuy('99.40', '1')));
+    expect(a.runner.cancel(pending.id).ok).toBe(true);
+    a.runner.stop();
+
+    a.clock.advance(60_000);
+    const b = setup({ db: a.db, clock: a.clock }); // not started: recovery alone
+    for (const id of [limit.id, pending.id]) {
+      expect(b.engine.state.orders.get(id)!.status).toBe('cancelled');
+      expect(b.orderRow(id)!.status).toBe('cancelled');
+    }
+    expect(b.eventsOf('order_cancelled').map((e) => [e.payload.order.id, e.payload.reason, e.time])).toEqual([
+      [limit.id, 'user', b.clock.now],
+      [pending.id, 'user', b.clock.now],
+    ]);
+    expect(b.engine.state.balances.spot.USDT!.locked.toString()).toBe('0');
+    b.runner.start();
+    b.clock.advance(5000);
+    expect(b.orderRow(pending.id)!.status).toBe('cancelled');
+    expect(b.fatal).toEqual([]);
+  });
+
+  it('restart within the cancel delay: the cancel arrives at its own time', () => {
+    const a = setup();
+    a.runner.start();
+    a.runner.deposit('spot', D('1000'));
+    const order = submittedOrder(a.runner.submit(limitBuy('99.50', '1')));
+    a.clock.advance(100);
+    a.runner.cancel(order.id);
+    const at = a.clock.now + 100;
+    a.runner.stop();
+    a.clock.advance(40);
+
+    const b = setup({ db: a.db, clock: a.clock });
+    expect(b.orderRow(order.id)!.status).toBe('open');
+    b.clock.advance(at - b.clock.now - 1);
+    expect(b.orderRow(order.id)!.status).toBe('open');
+    b.clock.advance(1);
+    expect(b.orderRow(order.id)!.status).toBe('cancelled');
+  });
+
+  it('restart before the rules load: a cancel that needs them waits, then is applied once the data is fresh', () => {
+    const a = setup();
+    a.runner.start();
+    a.runner.deposit('spot', D('1000'));
+    const order = submittedOrder(
+      a.runner.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'stop_loss', triggerPrice: '101', quoteQty: '50.5' }),
+    );
+    a.clock.advance(100);
+    expect(a.runner.cancel(order.id).ok).toBe(true);
+    a.runner.stop();
+    a.clock.advance(60_000);
+
+    const market = new TestMarket(SYMBOLS);
+    market.clearRules('BTCUSDT');
+    market.setFresh('BTCUSDT', false);
+    const b = setup({ db: a.db, clock: a.clock, market });
+    b.runner.start();
+    b.clock.advance(5000);
+    expect(b.fatal).toEqual([]);
+    expect(b.orderRow(order.id)!.status).toBe('open');
+
+    market.setRules('BTCUSDT', btcRules);
+    market.setFresh('BTCUSDT', true);
+    b.clock.advance(1000);
+    expect(b.orderRow(order.id)!.status).toBe('cancelled');
+    expect(b.eventsOf('order_cancelled').map((e) => [e.payload.reason, e.payload.cancelledQty])).toEqual([['user', '0.5']]);
+    expect(b.fatal).toEqual([]);
   });
 
   it('refuses order submission when the loaded state fails its integrity check', () => {

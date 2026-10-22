@@ -16,6 +16,7 @@ export const EVENT_TYPES = [
   { type: 'transfer', label: 'Transfers' },
   { type: 'order_placed', label: 'Orders placed' },
   { type: 'order_cancelled', label: 'Orders cancelled' },
+  { type: 'cancel_rejected', label: 'Cancels failed' },
   { type: 'order_rejected', label: 'Orders rejected' },
   { type: 'order_triggered', label: 'Stops triggered' },
   { type: 'fill', label: 'Fills' },
@@ -298,6 +299,11 @@ function describeKnown(row: HistoryRow): EventView {
         { label: 'Cancelled', value: CANCEL_WORDS[p.reason] ?? p.reason },
         { label: 'Cancelled qty', value: `${fmtQty(p.order.symbol, p.cancelledQty)} ${baseOf(p.order.symbol)}` },
       ]);
+    }
+    case 'cancel_rejected': {
+      // The owner's cancel arrived after the order had filled, triggered, been rejected or been cancelled.
+      const p = row.payload as Payload<'cancel_rejected'>;
+      return view('Cancel failed', 'down', orderFields(p.order), { label: 'Reason', text: p.reason });
     }
     case 'order_rejected': {
       const p = row.payload as Payload<'order_rejected'>;

@@ -201,6 +201,8 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     return send(reply, 200, { order: current(order) });
   });
 
+  // A cancel is a request: 200 means it is on its way. The order comes back still live with its
+  // cancelArrivesAt; the cancel takes effect (or is recorded as too late) when it arrives.
   app.delete('/api/orders/:id', async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const r = d.runner.cancel(id);

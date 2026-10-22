@@ -72,6 +72,20 @@ function rest(engine: SpotEngine, r: SpotOrderRequest, ctx: EngineCtx): string {
   return order.id;
 }
 
+/** Request a cancel and deliver it at its arrival time; returns what its arrival did. */
+function cancelNow(engine: SpotEngine, id: string, ctx: EngineCtx): EngineEvent[] {
+  const r = engine.cancel(id, ctx);
+  if (!r.ok) throw new Error(r.reason);
+  expect(r.events).toEqual([]);
+  ctx.now = Math.max(ctx.now, engine.state.orders.get(id)!.cancelArrivesAt!);
+  return engine.arriveCancel(id, ctx);
+}
+
+function only<T extends EngineEvent['type']>(events: EngineEvent[], type: T): Extract<EngineEvent, { type: T }> {
+  expect(events.map((e) => e.type)).toEqual([type]);
+  return events[0] as Extract<EngineEvent, { type: T }>;
+}
+
 const s = (x: Decimal | null | undefined) => (x == null ? x : x.toString());
 
 describe('buy limit fills only on trade-through', () => {
@@ -382,18 +396,15 @@ describe('fee-rate selection', () => {
 });
 
 describe('cancel', () => {
-  it('open buy limit → order_cancelled reason user, lock released', () => {
+  it('open buy limit → order_cancelled reason user when the cancel arrives, lock released', () => {
     const { ctx, engine, bal, stored } = setup();
     const id = rest(engine, limitBuy('99.50', '2'), ctx);
-    const r = engine.cancel(id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    expect(r.events).toHaveLength(1);
-    const e = r.events[0]!;
-    if (e.type !== 'order_cancelled') throw new Error(`expected order_cancelled, got ${e.type}`);
+    const e = only(cancelNow(engine, id, ctx), 'order_cancelled');
     expect(e.reason).toBe('user');
     expect(s(e.cancelledQty)).toBe('2');
     expect(e.time).toBe(ctx.now);
     expect(e.order.status).toBe('cancelled');
+    expect(e.order.cancelArrivesAt).toBeNull();
     expect(s(e.order.lockAmount)).toBe('0');
     expect(stored(id).status).toBe('cancelled');
     expect(s(bal('USDT').locked)).toBe('0');
@@ -405,21 +416,17 @@ describe('cancel', () => {
     const { ctx, engine, bal } = setup();
     const id = rest(engine, limitSell('101', '1'), ctx);
     engine.onTrade('BTCUSDT', trade('101.01', '0.4', false), ctx);
-    const r = engine.cancel(id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    const e = r.events[0]!;
-    if (e.type !== 'order_cancelled') throw new Error('expected order_cancelled');
+    const e = only(cancelNow(engine, id, ctx), 'order_cancelled');
     expect(s(e.cancelledQty)).toBe('0.6');
     expect(s(e.order.filledQty)).toBe('0.4');
     expect(s(bal('BTC').locked)).toBe('0');
     expect(s(bal('BTC').free)).toBe('1.6');
   });
 
-  it('pending limit (before arrival) → cancelled; a later arrive is a no-op', () => {
+  it('pending limit whose cancel arrives with it → cancelled; a later arrive is a no-op', () => {
     const { ctx, engine, bal, stored } = setup();
     const order = placed(engine.submit(limitBuy('99.50', '2'), ctx));
-    const r = engine.cancel(order.id, ctx);
-    expect(r.ok).toBe(true);
+    expect(only(cancelNow(engine, order.id, ctx), 'order_cancelled').reason).toBe('user');
     expect(s(bal('USDT').locked)).toBe('0');
     expect(arriveNow(engine, order, ctx)).toEqual([]);
     expect(stored(order.id).status).toBe('cancelled');
@@ -441,11 +448,173 @@ describe('cancel', () => {
     const { ctx, engine } = setup();
     expect(engine.cancel('nope', ctx)).toEqual({ ok: false, reason: 'Order not found' });
     const id = rest(engine, limitBuy('99.50', '1'), ctx);
-    expect(engine.cancel(id, ctx).ok).toBe(true);
+    cancelNow(engine, id, ctx);
     expect(engine.cancel(id, ctx)).toEqual({ ok: false, reason: 'Order is not open' });
     const filled = placed(engine.submit(limitBuy('100.10', '0.1'), ctx));
     arriveNow(engine, filled, ctx);
     expect(engine.cancel(filled.id, ctx)).toEqual({ ok: false, reason: 'Order is not open' });
+  });
+});
+
+describe('a cancel reaches the exchange after the arrival delay', () => {
+  it('requesting a cancel only sets its arrival time: the order stays open with its lock', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const id = rest(engine, limitBuy('99.50', '1'), ctx);
+    const t = ctx.now;
+    expect(stored(id).cancelArrivesAt).toBeNull();
+    expect(engine.cancel(id, ctx)).toEqual({ ok: true, events: [] });
+    expect(stored(id).status).toBe('open');
+    expect(stored(id).cancelArrivesAt).toBe(t + 100);
+    expect(s(stored(id).lockAmount)).toBe('99.5');
+    expect(s(bal('USDT').locked)).toBe('99.5');
+  });
+
+  it('a trade during the delay still fills the order; the late cancel is recorded and changes nothing else', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const id = rest(engine, limitBuy('99.50', '1'), ctx);
+    const t = ctx.now;
+    engine.cancel(id, ctx);
+    ctx.now = t + 1;
+    const { fill } = onlyFill(engine.onTrade('BTCUSDT', trade('99.00', '5', true), ctx));
+    expect(s(fill.qty)).toBe('1');
+    expect(s(fill.price)).toBe('99.5');
+    const balances = JSON.stringify(engine.state.balances);
+
+    ctx.now = t + 100;
+    const e = only(engine.arriveCancel(id, ctx), 'cancel_rejected');
+    expect(e.reason).toBe('Cancel arrived too late: order already filled');
+    expect(e.time).toBe(t + 100);
+    expect(e.order.id).toBe(id);
+    expect(e.order.status).toBe('filled');
+    expect(e.order.cancelArrivesAt).toBeNull();
+    expect(stored(id)).toEqual(e.order);
+    expect(s(stored(id).filledQty)).toBe('1');
+    expect(JSON.stringify(engine.state.balances)).toBe(balances);
+    expect(s(bal('USDT').locked)).toBe('0');
+    // Delivered once.
+    expect(engine.arriveCancel(id, ctx)).toEqual([]);
+  });
+
+  it('no trade: nothing happens before the arrival time; at it the order is cancelled and the lock released', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const id = rest(engine, limitBuy('99.50', '1'), ctx);
+    const t = ctx.now;
+    engine.cancel(id, ctx);
+    ctx.now = t + 99;
+    expect(engine.arriveCancel(id, ctx)).toEqual([]);
+    expect(stored(id).status).toBe('open');
+    expect(s(bal('USDT').locked)).toBe('99.5');
+
+    ctx.now = t + 100;
+    const e = only(engine.arriveCancel(id, ctx), 'order_cancelled');
+    expect(e.reason).toBe('user');
+    expect(e.time).toBe(t + 100);
+    expect(s(e.cancelledQty)).toBe('1');
+    expect(stored(id).status).toBe('cancelled');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(engine.arriveCancel(id, ctx)).toEqual([]);
+  });
+
+  it('a second cancel while one is in flight is refused and keeps the first arrival time', () => {
+    const { ctx, engine, stored } = setup();
+    const id = rest(engine, limitBuy('99.50', '1'), ctx);
+    const t = ctx.now;
+    expect(engine.cancel(id, ctx).ok).toBe(true);
+    ctx.now = t + 50;
+    expect(engine.cancel(id, ctx)).toEqual({ ok: false, reason: 'Cancel already requested' });
+    expect(stored(id).cancelArrivesAt).toBe(t + 100);
+  });
+
+  it('a pending order whose cancel arrives first is cancelled before it arrives', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const t = ctx.now;
+    const rng = [0.9999, 0]; // 300 ms for the order, then 100 ms for the cancel
+    ctx.rng = () => rng.shift() ?? 0;
+    const order = placed(engine.submit(limitBuy('99.50', '1'), ctx));
+    expect(order.arrivesAt).toBe(t + 300);
+    ctx.now = t + 10;
+    expect(engine.cancel(order.id, ctx).ok).toBe(true);
+    expect(stored(order.id).cancelArrivesAt).toBe(t + 110);
+    expect(stored(order.id).status).toBe('pending');
+
+    ctx.now = t + 110;
+    const e = only(engine.arriveCancel(order.id, ctx), 'order_cancelled');
+    expect(e.reason).toBe('user');
+    expect(s(bal('USDT').locked)).toBe('0');
+    ctx.now = t + 300;
+    expect(engine.arrive(order.id, ctx)).toEqual([]);
+    expect(stored(order.id).status).toBe('cancelled');
+    expect(s(bal('USDT').free)).toBe('1000');
+  });
+
+  it('a pending order whose own arrival comes first arrives first: a marketable limit fills as taker', () => {
+    const { ctx, engine, stored } = setup();
+    const t = ctx.now;
+    const order = placed(engine.submit(limitBuy('100.10', '1'), ctx));
+    expect(order.arrivesAt).toBe(t + 100);
+    ctx.now = t + 50;
+    expect(engine.cancel(order.id, ctx).ok).toBe(true);
+    expect(stored(order.id).cancelArrivesAt).toBe(t + 150);
+
+    ctx.now = t + 100;
+    const { fill, order: after } = onlyFill(engine.arrive(order.id, ctx));
+    expect(fill.liquidity).toBe('taker');
+    expect(after.status).toBe('filled');
+    ctx.now = t + 150;
+    expect(only(engine.arriveCancel(order.id, ctx), 'cancel_rejected').reason).toBe(
+      'Cancel arrived too late: order already filled',
+    );
+  });
+
+  it('an order rejected at its arrival: the cancel arriving later says so', () => {
+    const { ctx, engine, bal } = setup();
+    const t = ctx.now;
+    const order = placed(engine.submit(req('buy', 'post_only', '100.00', { qty: '1' }), ctx));
+    ctx.now = t + 50;
+    engine.cancel(order.id, ctx);
+    ctx.now = t + 100;
+    expect(rejectReason(engine.arrive(order.id, ctx))).toBe(POST_ONLY);
+    ctx.now = t + 150;
+    expect(only(engine.arriveCancel(order.id, ctx), 'cancel_rejected').reason).toBe(
+      'Cancel arrived too late: order already rejected',
+    );
+    expect(s(bal('USDT').free)).toBe('1000');
+  });
+
+  it('a partial fill during the delay: the cancel cancels the rest', () => {
+    const { ctx, engine, bal } = setup();
+    const id = rest(engine, limitBuy('99.50', '2'), ctx);
+    engine.cancel(id, ctx);
+    ctx.now += 1;
+    engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
+    ctx.now += 99;
+    const e = only(engine.arriveCancel(id, ctx), 'order_cancelled');
+    expect(s(e.cancelledQty)).toBe('1.5');
+    expect(s(e.order.filledQty)).toBe('0.5');
+    expect(s(bal('USDT').locked)).toBe('0');
+  });
+
+  it('a trade at or after the cancel arrival time never fills the order, even before arriveCancel runs', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const id = rest(engine, limitBuy('99.50', '1'), ctx);
+    engine.cancel(id, ctx);
+    ctx.now = stored(id).cancelArrivesAt!;
+    const e = only(engine.onTrade('BTCUSDT', trade('99.00', '5', true), ctx), 'order_cancelled');
+    expect(e.reason).toBe('user');
+    expect(stored(id).status).toBe('cancelled');
+    expect(s(stored(id).filledQty)).toBe('0');
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(engine.arriveCancel(id, ctx)).toEqual([]);
+  });
+
+  it('arriveCancel ignores unknown orders and orders with no cancel in flight', () => {
+    const { ctx, engine, stored } = setup();
+    const id = rest(engine, limitBuy('99.50', '1'), ctx);
+    expect(engine.arriveCancel('nope', ctx)).toEqual([]);
+    ctx.now += 1_000;
+    expect(engine.arriveCancel(id, ctx)).toEqual([]);
+    expect(stored(id).status).toBe('open');
   });
 });
 
@@ -499,7 +668,13 @@ describe('limit submit and arrival checks', () => {
     expect(rejectReason(engine.submit(limitBuy('99.30', '1'), ctx))).toBe(
       'MAX_NUM_ORDERS: already 2 open orders on BTCUSDT (maximum 2)',
     );
-    engine.cancel(open, ctx);
+    // An order with a cancel in flight is still open and still counts.
+    expect(engine.cancel(open, ctx).ok).toBe(true);
+    expect(rejectReason(engine.submit(limitBuy('99.30', '1'), ctx))).toBe(
+      'MAX_NUM_ORDERS: already 2 open orders on BTCUSDT (maximum 2)',
+    );
+    ctx.now = engine.state.orders.get(open)!.cancelArrivesAt!;
+    engine.arriveCancel(open, ctx);
     placed(engine.submit(limitBuy('99.30', '1'), ctx));
   });
 });

@@ -124,6 +124,11 @@ export interface SpotOrder {
   attach: { stopLoss: Decimal; takeProfit: Decimal } | null;
   createdAt: number;
   arrivesAt: number | null;
+  /**
+   * When the owner's cancel reaches the exchange (it takes an arrival delay like an order); null
+   * when no cancel is in flight. Until then the order stays live: it can still fill or trigger.
+   */
+  cancelArrivesAt: number | null;
   triggeredAt: number | null;
   /**
    * Best price of the side the order takes, when it was sent to the exchange: at submit, or
@@ -180,6 +185,8 @@ export type EngineEvent =
   | { type: 'order_placed'; time: number; order: SpotOrder }
   | { type: 'order_rejected'; time: number; order: SpotOrder; reason: string; afterTrigger?: boolean }
   | { type: 'order_cancelled'; time: number; order: SpotOrder; reason: CancelReason; cancelledQty: Decimal }
+  /** The owner's cancel arrived after the order had filled, triggered, been rejected or been cancelled. */
+  | { type: 'cancel_rejected'; time: number; order: SpotOrder; reason: string }
   | { type: 'order_triggered'; time: number; order: SpotOrder; lastPrice: Decimal }
   | { type: 'fill'; time: number; fill: Fill; order: SpotOrder }
   | { type: 'round_trip_closed'; time: number; roundTrip: RoundTrip };

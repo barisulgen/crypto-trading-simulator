@@ -271,6 +271,11 @@ function expire(
 
 // ---- cancel ----
 
+/** Whether an owner cancel of this order, or of the pair it belongs to, is already on its way. */
+export function cancelRequested(s: SpotState, order: SpotOrder): boolean {
+  return [order, ...untriggeredPartners(s, order)].some((leg) => leg.cancelArrivesAt !== null);
+}
+
 /** Owner cancel of an untriggered stop. A pair is cancelled as a whole and its lock released. */
 export function cancelStop(s: SpotState, order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
   return [order, ...untriggeredPartners(s, order)].map((leg) => {

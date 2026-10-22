@@ -45,7 +45,7 @@ export class RefusedError extends Error {
 export type HealthMap = Record<string, { fresh: boolean; reason: string | null }>;
 
 export interface Notice {
-  kind: 'fill' | 'partial_fill' | 'rejected' | 'triggered' | 'thin_book' | 'feed_gap' | 'feed_restored';
+  kind: 'fill' | 'partial_fill' | 'rejected' | 'cancel_rejected' | 'triggered' | 'thin_book' | 'feed_gap' | 'feed_restored';
   level: 'info' | 'warn' | 'error';
   text: string;
 }
@@ -171,9 +171,13 @@ export class EngineRunner {
     return this.apply((ctx) => this.d.engine.submit(req, ctx));
   }
 
+  /** Requests the cancel: ok means it is on its way; arriveCancel runs at the order's cancelArrivesAt. */
   cancel(orderId: string): ActionResult {
     this.refuseTrading();
-    return this.apply((ctx) => this.d.engine.cancel(orderId, ctx));
+    const result = this.apply((ctx) => this.d.engine.cancel(orderId, ctx));
+    const at = this.d.engine.state.orders.get(orderId)?.cancelArrivesAt ?? null;
+    if (result.ok && at !== null) this.scheduleCancel(orderId, at);
+    return result;
   }
 
   attachOco(req: OcoRequest): EngineEvent[] {
@@ -314,14 +318,24 @@ export class EngineRunner {
     this.timer(loop, ms);
   }
 
-  /** arrive() at arrivesAt (re-armed if the timer fires early); the engine ignores orders no longer waiting. */
+  /** arrive() at arrivesAt; the engine ignores orders no longer waiting. */
   private scheduleArrival(orderId: string, arrivesAt: number): void {
+    this.scheduleAt(arrivesAt, (ctx) => this.d.engine.arrive(orderId, ctx));
+  }
+
+  /** arriveCancel() at cancelArrivesAt; the engine ignores orders with no cancel in flight. */
+  private scheduleCancel(orderId: string, cancelArrivesAt: number): void {
+    this.scheduleAt(cancelArrivesAt, (ctx) => this.d.engine.arriveCancel(orderId, ctx));
+  }
+
+  /** One engine call at time `at` (re-armed if the timer fires early), persisted like any other. */
+  private scheduleAt(at: number, call: (ctx: EngineCtx) => EngineEvent[]): void {
     const fire = () => {
-      const left = arrivesAt - this.d.now();
+      const left = at - this.d.now();
       if (left > 0) return this.timer(fire, left);
-      this.background(() => this.apply((ctx) => this.d.engine.arrive(orderId, ctx)));
+      this.background(() => this.apply(call));
     };
-    this.timer(fire, Math.max(0, arrivesAt - this.d.now()));
+    this.timer(fire, Math.max(0, at - this.d.now()));
   }
 
   /** Account and orders after every engine call; skipped only when nothing changed and there were no events. */
@@ -336,8 +350,11 @@ export class EngineRunner {
   }
 
   /**
-   * Startup: pending market orders are rejected (engine.rejectRestartedMarket); other pending
-   * orders are sent again once their symbol's data is first fresh, with a fresh arrival delay
+   * Startup: first, a cancel in flight whose arrival time passed while the server was down has
+   * reached the exchange, so arriveCancel is applied now (one still to arrive, or one waiting for
+   * the exchange rules, gets its arriveCancel scheduled; onFresh delivers the latter). Then
+   * pending market orders are rejected (engine.rejectRestartedMarket); other pending orders are
+   * sent again once their symbol's data is first fresh, with a fresh arrival delay
    * (rearmWhenFresh). Triggered orders with an arrival time get their arrive() scheduled;
    * triggered orders and attached pairs waiting for data (arrivesAt null) are left to onFresh.
    */
@@ -345,6 +362,10 @@ export class EngineRunner {
     const state = this.d.engine.state;
     const ctx = this.ctx();
     const events: EngineEvent[] = [];
+    for (const { id } of [...state.orders.values()]) {
+      // Re-read: cancelling one leg of a pair settles its partner too.
+      if (state.orders.get(id)!.cancelArrivesAt !== null) events.push(...this.d.engine.arriveCancel(id, ctx));
+    }
     for (const o of [...state.orders.values()]) {
       if (o.status !== 'pending') continue;
       if (o.type === 'market') {
@@ -362,6 +383,7 @@ export class EngineRunner {
     }
     for (const o of state.orders.values()) {
       if (o.status === 'triggered' && o.arrivesAt !== null) this.scheduleArrival(o.id, o.arrivesAt);
+      if (o.cancelArrivesAt !== null) this.scheduleCancel(o.id, o.cancelArrivesAt);
     }
   }
 
@@ -454,7 +476,7 @@ export function submittedOrder(events: EngineEvent[]): SpotOrder {
 
 // ---- notices ----
 
-/** One notice per fill, partial fill, rejection (one per pair), trigger and thin-book cancel. */
+/** One notice per fill, partial fill, rejection (one per pair), late cancel, trigger and thin-book cancel. */
 export function noticesFor(events: EngineEvent[], rulesOf: (symbol: string) => SpotRules | null): Notice[] {
   const out: Notice[] = [];
   const rejectedPairs = new Set<string>();
@@ -475,6 +497,9 @@ export function noticesFor(events: EngineEvent[], rulesOf: (symbol: string) => S
           rejectedPairs.add(e.order.ocoGroupId);
         }
         out.push({ kind: 'rejected', level: 'error', text: e.reason });
+        break;
+      case 'cancel_rejected':
+        out.push({ kind: 'cancel_rejected', level: 'error', text: e.reason });
         break;
       case 'order_triggered': {
         const rules = rulesOf(e.order.symbol);

@@ -50,7 +50,7 @@ export type AccountSnapshot = Wire<AccountValue> & {
 };
 
 export interface NoticeMessage {
-  kind: 'fill' | 'partial_fill' | 'rejected' | 'triggered' | 'thin_book' | 'feed_gap' | 'feed_restored';
+  kind: 'fill' | 'partial_fill' | 'rejected' | 'cancel_rejected' | 'triggered' | 'thin_book' | 'feed_gap' | 'feed_restored';
   level: 'info' | 'warn' | 'error';
   text: string;
 }
@@ -184,6 +184,11 @@ export const api = {
   preview: (req: SpotOrderRequest) => request<WirePreview>('POST', '/api/orders/preview', req),
   placeOrder: (req: SpotOrderRequest) =>
     request<{ order: WireOrder }>('POST', '/api/orders', req).then((r) => r.order),
+  /**
+   * Requests the cancel: the order comes back still live with its cancelArrivesAt. It is cancelled
+   * when the request arrives, unless it filled, triggered, was rejected or was cancelled first (a
+   * notice says so).
+   */
   cancelOrder: (id: string) =>
     request<{ order: WireOrder }>('DELETE', `/api/orders/${encodeURIComponent(id)}`).then((r) => r.order),
   attachOco: (p: { symbol: string; qty: string; stopLoss: string; takeProfit: string }) =>

@@ -29,6 +29,14 @@ function arrive(engine: SpotEngine, order: SpotOrder, ctx: EngineCtx): EngineEve
   return engine.arrive(order.id, ctx);
 }
 
+/** Request a cancel and deliver it at its arrival time; returns what its arrival did. */
+function cancelNow(engine: SpotEngine, id: string, ctx: EngineCtx): EngineEvent[] {
+  const r = engine.cancel(id, ctx);
+  if (!r.ok) throw new Error(r.reason);
+  ctx.now = Math.max(ctx.now, engine.state.orders.get(id)!.cancelArrivesAt!);
+  return engine.arriveCancel(id, ctx);
+}
+
 const placedOrder = (events: EngineEvent[]): SpotOrder => {
   const e = events.find((x) => x.type === 'order_placed');
   if (!e || e.type !== 'order_placed') throw new Error('no order_placed');
@@ -130,14 +138,36 @@ describe('persist and loadSpotState', () => {
     expect(snapshot(loadSpotState(db, seasonId, ASSETS))).toBe(snapshot(engine.state));
   });
 
+  it('a cancel in flight is stored with the order and survives a reload; an older row without it loads as none', () => {
+    const { engine, ctx, db, seasonId } = setup();
+    engine.deposit('spot', D('1000'), ctx);
+    const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
+    arrive(engine, order, ctx);
+    const other = placedOrder(engine.submit(limitBuy('99.40', '1'), ctx));
+    arrive(engine, other, ctx);
+    expect(engine.cancel(order.id, ctx)).toEqual({ ok: true, events: [] });
+    persist(db, seasonId, engine.state, []);
+    const at = engine.state.orders.get(order.id)!.cancelArrivesAt!;
+    expect(JSON.parse((db.prepare('SELECT data FROM orders WHERE id = ?').get(order.id) as { data: string }).data).cancelArrivesAt).toBe(at);
+
+    // A row written before orders carried the field.
+    const row = db.prepare('SELECT data FROM orders WHERE id = ?').get(other.id) as { data: string };
+    const { cancelArrivesAt: _dropped, ...old } = JSON.parse(row.data) as Record<string, unknown>;
+    db.prepare('UPDATE orders SET data = ? WHERE id = ?').run(JSON.stringify(old), other.id);
+
+    const reloaded = loadSpotState(db, seasonId, ASSETS);
+    expect(reloaded.orders.get(order.id)!.cancelArrivesAt).toBe(at);
+    expect(reloaded.orders.get(other.id)!.cancelArrivesAt).toBeNull();
+    // Key order aside (the field is added back last), the reloaded state is the same.
+    expect(JSON.parse(snapshot(reloaded))).toEqual(JSON.parse(snapshot(engine.state)));
+  });
+
   it('terminal orders are stored but not loaded', () => {
     const { engine, ctx, db, seasonId } = setup();
     engine.deposit('spot', D('1000'), ctx);
     const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
     arrive(engine, order, ctx);
-    const r = engine.cancel(order.id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    persist(db, seasonId, engine.state, r.events);
+    persist(db, seasonId, engine.state, cancelNow(engine, order.id, ctx));
     expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(order.id)).toEqual({ status: 'cancelled' });
     expect(loadSpotState(db, seasonId, ASSETS).orders.size).toBe(0);
   });
@@ -167,9 +197,7 @@ describe('persist and loadSpotState', () => {
     // Stale: the triggered stop cannot execute (arrivesAt null) and the cancelled parent's pair waits.
     market.setFresh('BTCUSDT', false);
     events.push(...arrive(engine, engine.state.orders.get(stop.id)!, ctx));
-    const r = engine.cancel(parent.id, ctx);
-    if (!r.ok) throw new Error(r.reason);
-    events.push(...r.events);
+    events.push(...cancelNow(engine, parent.id, ctx));
 
     const deferred = engine.state.orders.get(stop.id)!;
     expect([deferred.status, deferred.arrivesAt]).toEqual(['triggered', null]);
@@ -384,8 +412,8 @@ describe('revived Decimals', () => {
     arrive(engine, order, ctx);
     persist(db, seasonId, engine.state, []);
     const reloaded = loadSpotState(db, seasonId, ASSETS);
-    const res = new SpotEngine(reloaded).cancel(order.id, ctx);
-    expect(res.ok).toBe(true);
+    const events = cancelNow(new SpotEngine(reloaded), order.id, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_cancelled']);
     expect(reloaded.balances.spot.USDT!.locked.toString()).toBe('0');
     expect(reloaded.balances.spot.USDT!.free.toString()).toBe('1000');
     expect(checkInvariants(reloaded)).toEqual([]);
