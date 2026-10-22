@@ -2,7 +2,7 @@ import { D, Decimal, floorToStep } from '../decimal.ts';
 import { bestPrice, walkBook } from '../book.ts';
 import type { WalkResult } from '../book.ts';
 import { InputError, parseAmount } from '../input.ts';
-import { validateSpotOrder } from '../rules.ts';
+import { priceFilter, validateSpotOrder } from '../rules.ts';
 import type {
   AggTrade,
   BookSnapshot,
@@ -11,6 +11,7 @@ import type {
   EngineEvent,
   OrderPreview,
   OrderStatus,
+  OrderType,
   Side,
   SpotOrder,
   SpotOrderRequest,
@@ -265,10 +266,7 @@ function expire(
   const reason =
     `Triggered ${kind} expired: insufficient funds at execution ` +
     `(need ${walk.quote}, available ${available}; trigger ${order.triggerPrice}, book average ${shownAvg})`;
-  releaseFunds(s, order.lockAsset, order.lockAmount);
-  const rejected: SpotOrder = { ...order, status: 'rejected', rejectReason: reason, lockAmount: D(0) };
-  s.orders.set(rejected.id, rejected);
-  return [{ type: 'order_rejected', time: ctx.now, order: rejected, reason, afterTrigger: true }];
+  return rejectPending(s, order, reason, ctx, true);
 }
 
 // ---- cancel ----
@@ -400,22 +398,75 @@ function pairReason(
   const fresh = ctx.market.isFresh(symbol);
   if (!fresh && sl.parentId === null) return `Live data interrupted for ${symbol}`;
   if (parseError !== null) return parseError;
-  const avgPrice = ctx.market.avgPrice(symbol);
   const counts = openCounts(s, symbol);
-  const check = (o: SpotOrder, extra: number) =>
-    validateSpotOrder(
-      { symbol, side: o.side, type: o.type, qty: o.qty!, triggerPrice: o.triggerPrice! },
-      rules,
-      { avgPrice, openOrders: counts.openOrders + extra, openAlgoOrders: counts.openAlgoOrders + extra },
-    );
   const triggerNow = sl.parentId === null || canArmNow(symbol, ctx);
-  const algoFull =
-    counts.openAlgoOrders + 2 > rules.maxNumAlgoOrders
-      ? `MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but ${counts.openAlgoOrders} of ${rules.maxNumAlgoOrders} are in use on ${symbol}`
-      : null;
-  const invalid = algoFull ?? check(sl, 0) ?? check(tp, 1) ?? (triggerNow ? armReason([sl, tp], ctx) : null);
+  const invalid =
+    pairAlgoFull(symbol, counts, rules) ??
+    legFilters(symbol, sl.qty!, sl.triggerPrice!, tp.triggerPrice!, rules, counts) ??
+    (triggerNow ? armReason([sl, tp], ctx) : null);
   if (invalid) return invalid;
   const free = freeOf(s, 'spot', rules.base);
   if (sl.qty!.gt(free)) return `Insufficient ${rules.base}: need ${sl.qty}, available ${free}`;
   return null;
+}
+
+/** A pair counts as two algo orders. */
+function pairAlgoFull(symbol: string, counts: { openAlgoOrders: number }, rules: SpotRules): string | null {
+  if (counts.openAlgoOrders + 2 <= rules.maxNumAlgoOrders) return null;
+  return `MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but ${counts.openAlgoOrders} of ${rules.maxNumAlgoOrders} are in use on ${symbol}`;
+}
+
+/** Exchange filters of both sell legs over `qty` coins; the take-profit counts the stop-loss as open. */
+function legFilters(
+  symbol: string,
+  qty: Decimal,
+  stopLoss: Decimal,
+  takeProfit: Decimal,
+  rules: SpotRules,
+  counts: { openOrders: number; openAlgoOrders: number },
+): string | null {
+  // Stops and take-profits do not use the average price.
+  const check = (type: StopType, triggerPrice: Decimal, extra: number) =>
+    validateSpotOrder({ symbol, side: 'sell', type, qty, triggerPrice }, rules, {
+      avgPrice: null,
+      openOrders: counts.openOrders + extra,
+      openAlgoOrders: counts.openAlgoOrders + extra,
+    });
+  return check('stop_loss', stopLoss, 0) ?? check('take_profit', takeProfit, 1);
+}
+
+/** Coins a buy of `qty` leaves after the fee, floored to the step size: the quantity its pair will cover. */
+export function expectedNetQty(qty: Decimal, feeRate: Decimal, rules: SpotRules): Decimal {
+  return floorToStep(qty.minus(qty.mul(feeRate)), rules.stepSize);
+}
+
+/**
+ * Whether the pair attached to a buy would be accepted, checked when the buy is placed so a bad
+ * pair rejects the whole order (as an exchange rejects every order of a list up front).
+ * `reference` is the limit price for limit and post-only buys and the last price for market buys;
+ * `netQty` is the coins the pair will cover (expectedNetQty, with the taker rate as an upper
+ * bound on the fee). In order: both trigger prices, their position relative to `reference`, the
+ * three order slots (the buy and two legs), the two algo slots, then each leg's filters.
+ * Whether a leg would trigger immediately is checked again when the buy has filled.
+ */
+export function validateAttachedPair(
+  req: { side: Side; type: OrderType; symbol: string },
+  attach: { stopLoss: Decimal; takeProfit: Decimal },
+  netQty: Decimal,
+  reference: Decimal,
+  rules: SpotRules,
+  counts: { openOrders: number; openAlgoOrders: number },
+): string | null {
+  const { stopLoss, takeProfit } = attach;
+  const price = priceFilter('trigger price', stopLoss, rules) ?? priceFilter('trigger price', takeProfit, rules);
+  if (price) return price;
+
+  const ref = req.type === 'market' ? `the last price ${reference}` : `the limit price ${reference}`;
+  if (stopLoss.gte(reference)) return `Attached stop-loss ${stopLoss} must be below ${ref}`;
+  if (takeProfit.lte(reference)) return `Attached take-profit ${takeProfit} must be above ${ref}`;
+
+  if (counts.openOrders + 3 > rules.maxNumOrders) {
+    return `MAX_NUM_ORDERS: an order with an attached pair needs 3 slots but ${counts.openOrders} of ${rules.maxNumOrders} are in use on ${req.symbol}`;
+  }
+  return pairAlgoFull(req.symbol, counts, rules) ?? legFilters(req.symbol, netQty, stopLoss, takeProfit, rules, counts);
 }

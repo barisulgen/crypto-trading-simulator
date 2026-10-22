@@ -3,8 +3,8 @@ import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import { RESTART_REASON, SpotEngine } from '../src/spot/engine.ts';
 import { emptySpotState } from '../src/spot/state.ts';
-import type { EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest } from '../src/types.ts';
-import { FakeMarket, seedCoins, testCtx } from './fixtures.ts';
+import type { EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest, SpotRules } from '../src/types.ts';
+import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
 
 const NOW = 1_000_000;
 
@@ -335,6 +335,115 @@ describe('market buy by dollar amount', () => {
     expect(s(c.cancelledQty)).toBe('0.48656');
     expect(s(bal('USDT').free)).toBe('648.9');
     expect(s(bal('USDT').locked)).toBe('0');
+  });
+
+  it('empty ask side at arrival keeps the thin-book cancel of 0', () => {
+    const { market, ctx, engine, bal } = setup('1000');
+    const order = placed(engine.submit(buy({ quoteQty: '5' }), ctx));
+    market.setBook('BTCUSDT', { asks: [], bids: [] });
+    const events = arriveNow(engine, order, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_cancelled']);
+    const c = events[0]!;
+    if (c.type !== 'order_cancelled') throw new Error('expected order_cancelled');
+    expect(c.reason).toBe('thin_book');
+    expect(s(c.cancelledQty)).toBe('0');
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(s(bal('USDT').locked)).toBe('0');
+  });
+});
+
+describe('dollar amount too small at arrival', () => {
+  it('buy: the walk fills nothing against a non-empty book → rejected, lock released, no cancel', () => {
+    const { market, ctx, engine, bal } = setup('1000');
+    const order = placed(engine.submit(buy({ quoteQty: '5' }), ctx));
+    expect(s(bal('USDT').locked)).toBe('5');
+    market.setBook('BTCUSDT', { asks: [{ price: D('600000.00'), qty: D('5') }], bids: [] });
+    const events = arriveNow(engine, order, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_rejected']);
+    const e = events[0]!;
+    if (e.type !== 'order_rejected') throw new Error('expected order_rejected');
+    expect(e.reason).toBe('Amount too small: 5 USDT does not reach one step of 0.00001 BTC');
+    expect(e.afterTrigger).toBeUndefined();
+    expect(e.order.status).toBe('rejected');
+    expect(e.order.rejectReason).toBe(e.reason);
+    expect(s(e.order.lockAmount)).toBe('0');
+    expect(engine.state.orders.get(order.id)).toMatchObject({ status: 'rejected', lockAmount: D(0) });
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('0');
+  });
+
+  it('sell: the dollars do not reach one step of the bid either', () => {
+    const { market, ctx, engine, bal } = setup('0', { btc: '2' });
+    const order = placed(engine.submit(sell({ quoteQty: '50' }), ctx));
+    expect(s(bal('BTC').locked)).toBe('0.5006');
+    market.setBook('BTCUSDT', { asks: [], bids: [{ price: D('6000000'), qty: D('5') }] });
+    expect(rejectReason(arriveNow(engine, order, ctx))).toBe(
+      'Amount too small: 50 USDT does not reach one step of 0.00001 BTC',
+    );
+    expect(s(bal('BTC').free)).toBe('2');
+    expect(s(bal('BTC').locked)).toBe('0');
+  });
+});
+
+describe('MARKET_LOT_SIZE on dollar-sized orders', () => {
+  const withRules = (market: FakeMarket, over: Partial<SpotRules>) =>
+    market.setRules('BTCUSDT', { ...btcRules, ...over });
+
+  it('submit validates the walked quantity against the market maximum', () => {
+    const { market, ctx, engine, bal } = setup('1000');
+    withRules(market, { marketMaxQty: D('1') });
+    // 0.5 @ 100.00 + 0.999 @ 100.10 = 1.499
+    const req = buy({ quoteQty: '150' });
+    expect(rejectReason(engine.submit(req, ctx))).toBe(
+      'MARKET_LOT_SIZE: quantity 1.499 is above the market maximum 1',
+    );
+    expect(engine.preview(req, ctx).rejectReason).toBe(
+      'MARKET_LOT_SIZE: quantity 1.499 is above the market maximum 1',
+    );
+    expect(s(bal('USDT').locked)).toBe('0');
+    // Under the maximum it is placed.
+    placed(engine.submit(buy({ quoteQty: '100' }), ctx));
+  });
+
+  it('submit validates the walked quantity against the market minimum', () => {
+    const { market, ctx, engine } = setup('1000');
+    withRules(market, { marketMinQty: D('0.1') });
+    expect(rejectReason(engine.submit(buy({ quoteQty: '5' }), ctx))).toBe(
+      'MARKET_LOT_SIZE: quantity 0.05 is below the market minimum 0.1',
+    );
+  });
+
+  it('a sell by dollars is checked on the coins it walks', () => {
+    const { market, ctx, engine, bal } = setup('0', { btc: '2' });
+    withRules(market, { marketMaxQty: D('0.4') });
+    expect(rejectReason(engine.submit(sell({ quoteQty: '50' }), ctx))).toBe(
+      'MARKET_LOT_SIZE: quantity 0.5006 is above the market maximum 0.4',
+    );
+    expect(s(bal('BTC').locked)).toBe('0');
+  });
+
+  it('arrival validates the walk again → rejected, lock released', () => {
+    const { market, ctx, engine, bal } = setup('1000');
+    withRules(market, { marketMaxQty: D('1') });
+    const order = placed(engine.submit(buy({ quoteQty: '100' }), ctx));
+    expect(s(bal('USDT').locked)).toBe('100');
+    // The price halves before arrival: the same dollars now walk 2 BTC.
+    market.setBook('BTCUSDT', { asks: [{ price: D('50'), qty: D('10') }], bids: [] });
+    const events = arriveNow(engine, order, ctx);
+    expect(rejectReason(events)).toBe('MARKET_LOT_SIZE: quantity 2 is above the market maximum 1');
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('0');
+    expect(engine.state.orders.get(order.id)!.status).toBe('rejected');
+  });
+
+  it('a quantity-sized market order is still checked once, at submit (unchanged)', () => {
+    const { market, ctx, engine } = setup('1000');
+    withRules(market, { marketMaxQty: D('1') });
+    expect(rejectReason(engine.submit(buy({ qty: '1.2' }), ctx))).toBe(
+      'MARKET_LOT_SIZE: quantity 1.2 is above the market maximum 1',
+    );
   });
 });
 

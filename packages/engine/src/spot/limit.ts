@@ -33,6 +33,7 @@ import {
 import type { RequestFields } from './orders.ts';
 import { credit, freeOf, releaseFunds, spendFunds } from './state.ts';
 import type { SpotState } from './state.ts';
+import { expectedNetQty, validateAttachedPair } from './stops.ts';
 
 /** Limit and post-only orders. */
 
@@ -54,7 +55,7 @@ interface LimitPlan {
 }
 
 /**
- * Freshness, amounts and price, exchange filters, lock size and funds, in that order.
+ * Freshness, amounts and price, exchange filters, an attached pair, lock size and funds, in that order.
  * A dollar-sized limit becomes qty = floor(quoteQty / price) to the step size.
  */
 function planLimit(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx): LimitPlan {
@@ -70,12 +71,18 @@ function planLimit(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx): LimitPl
   if (!fields.qty) fields.qty = floorToStep(fields.quoteQty!.div(price), rules.stepSize);
   const qty = fields.qty;
 
+  const counts = openCounts(s, req.symbol);
   const invalid = validateSpotOrder(
     { symbol: req.symbol, side: req.side, type: req.type, qty, price },
     rules,
-    { avgPrice: ctx.market.avgPrice(req.symbol), ...openCounts(s, req.symbol) },
+    { avgPrice: ctx.market.avgPrice(req.symbol), ...counts },
   );
   if (invalid) return fail(invalid);
+  if (fields.attach) {
+    const net = expectedNetQty(qty, ctx.fees.taker, rules);
+    const pair = validateAttachedPair(req, fields.attach, net, price, rules, counts);
+    if (pair) return fail(pair);
+  }
 
   const lockAsset = req.side === 'buy' ? rules.quote : rules.base;
   const lockAmount = req.side === 'buy' ? price.mul(qty) : qty;

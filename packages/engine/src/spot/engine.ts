@@ -2,7 +2,7 @@ import { D } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
 import { walkBook } from '../book.ts';
 import type { WalkResult } from '../book.ts';
-import { validateSpotOrder } from '../rules.ts';
+import { marketLotSize, validateSpotOrder } from '../rules.ts';
 import type {
   ActionResult,
   AggTrade,
@@ -16,6 +16,7 @@ import type {
 } from '../types.ts';
 import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import {
+  amountTooSmall,
   emptyPreview,
   fillOrThin,
   marketStep,
@@ -40,9 +41,11 @@ import {
   attachOco,
   cancelStop,
   executeDue,
+  expectedNetQty,
   previewStop,
   submitStop,
   triggerStops,
+  validateAttachedPair,
 } from './stops.ts';
 import type { OcoRequest } from './stops.ts';
 import { isStopType } from './triggers.ts';
@@ -247,7 +250,8 @@ export class SpotEngine {
   }
 
   /**
-   * Freshness, amounts, exchange filters, book walk, lock size and funds, in that order.
+   * Freshness, amounts, exchange filters, book walk, the walked quantity's market lot size, an
+   * attached pair, lock size and funds, in that order.
    * Stops at the first problem; later fields stay null. Reads state, never writes it.
    */
   private planMarket(req: SpotOrderRequest, ctx: EngineCtx): MarketPlan {
@@ -269,6 +273,7 @@ export class SpotEngine {
     if (read.reason !== null) return fail(read.reason);
     const { qty, quoteQty } = plan.fields;
 
+    const counts = openCounts(this.s, req.symbol);
     const invalid = validateSpotOrder(
       {
         symbol: req.symbol,
@@ -278,7 +283,7 @@ export class SpotEngine {
         ...(quoteQty ? { quoteQty } : {}),
       },
       rules,
-      { avgPrice: ctx.market.avgPrice(req.symbol), ...openCounts(this.s, req.symbol) },
+      { avgPrice: ctx.market.avgPrice(req.symbol), ...counts },
     );
     if (invalid) return fail(invalid);
 
@@ -288,8 +293,19 @@ export class SpotEngine {
     if (walk.qty.isZero()) {
       const side = req.side === 'buy' ? book.asks : book.bids;
       if (side.length === 0) return fail(`Order book empty for ${req.symbol}`);
-      const step = marketStep(rules);
-      return fail(`Amount too small: ${quoteQty} ${rules.quote} does not reach one step of ${step} ${rules.base}`);
+      return fail(amountTooSmall(quoteQty, rules));
+    }
+    // A dollar-sized order's quantity is only known from the walk.
+    if (quoteQty) {
+      const lot = marketLotSize(walk.qty, rules);
+      if (lot) return fail(lot);
+    }
+    if (plan.fields.attach) {
+      const last = ctx.market.lastPrice(req.symbol);
+      if (!last) return fail(`Last price unavailable for ${req.symbol}`);
+      const net = expectedNetQty(qty ?? walk.qty, ctx.fees.taker, rules);
+      const invalid = validateAttachedPair(req, plan.fields.attach, net, last, rules, counts);
+      if (invalid) return fail(invalid);
     }
     // Buy by qty: preview cost of the fillable part. Buy by dollars: the dollars.
     // Sell by qty: the coins. Sell by dollars: the coins the walk needs to raise them.
@@ -311,6 +327,9 @@ export class SpotEngine {
 
     const book = ctx.market.book(order.symbol);
     const walk = walkBook(book, order.side, marketTarget(order), marketStep(rules));
+    // A walk that fills nothing is not a lot-size problem: fillOrThin reports it.
+    const lot = order.quoteQty !== null && walk.qty.gt(0) ? marketLotSize(walk.qty, rules) : null;
+    if (lot) return rejectPending(this.s, order, lot, ctx);
     const need = order.side === 'buy' ? walk.quote : walk.qty;
     const available = order.lockAmount.plus(freeOf(this.s, 'spot', order.lockAsset));
     if (need.gt(available)) {

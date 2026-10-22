@@ -94,4 +94,33 @@ describe('validateSpotOrder', () => {
   it('stops are not subject to PERCENT_PRICE_BY_SIDE', () => {
     expect(check({ side: 'sell', type: 'stop_loss', triggerPrice: D('121'), qty: D('1') })).toBeNull();
   });
+
+  describe('PRICE_FILTER values of 0 disable that check', () => {
+    const checkWith = (rules: Partial<typeof btcRules>, r: Req, ctx: Partial<typeof base> = {}) =>
+      validateSpotOrder({ symbol: 'BTCUSDT', ...r }, { ...btcRules, ...rules }, { ...base, ...ctx });
+
+    it('maxPrice 0: no upper limit', () => {
+      const req: Req = { side: 'sell', type: 'limit', price: D('2000000'), qty: D('1') };
+      const ctx = { avgPrice: D('2000000') };
+      expect(checkWith({}, req, ctx)).toBe('PRICE_FILTER: price 2000000 is above the maximum price 1000000');
+      expect(checkWith({ maxPrice: D(0) }, req, ctx)).toBeNull();
+    });
+    it('minPrice 0: no lower limit', () => {
+      const req: Req = { side: 'sell', type: 'limit', price: D('0.01'), qty: D('1000') };
+      expect(checkWith({ minPrice: D(0) }, req, { avgPrice: D('0.01') })).toBeNull();
+    });
+    it('tickSize 0: no tick check', () => {
+      const req: Req = { side: 'buy', type: 'limit', price: D('100.005'), qty: D('1') };
+      expect(checkWith({ tickSize: D(0) }, req)).toBeNull();
+    });
+    it('the other price checks still apply', () => {
+      const req: Req = { side: 'sell', type: 'stop_loss', triggerPrice: D('0.005'), qty: D('1000') };
+      expect(checkWith({ maxPrice: D(0) }, req)).toBe(
+        'PRICE_FILTER: trigger price 0.005 is below the minimum price 0.01',
+      );
+      expect(checkWith({ minPrice: D(0) }, req)).toBe(
+        'PRICE_FILTER: trigger price 0.005 is not a multiple of tick size 0.01',
+      );
+    });
+  });
 });

@@ -8,28 +8,36 @@ export interface RuleContext {
   openAlgoOrders: number;
 }
 
-function priceFilter(label: string, p: Decimal, r: SpotRules): string | null {
-  if (p.lt(r.minPrice)) return `PRICE_FILTER: ${label} ${p} is below the minimum price ${r.minPrice}`;
-  if (p.gt(r.maxPrice)) return `PRICE_FILTER: ${label} ${p} is above the maximum price ${r.maxPrice}`;
+/** A minPrice, maxPrice or tickSize of 0 disables that check, as on the exchange. */
+export function priceFilter(label: string, p: Decimal, r: SpotRules): string | null {
+  if (!r.minPrice.isZero() && p.lt(r.minPrice)) {
+    return `PRICE_FILTER: ${label} ${p} is below the minimum price ${r.minPrice}`;
+  }
+  if (!r.maxPrice.isZero() && p.gt(r.maxPrice)) {
+    return `PRICE_FILTER: ${label} ${p} is above the maximum price ${r.maxPrice}`;
+  }
   if (!isMultipleOf(p.sub(r.minPrice), r.tickSize)) {
     return `PRICE_FILTER: ${label} ${p} is not a multiple of tick size ${r.tickSize}`;
   }
   return null;
 }
 
-function lotSize(req: NormalizedRequest, qty: Decimal, r: SpotRules): string | null {
-  if (req.type === 'market') {
-    const step = r.marketStepSize.isZero() ? r.stepSize : r.marketStepSize;
-    const min = r.marketMinQty.isZero() ? r.minQty : r.marketMinQty;
-    if (qty.lt(min)) return `MARKET_LOT_SIZE: quantity ${qty} is below the market minimum ${min}`;
-    if (qty.gt(r.marketMaxQty)) {
-      return `MARKET_LOT_SIZE: quantity ${qty} is above the market maximum ${r.marketMaxQty}`;
-    }
-    if (!isMultipleOf(qty.sub(min), step)) {
-      return `MARKET_LOT_SIZE: quantity ${qty} is not a multiple of step size ${step}`;
-    }
-    return null;
+/** MARKET_LOT_SIZE: applies to the quantity a market order buys or sells, whether sized in coins or dollars. */
+export function marketLotSize(qty: Decimal, r: SpotRules): string | null {
+  const step = r.marketStepSize.isZero() ? r.stepSize : r.marketStepSize;
+  const min = r.marketMinQty.isZero() ? r.minQty : r.marketMinQty;
+  if (qty.lt(min)) return `MARKET_LOT_SIZE: quantity ${qty} is below the market minimum ${min}`;
+  if (qty.gt(r.marketMaxQty)) {
+    return `MARKET_LOT_SIZE: quantity ${qty} is above the market maximum ${r.marketMaxQty}`;
   }
+  if (!isMultipleOf(qty.sub(min), step)) {
+    return `MARKET_LOT_SIZE: quantity ${qty} is not a multiple of step size ${step}`;
+  }
+  return null;
+}
+
+function lotSize(req: NormalizedRequest, qty: Decimal, r: SpotRules): string | null {
+  if (req.type === 'market') return marketLotSize(qty, r);
   if (qty.lt(r.minQty)) return `LOT_SIZE: quantity ${qty} is below the minimum ${r.minQty}`;
   if (qty.gt(r.maxQty)) return `LOT_SIZE: quantity ${qty} is above the maximum ${r.maxQty}`;
   if (!isMultipleOf(qty.sub(r.minQty), r.stepSize)) {

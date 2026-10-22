@@ -5,7 +5,7 @@ import { SpotEngine } from '../src/spot/engine.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import { isTriggered } from '../src/spot/triggers.ts';
 import type { AggTrade, EngineCtx, EngineEvent, Fill, SpotOrder, SpotOrderRequest } from '../src/types.ts';
-import { FakeMarket, seedCoins, testCtx } from './fixtures.ts';
+import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
 
 const NOW = 1_000_000;
 const EXECUTING = 'Order is already executing and cannot be cancelled';
@@ -367,6 +367,32 @@ describe('trigger and execution', () => {
     expect(s(bal('USDT').locked)).toBe('0');
     expect(s(bal('USDT').free)).toBe('50.5');
     expect(s(bal('BTC').free)).toBe('2');
+  });
+
+  it('dollar-sized buy stop whose dollars no longer reach one step: rejected after the trigger, lock released', () => {
+    const { market, ctx, engine, bal, stored } = setup();
+    const triggered = armAndTrigger(engine, stop('buy', 'stop_loss', '101', { quoteQty: '50.5' }), '101.00', ctx);
+    expect(s(bal('USDT').locked)).toBe('50.5');
+    market.setBook('BTCUSDT', book([['5999999', '5']], [['6000000', '5']]));
+    const e = only(arriveNow(engine, triggered, ctx), 'order_rejected');
+    expect(e.afterTrigger).toBe(true);
+    expect(e.reason).toBe('Amount too small: 50.5 USDT does not reach one step of 0.00001 BTC');
+    expect(e.order.status).toBe('rejected');
+    expect(e.order.rejectReason).toBe(e.reason);
+    expect(stored(triggered.id)).toMatchObject({ status: 'rejected', lockAmount: D(0) });
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('2');
+  });
+
+  it('dollar-sized buy stop with an empty ask side after the trigger keeps the thin-book cancel', () => {
+    const { market, ctx, engine, bal } = setup();
+    const triggered = armAndTrigger(engine, stop('buy', 'stop_loss', '101', { quoteQty: '50.5' }), '101.00', ctx);
+    market.setBook('BTCUSDT', book([['99', '5']], []));
+    const events = arriveNow(engine, triggered, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_cancelled']);
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(s(bal('USDT').locked)).toBe('0');
   });
 
   it('gapped buy take-profit with funds short says take-profit', () => {
@@ -788,11 +814,12 @@ describe('pair attached to a buy', () => {
 
   it('pair rejected at activation (TP below last) → parent stays filled, both legs rejected', () => {
     const { ctx, engine, bal, stored } = setup();
-    const parent = placed(engine.submit(limitBuy('1', { attach: { stopLoss: '95', takeProfit: '99' } }), ctx));
+    // Above the limit price, so it passes when placed, but below the last price (99.95) when the buy fills.
+    const parent = placed(engine.submit(limitBuy('1', { attach: { stopLoss: '95', takeProfit: '99.60' } }), ctx));
     arriveNow(engine, parent, ctx);
     const events = engine.onTrade('BTCUSDT', trade('99.40', '1', true), ctx);
     expect(events.map((e) => e.type)).toEqual(['fill', 'order_rejected', 'order_rejected']);
-    expect(reasons(events)[0]).toBe('Take-profit would trigger immediately (last 99.95, trigger 99)');
+    expect(reasons(events)[0]).toBe('Take-profit would trigger immediately (last 99.95, trigger 99.6)');
     expect(stored(parent.id).status).toBe('filled');
     expect(s(bal('BTC').locked)).toBe('0');
     expect(s(bal('BTC').free)).toBe('2.999');
@@ -805,6 +832,199 @@ describe('pair attached to a buy', () => {
     expect(rejectReason(engine.submit(limit('sell', '101', '1', { attach }), ctx))).toBe(
       'Attached stop-loss and take-profit are only for buys',
     );
+  });
+});
+
+describe('pair attached to a buy is validated up front', () => {
+  const attach = { stopLoss: '95', takeProfit: '110' };
+  const pair = (stopLoss: string, takeProfit: string) => ({ attach: { stopLoss, takeProfit } });
+  const marketBuy = (qty: string, extra: Partial<SpotOrderRequest> = { attach }): SpotOrderRequest => ({
+    symbol: 'BTCUSDT',
+    side: 'buy',
+    type: 'market',
+    qty,
+    ...extra,
+  });
+  const dollarBuy = (quoteQty: string, extra: Partial<SpotOrderRequest> = { attach }): SpotOrderRequest => ({
+    symbol: 'BTCUSDT',
+    side: 'buy',
+    type: 'market',
+    quoteQty,
+    ...extra,
+  });
+  const limitBuy = (price: string, qty: string, extra: Partial<SpotOrderRequest> = { attach }) =>
+    limit('buy', price, qty, extra);
+
+  /** Nothing bought, nothing locked. */
+  function expectUntouched(bal: (asset: string) => { free: Decimal; locked: Decimal }) {
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('BTC').free)).toBe('2');
+    expect(s(bal('BTC').locked)).toBe('0');
+  }
+
+  it('an off-tick stop-loss rejects the whole market buy', () => {
+    const { ctx, engine, bal, stored } = setup();
+    const events = engine.submit(marketBuy('1', pair('95.123', '110')), ctx);
+    expect(rejectReason(events)).toBe('PRICE_FILTER: trigger price 95.123 is not a multiple of tick size 0.01');
+    expect(stored('o1').status).toBe('rejected');
+    expect(engine.state.orders.size).toBe(1);
+    expectUntouched(bal);
+  });
+
+  it('PRICE_FILTER: the stop-loss is checked before the take-profit, both before the reference prices', () => {
+    const { ctx, engine, bal } = setup();
+    expect(rejectReason(engine.submit(marketBuy('1', pair('95.123', '110.456')), ctx))).toBe(
+      'PRICE_FILTER: trigger price 95.123 is not a multiple of tick size 0.01',
+    );
+    expect(rejectReason(engine.submit(marketBuy('1', pair('95', '110.456')), ctx))).toBe(
+      'PRICE_FILTER: trigger price 110.456 is not a multiple of tick size 0.01',
+    );
+    // An off-tick take-profit that is also below the limit price reports the filter first.
+    expect(rejectReason(engine.submit(limitBuy('99.50', '1', pair('95', '99.123')), ctx))).toBe(
+      'PRICE_FILTER: trigger price 99.123 is not a multiple of tick size 0.01',
+    );
+    expectUntouched(bal);
+  });
+
+  it('limit and post-only: stop-loss below and take-profit above the limit price', () => {
+    const { ctx, engine, bal } = setup();
+    expect(rejectReason(engine.submit(limitBuy('99.50', '1', pair('99.60', '110')), ctx))).toBe(
+      'Attached stop-loss 99.6 must be below the limit price 99.5',
+    );
+    expect(rejectReason(engine.submit(limitBuy('99.50', '1', pair('99.50', '110')), ctx))).toBe(
+      'Attached stop-loss 99.5 must be below the limit price 99.5',
+    );
+    expect(rejectReason(engine.submit(limitBuy('99.50', '1', pair('95', '99.50')), ctx))).toBe(
+      'Attached take-profit 99.5 must be above the limit price 99.5',
+    );
+    const postOnly = (stopLoss: string, takeProfit: string): SpotOrderRequest =>
+      limit('buy', '99', '1', { type: 'post_only', ...pair(stopLoss, takeProfit) });
+    expect(rejectReason(engine.submit(postOnly('99.01', '110'), ctx))).toBe(
+      'Attached stop-loss 99.01 must be below the limit price 99',
+    );
+    expect(rejectReason(engine.submit(postOnly('95', '98.99'), ctx))).toBe(
+      'Attached take-profit 98.99 must be above the limit price 99',
+    );
+    expectUntouched(bal);
+    // Just inside the limit price is accepted.
+    placed(engine.submit(postOnly('98.99', '99.01'), ctx));
+    placed(engine.submit(limitBuy('99.50', '1', pair('99.49', '99.51')), ctx));
+  });
+
+  it('market: stop-loss below and take-profit above the last price', () => {
+    const { ctx, engine, bal } = setup();
+    expect(rejectReason(engine.submit(marketBuy('1', pair('95', '99.90')), ctx))).toBe(
+      'Attached take-profit 99.9 must be above the last price 99.95',
+    );
+    expect(rejectReason(engine.submit(marketBuy('1', pair('99.95', '110')), ctx))).toBe(
+      'Attached stop-loss 99.95 must be below the last price 99.95',
+    );
+    expectUntouched(bal);
+    placed(engine.submit(marketBuy('1', pair('99.94', '99.96')), ctx));
+  });
+
+  it('market buy with a pair and no last price is rejected; without a pair, or with a limit price, it is not', () => {
+    const { market, ctx, engine, bal } = setup();
+    market.setLastPrice('BTCUSDT', null);
+    expect(rejectReason(engine.submit(marketBuy('1'), ctx))).toBe('Last price unavailable for BTCUSDT');
+    expectUntouched(bal);
+    placed(engine.submit(marketBuy('1', {}), ctx));
+    placed(engine.submit(limitBuy('99.50', '1'), ctx));
+  });
+
+  it('a pair needs 3 order slots (the buy and two legs)', () => {
+    const { market, ctx, engine, bal } = setup();
+    market.setRules('BTCUSDT', { ...btcRules, maxNumOrders: 3 });
+    placed(engine.submit(limitBuy('99', '1', {}), ctx)); // 1 slot in use
+    const message = 'MAX_NUM_ORDERS: an order with an attached pair needs 3 slots but 1 of 3 are in use on BTCUSDT';
+    expect(rejectReason(engine.submit(marketBuy('1'), ctx))).toBe(message);
+    expect(rejectReason(engine.submit(limitBuy('98', '1'), ctx))).toBe(message);
+    expect(s(bal('BTC').locked)).toBe('0');
+    placed(engine.submit(marketBuy('1', {}), ctx)); // without a pair one slot is enough: 2 in use now
+
+    market.setRules('BTCUSDT', { ...btcRules, maxNumOrders: 4 });
+    expect(rejectReason(engine.submit(marketBuy('1'), ctx))).toBe(
+      'MAX_NUM_ORDERS: an order with an attached pair needs 3 slots but 2 of 4 are in use on BTCUSDT',
+    );
+    market.setRules('BTCUSDT', { ...btcRules, maxNumOrders: 5 });
+    placed(engine.submit(marketBuy('1'), ctx)); // exactly 3 slots free
+  });
+
+  it('a pair needs 2 algo-order slots: 4 of 5 in use rejects the buy before anything fills', () => {
+    const { ctx, engine, bal } = setup();
+    for (let i = 0; i < 4; i++) arm(engine, sellStop('98', '0.1'), ctx);
+    const pairMessage =
+      'MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but 4 of 5 are in use on BTCUSDT';
+    const events = engine.submit(marketBuy('1'), ctx);
+    expect(rejectReason(events)).toBe(pairMessage);
+    expect(rejectReason(engine.submit(limitBuy('99.50', '1'), ctx))).toBe(pairMessage);
+    expect(s(bal('USDT').free)).toBe('1000');
+    expect(s(bal('USDT').locked)).toBe('0');
+    expect(s(bal('BTC').locked)).toBe('0.4');
+    // 3 of 5: a pair fits.
+    const { ctx: ctx3, engine: engine3 } = setup();
+    for (let i = 0; i < 3; i++) arm(engine3, sellStop('98', '0.1'), ctx3);
+    placed(engine3.submit(marketBuy('1'), ctx3));
+  });
+
+  it('NOTIONAL of each leg is checked on the expected net quantity', () => {
+    const { ctx, engine, bal } = setup();
+    // 0.05 BTC is 5.00 at the average price and passes alone; net of the 0.1 % fee: 0.04995.
+    placed(engine.submit(marketBuy('0.05', {}), ctx));
+    expect(rejectReason(engine.submit(marketBuy('0.05'), ctx))).toBe(
+      'NOTIONAL: order value 4.74525 is below the minimum 5',
+    );
+    expect(engine.preview(marketBuy('0.05'), ctx).rejectReason).toBe(
+      'NOTIONAL: order value 4.74525 is below the minimum 5',
+    );
+    expect(s(bal('BTC').locked)).toBe('0');
+  });
+
+  it('NOTIONAL uses the walked quantity of a dollar-sized market buy', () => {
+    const { ctx, engine } = setup();
+    // 5.01 USDT buys 0.0501 BTC; net of the fee: floor(0.0500499) = 0.05004; 95 × 0.05004 = 4.7538.
+    expect(rejectReason(engine.submit(dollarBuy('5.01'), ctx))).toBe(
+      'NOTIONAL: order value 4.7538 is below the minimum 5',
+    );
+    placed(engine.submit(dollarBuy('5.01', {}), ctx));
+  });
+
+  it('NOTIONAL uses the computed quantity of a dollar-sized limit buy', () => {
+    const { ctx, engine } = setup();
+    // 5.5 USDT at 99.50 buys floor(0.055276…) = 0.05527 BTC; net 0.05521; 90 × 0.05521 = 4.9689.
+    const req = (stopLoss: string): SpotOrderRequest => ({
+      symbol: 'BTCUSDT',
+      side: 'buy',
+      type: 'limit',
+      price: '99.50',
+      quoteQty: '5.5',
+      attach: { stopLoss, takeProfit: '110' },
+    });
+    expect(rejectReason(engine.submit(req('90'), ctx))).toBe('NOTIONAL: order value 4.9689 is below the minimum 5');
+    placed(engine.submit(req('95'), ctx));
+  });
+
+  it('LOT_SIZE of each leg is checked on the net quantity', () => {
+    const { market, ctx, engine } = setup();
+    market.setRules('BTCUSDT', { ...btcRules, minNotional: D('0') });
+    // One step buys fine; the fee leaves less than one step for the pair.
+    placed(engine.submit(marketBuy('0.00001', {}), ctx));
+    expect(rejectReason(engine.submit(marketBuy('0.00001'), ctx))).toBe(
+      'LOT_SIZE: quantity 0 is below the minimum 0.00001',
+    );
+  });
+
+  it('preview reports the same reason as submit', () => {
+    const { ctx, engine } = setup();
+    const lateTp = marketBuy('1', pair('95', '99.90'));
+    expect(engine.preview(lateTp, ctx).rejectReason).toBe(
+      'Attached take-profit 99.9 must be above the last price 99.95',
+    );
+    expect(engine.preview(marketBuy('1'), ctx).rejectReason).toBeNull();
+    const highSl = limitBuy('99.50', '1', pair('99.6', '110'));
+    expect(engine.preview(highSl, ctx).rejectReason).toBe('Attached stop-loss 99.6 must be below the limit price 99.5');
+    expect(engine.preview(limitBuy('99.50', '1'), ctx).rejectReason).toBeNull();
   });
 });
 

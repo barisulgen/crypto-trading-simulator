@@ -136,17 +136,30 @@ export function placePending(
   return [{ type: 'order_placed', time: ctx.now, order: pending }];
 }
 
-/** Record a rejected order (nothing locked) and return its event. */
-export function rejectOrder(s: SpotState, order: SpotOrder, reason: string, ctx: EngineCtx): EngineEvent[] {
+/** Record a rejected order (nothing locked) and return its event; `afterTrigger` marks a triggered stop. */
+export function rejectOrder(
+  s: SpotState,
+  order: SpotOrder,
+  reason: string,
+  ctx: EngineCtx,
+  afterTrigger = false,
+): EngineEvent[] {
   const rejected: SpotOrder = { ...order, status: 'rejected', rejectReason: reason, lockAmount: D(0) };
   s.orders.set(rejected.id, rejected);
-  return [{ type: 'order_rejected', time: ctx.now, order: rejected, reason }];
+  const event: EngineEvent = { type: 'order_rejected', time: ctx.now, order: rejected, reason };
+  return [afterTrigger ? { ...event, afterTrigger } : event];
 }
 
 /** Reject an order that holds a lock: release it first. */
-export function rejectPending(s: SpotState, order: SpotOrder, reason: string, ctx: EngineCtx): EngineEvent[] {
+export function rejectPending(
+  s: SpotState,
+  order: SpotOrder,
+  reason: string,
+  ctx: EngineCtx,
+  afterTrigger = false,
+): EngineEvent[] {
   releaseFunds(s, order.lockAsset, order.lockAmount);
-  return rejectOrder(s, order, reason, ctx);
+  return rejectOrder(s, order, reason, ctx, afterTrigger);
 }
 
 /** The fields of a fill that differ between maker and taker fills. */
@@ -274,6 +287,11 @@ export function marketStep(rules: SpotRules): Decimal {
   return rules.marketStepSize.isZero() ? rules.stepSize : rules.marketStepSize;
 }
 
+/** Why a dollar-sized taker order cannot trade: its dollars buy less than one step of the coin. */
+export function amountTooSmall(quoteQty: Decimal | null, rules: SpotRules): string {
+  return `Amount too small: ${quoteQty} ${rules.quote} does not reach one step of ${marketStep(rules)} ${rules.base}`;
+}
+
 export function marketTarget(o: {
   qty: Decimal | null;
   quoteQty: Decimal | null;
@@ -284,7 +302,8 @@ export function marketTarget(o: {
 /**
  * Execute an arrived taker order against its walk of `book`: one fill for what the book had.
  * If the book ran thin the rest is cancelled (thin_book) and the unspent lock released.
- * The caller has already checked funds.
+ * A dollar-sized order whose walk fills nothing against a non-empty book is rejected instead:
+ * its dollars are below one step, not a thin book. The caller has already checked funds.
  */
 export function fillOrThin(
   s: SpotState,
@@ -294,6 +313,10 @@ export function fillOrThin(
   rules: SpotRules,
   ctx: EngineCtx,
 ): EngineEvent[] {
+  const levels = order.side === 'buy' ? book.asks : book.bids;
+  if (walk.qty.isZero() && order.quoteQty !== null && levels.length > 0) {
+    return rejectPending(s, order, amountTooSmall(order.quoteQty, rules), ctx, order.status === 'triggered');
+  }
   const thin = walk.exhausted || walk.qty.isZero();
   const events: EngineEvent[] = [];
   let current = order;
@@ -308,7 +331,6 @@ export function fillOrThin(
 
   if (thin) {
     current = { ...current, status: 'cancelled' };
-    const levels = order.side === 'buy' ? book.asks : book.bids;
     const cancelledQty = unfilledQty(order, walk, levels[walk.levelsUsed - 1]?.price ?? null, marketStep(rules));
     events.push({ type: 'order_cancelled', time: ctx.now, order: current, reason: 'thin_book', cancelledQty });
   }
