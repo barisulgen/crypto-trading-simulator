@@ -390,7 +390,8 @@ export class EngineRunner {
   /**
    * Re-sends the pending orders recover() held back, for each symbol whose data is now fresh:
    * a fresh arrival delay from now (a pair's legs share one), persisted, then arrive() scheduled.
-   * Until then they keep their old arrival time and nothing arrives them.
+   * Until then they keep their old arrival time and nothing arrives them. A cancel of such an
+   * order that is already due (one that waited for the exchange rules) is delivered first.
    */
   private rearmWhenFresh(): void {
     if (this.awaitingFresh.size === 0) return;
@@ -398,10 +399,12 @@ export class EngineRunner {
     const ctx = this.ctx();
     const delays = new Map<string, number>();
     const armed: { id: string; at: number }[] = [];
+    const events: EngineEvent[] = [];
     for (const [symbol, ids] of this.awaitingFresh) {
       if (!this.d.market.isFresh(symbol)) continue;
       this.awaitingFresh.delete(symbol);
       for (const id of ids) {
+        if (state.orders.get(id)?.cancelArrivesAt != null) events.push(...this.d.engine.arriveCancel(id, ctx));
         const o = state.orders.get(id);
         if (!o || o.status !== 'pending') continue; // cancelled meanwhile
         const key = o.ocoGroupId ?? o.id;
@@ -411,8 +414,8 @@ export class EngineRunner {
         armed.push({ id, at });
       }
     }
-    if (armed.length === 0) return;
-    this.commit([]);
+    if (armed.length === 0 && events.length === 0) return;
+    this.commit(events);
     for (const { id, at } of armed) this.scheduleArrival(id, at);
   }
 

@@ -484,6 +484,36 @@ describe('EngineRunner', () => {
     expect(b.fatal).toEqual([]);
   });
 
+  it('restart before the rules load: a held-back pending order whose cancel reached the exchange is cancelled, not re-sent', () => {
+    const a = setup();
+    a.runner.start();
+    a.runner.deposit('spot', D('1000'));
+    const order = submittedOrder(
+      a.runner.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'stop_loss', triggerPrice: '101', quoteQty: '50.5' }),
+    );
+    expect(a.runner.cancel(order.id).ok).toBe(true); // still pending: arrives with its cancel at T0 + 100
+    a.runner.stop();
+    a.clock.advance(60_000);
+
+    const market = new TestMarket(SYMBOLS);
+    market.clearRules('BTCUSDT');
+    market.setFresh('BTCUSDT', false);
+    const b = setup({ db: a.db, clock: a.clock, market });
+    b.runner.start();
+    b.clock.advance(5000);
+    expect(b.orderRow(order.id)!.status).toBe('pending');
+
+    market.setRules('BTCUSDT', btcRules);
+    market.setFresh('BTCUSDT', true);
+    b.clock.advance(1000); // the first fresh poll
+    expect(b.orderRow(order.id)!.status).toBe('cancelled');
+    expect(b.eventsOf('order_cancelled').map((e) => [e.payload.reason, e.payload.cancelledQty])).toEqual([['user', '0.5']]);
+    b.clock.advance(1000);
+    expect(b.orderRow(order.id)!.status).toBe('cancelled');
+    expect(b.eventsOf('order_rejected')).toEqual([]);
+    expect(b.fatal).toEqual([]);
+  });
+
   it('refuses order submission when the loaded state fails its integrity check', () => {
     const a = setup();
     a.runner.deposit('spot', D('1000'));

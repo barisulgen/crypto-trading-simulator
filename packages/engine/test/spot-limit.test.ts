@@ -608,6 +608,44 @@ describe('a cancel reaches the exchange after the arrival delay', () => {
     expect(engine.arriveCancel(id, ctx)).toEqual([]);
   });
 
+  it('a trade past both due times leaves a pending order whose own arrival comes first to its arrival', () => {
+    const { ctx, engine, stored } = setup();
+    const t = ctx.now;
+    const order = placed(engine.submit(limitBuy('100.10', '1'), ctx));
+    expect(order.arrivesAt).toBe(t + 100);
+    ctx.now = t + 50;
+    engine.cancel(order.id, ctx);
+    expect(stored(order.id).cancelArrivesAt).toBe(t + 150);
+
+    // Processed before the arrival runs: the cancel must not overtake the earlier arrival.
+    ctx.now = t + 160;
+    expect(engine.onTrade('BTCUSDT', trade('100.00', '0.1', false), ctx)).toEqual([]);
+    expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
+    expect(stored(order.id).status).toBe('pending');
+
+    const { fill, order: after } = onlyFill(engine.arrive(order.id, ctx));
+    expect(fill.liquidity).toBe('taker');
+    expect(after.status).toBe('filled');
+    expect(only(engine.arriveCancel(order.id, ctx), 'cancel_rejected').reason).toBe(
+      'Cancel arrived too late: order already filled',
+    );
+  });
+
+  it('a trade past the due time of a cancel that comes before the order arrival delivers the cancel', () => {
+    const { ctx, engine, stored } = setup();
+    const t = ctx.now;
+    const rng = [0.9999, 0]; // 300 ms for the order, then 100 ms for the cancel
+    ctx.rng = () => rng.shift() ?? 0;
+    const order = placed(engine.submit(limitBuy('100.10', '1'), ctx));
+    ctx.now = t + 10;
+    engine.cancel(order.id, ctx);
+    ctx.now = t + 120;
+    expect(only(engine.onTrade('BTCUSDT', trade('100.00', '0.1', false), ctx), 'order_cancelled').reason).toBe('user');
+    ctx.now = t + 300;
+    expect(engine.arrive(order.id, ctx)).toEqual([]);
+    expect(stored(order.id).status).toBe('cancelled');
+  });
+
   it('arriveCancel ignores unknown orders and orders with no cancel in flight', () => {
     const { ctx, engine, stored } = setup();
     const id = rest(engine, limitBuy('99.50', '1'), ctx);

@@ -189,11 +189,16 @@ export class SpotEngine {
     return activateAttachedPairs(this.s, this.freshWork(symbol, ctx), ctx);
   }
 
-  /** onFresh without activating attached pairs: the caller activates them once for all its events. */
+  /**
+   * onFresh without activating attached pairs: the caller activates them once for all its events.
+   * A pending order whose own arrival comes no later than its cancel's arrives first, so that
+   * cancel is left to arriveCancel, which runs after the order's arrive().
+   */
   private freshWork(symbol: string, ctx: EngineCtx): EngineEvent[] {
     if (!ctx.market.isFresh(symbol)) return [];
+    const arrivesFirst = (o: SpotOrder) => o.status === 'pending' && o.arrivesAt !== null && o.arrivesAt <= o.cancelArrivesAt!;
     const dueCancels = [...this.s.orders.values()].filter(
-      (o) => o.symbol === symbol && o.cancelArrivesAt !== null && o.cancelArrivesAt <= ctx.now,
+      (o) => o.symbol === symbol && o.cancelArrivesAt !== null && o.cancelArrivesAt <= ctx.now && !arrivesFirst(o),
     );
     return [
       ...dueCancels.flatMap((o) => this.deliverCancel(o.id, ctx)),
@@ -235,7 +240,8 @@ export class SpotEngine {
    * pair goes as a whole, a part-filled buy activates its attached pair). One that filled,
    * triggered, was rejected or was cancelled meanwhile stays as it is, and the late cancel is
    * recorded as cancel_rejected. A cancel that needs the exchange rules while they are not loaded
-   * stays in flight; onFresh delivers it once the symbol's data is fresh.
+   * stays in flight: onFresh delivers it once the symbol's data is fresh, except for a pending
+   * order whose own arrival comes first, which needs arriveCancel again.
    */
   arriveCancel(orderId: string, ctx: EngineCtx): EngineEvent[] {
     return activateAttachedPairs(this.s, this.deliverCancel(orderId, ctx), ctx);
