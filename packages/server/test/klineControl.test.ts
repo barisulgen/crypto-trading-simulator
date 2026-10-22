@@ -168,6 +168,77 @@ describe('kline socket control messages', () => {
   });
 });
 
+describe('kline socket reconnect backoff', () => {
+  const kline = { e: 'kline', s: 'BTCUSDT', k: { t: 60000, i: '1m', o: '1', h: '2', l: '0.5', c: '1.5', v: '10', x: false } };
+
+  /** Drops the latest socket and returns how long the next one takes to appear (ms), or null if it never does. */
+  function reconnectDelay(t: ReturnType<typeof setup>): number | null {
+    const before = t.sockets.length;
+    t.sockets[before - 1]!.drop();
+    for (let ms = 0; ms <= 60_000; ms++) {
+      if (t.sockets.length > before) return ms;
+      t.clock.advance(1);
+    }
+    return null;
+  }
+
+  it('a server that accepts and closes at once is retried after 1 s, 2 s, 4 s ... up to 30 s', () => {
+    const t = setup();
+    t.svc.subscribe('BTCUSDT', '1m', () => {});
+    const delays: (number | null)[] = [];
+    for (let i = 0; i < 7; i++) {
+      t.sockets[i]!.open(); // accepted, then closed straight away
+      delays.push(reconnectDelay(t));
+    }
+    expect(delays).toEqual([1000, 2000, 4000, 8000, 16_000, 30_000, 30_000]);
+    t.svc.close();
+  });
+
+  it('a kline message resets the backoff, so the next drop reconnects after 1 s', () => {
+    const t = setup();
+    t.svc.subscribe('BTCUSDT', '1m', () => {});
+    t.sockets[0]!.open();
+    expect(reconnectDelay(t)).toBe(1000);
+    t.sockets[1]!.open();
+    expect(reconnectDelay(t)).toBe(2000);
+    t.sockets[2]!.open();
+    expect(reconnectDelay(t)).toBe(4000);
+    t.sockets[3]!.open();
+    t.sockets[3]!.msg(kline);
+    expect(reconnectDelay(t)).toBe(1000);
+    t.sockets[4]!.open();
+    expect(reconnectDelay(t)).toBe(2000); // growing again from 1 s
+    t.svc.close();
+  });
+
+  it('a reply to a subscribe request is not a kline message and does not reset the backoff', () => {
+    const t = setup();
+    t.svc.subscribe('BTCUSDT', '1m', () => {});
+    t.sockets[0]!.open();
+    expect(reconnectDelay(t)).toBe(1000);
+    t.sockets[1]!.open();
+    t.sockets[1]!.msg({ result: null, id: 1 });
+    expect(reconnectDelay(t)).toBe(2000);
+    t.svc.close();
+  });
+
+  it('a socket that stays open 30 s resets the backoff; one that closes just before does not', () => {
+    const t = setup();
+    t.svc.subscribe('BTCUSDT', '1m', () => {});
+    t.sockets[0]!.open();
+    expect(reconnectDelay(t)).toBe(1000);
+    t.sockets[1]!.open();
+    expect(reconnectDelay(t)).toBe(2000);
+    t.sockets[2]!.open();
+    t.clock.advance(29_999);
+    expect(reconnectDelay(t)).toBe(4000); // closed 1 ms short of stable
+    t.sockets[3]!.open();
+    t.clock.advance(30_000);
+    expect(reconnectDelay(t)).toBe(1000);
+    t.svc.close();
+  });
+});
+
 describe('combined market-data socket', () => {
   it('SpotFeed never sends anything on its socket (no control messages, no pings)', async () => {
     const clock = new FakeClock(1_000_000);

@@ -31,6 +31,8 @@ const WATCHDOG_MS = 30_000;
 const WATCHDOG_CHECK_MS = 5000;
 const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
+/** A socket that stays open this long has earned a fresh reconnect backoff, kline message or not. */
+const KLINE_STABLE_MS = 30_000;
 /** A socket without streams stays open this long, so switching chart symbol does not reconnect. */
 const IDLE_CLOSE_MS = 10_000;
 
@@ -158,10 +160,18 @@ export class CandleService {
     let dead = false;
     let lastFrame = this.now();
     let cancelWatchdog: () => void = () => {};
+    let cancelStable: () => void = () => {};
+    // A server that accepts and closes at once must not be retried every second, so the backoff
+    // resets only once the socket has proven itself: it delivered a kline, or it stayed open.
+    const proven = () => {
+      cancelStable();
+      if (!dead && this.ws === ws) this.backoff = BACKOFF_START_MS;
+    };
     const down = () => {
       if (dead) return;
       dead = true;
       cancelWatchdog();
+      cancelStable();
       if (this.ws === ws) {
         this.ws = null;
         this.queue?.close();
@@ -203,7 +213,7 @@ export class CandleService {
     ws.on('open', () => {
       lastFrame = this.now();
       if (dead || this.ws !== ws) return;
-      this.backoff = BACKOFF_START_MS;
+      cancelStable = this.setTimer(proven, KLINE_STABLE_MS);
       // Every control message on this connection, including this resubscribe-all, is rate-limited.
       this.queue = new ControlQueue({
         send: (method, params) => {
@@ -224,6 +234,7 @@ export class CandleService {
       try {
         const m = JSON.parse(rawToString(raw));
         if (m?.e !== 'kline' || !m.k) return;
+        proven();
         const k = m.k;
         const set = this.subs.get(`${String(m.s).toLowerCase()}@kline_${k.i}`);
         if (!set) return;

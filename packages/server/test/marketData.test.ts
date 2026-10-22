@@ -462,6 +462,48 @@ describe('SpotFeed', () => {
     expect(tk[2].change24hPct.toString()).toBe('10');
     expect(events.some((e) => e[0] === 'book')).toBe(true);
   });
+
+  it('trade and ticker event times count toward lag; a malformed one counts as lagging', async () => {
+    const { feed, sockets, timers, snaps, health, clock } = setup();
+    snaps.BTCUSDT = [snap(100)];
+    feed.start();
+    const ws = sockets[0]!;
+    ws.open();
+    timers.fire();
+    await tick();
+    ws.msg(diff('BTCUSDT', 99, 101));
+    expect(health.isFresh('BTCUSDT', clock.t)).toBe(true);
+    const aggTrade = (E: number | undefined, p = '100') => ({
+      stream: 'btcusdt@aggTrade',
+      data: { e: 'aggTrade', E, a: 7, p, q: '1', T: 1, m: false },
+    });
+    const miniTicker = (E: number | undefined, c = '100') => ({
+      stream: 'btcusdt@miniTicker',
+      data: { e: '24hrMiniTicker', E, c, o: '99' },
+    });
+    const lag = () => health.reason('BTCUSDT', clock.t);
+
+    ws.msg(aggTrade(clock.t - 6000));
+    expect(lag()).toBe('Feed lagging by 6.0s');
+    ws.msg(aggTrade(clock.t));
+    expect(lag()).toBeNull();
+    ws.msg(miniTicker(clock.t - 7000));
+    expect(lag()).toBe('Feed lagging by 7.0s');
+    ws.msg(miniTicker(clock.t));
+    expect(lag()).toBeNull();
+
+    ws.msg(aggTrade(undefined));
+    expect(lag()).toBe('Feed lagging (invalid event time)');
+    ws.msg(miniTicker(clock.t));
+    expect(lag()).toBeNull();
+    ws.msg(aggTrade(clock.t, 'x')); // a bad price proves nothing, whatever its event time
+    expect(lag()).toBe('Feed lagging (invalid event time)');
+    ws.msg(aggTrade(clock.t));
+    ws.msg(miniTicker(clock.t, 'x'));
+    expect(lag()).toBe('Feed lagging (invalid event time)');
+    ws.msg(miniTicker(clock.t));
+    expect(lag()).toBeNull();
+  });
 });
 
 describe('CandleService', () => {

@@ -273,17 +273,20 @@ export class SpotFeed extends EventEmitter {
     if (!this.st.has(symbol)) return;
     try {
       if (kind.startsWith('depth')) this.onDepth(symbol, data, now);
-      else if (kind === 'aggTrade') this.onTrade(symbol, data);
-      else if (kind === 'miniTicker') this.onTicker(symbol, data);
+      else if (kind === 'aggTrade') this.onTrade(symbol, data, now);
+      else if (kind === 'miniTicker') this.onTicker(symbol, data, now);
     } catch (e) {
       this.warnLimited(`${symbol}:${kind}`, `spot feed: bad ${kind} message for ${symbol}: ${(e as Error).message}`);
     }
   }
 
-  private onTrade(symbol: string, d: any): void {
+  private onTrade(symbol: string, d: any, now: number): void {
     const price = positive(d.p);
     const qty = positive(d.q);
-    if (!price || !qty || !Number.isSafeInteger(d.a) || !Number.isSafeInteger(d.T)) {
+    const valid = price !== null && qty !== null && Number.isSafeInteger(d.a) && Number.isSafeInteger(d.T);
+    // Like a depth event, a trade shows the feed is current only by its own exchange event time.
+    this.health.onTrade(symbol, now, valid ? d.E : Number.NaN);
+    if (!valid) {
       this.warnLimited(`${symbol}:aggTrade`, `spot feed: invalid aggTrade for ${symbol}; dropped`);
       return;
     }
@@ -291,9 +294,10 @@ export class SpotFeed extends EventEmitter {
     this.emit('trade', symbol, trade);
   }
 
-  private onTicker(symbol: string, d: any): void {
+  private onTicker(symbol: string, d: any, now: number): void {
     const last = positive(d.c);
     const open = positive(d.o);
+    this.health.onTicker(symbol, now, last !== null && open !== null ? d.E : Number.NaN);
     if (!last || !open) {
       this.warnLimited(`${symbol}:miniTicker`, `spot feed: invalid miniTicker for ${symbol}; dropped`);
       return;
