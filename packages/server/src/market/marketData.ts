@@ -14,6 +14,8 @@ import type { SetTimer } from './ws.ts';
 export const AVG_PRICE_POLL_MS = 10_000;
 export const AVG_PRICE_MAX_AGE_MS = 60_000;
 export const RULES_REFRESH_MS = 3_600_000;
+/** While any symbol is not TRADING on Binance, exchangeInfo is polled this often to see the halt end. */
+export const HALT_REPOLL_MS = 45_000;
 export const CLOCK_REFRESH_MS = 600_000;
 const TRADE_RING = 50;
 const POLL_STAGGER_MS = 1000;
@@ -98,7 +100,7 @@ export class MarketData extends EventEmitter implements MarketView {
     if (this.started) return;
     this.started = true;
     this.stopped = false;
-    this.every(() => this.refreshRules(), RULES_REFRESH_MS, 0, true);
+    this.every(() => this.refreshRules(), () => (this.anyHalted() ? HALT_REPOLL_MS : RULES_REFRESH_MS), 0, true);
     this.every(() => this.refreshClockOffset(), CLOCK_REFRESH_MS, 0, true);
     this.symbols.forEach((s, i) =>
       this.every(async () => (await this.pollAvgPrice(s), true), AVG_PRICE_POLL_MS, i * POLL_STAGGER_MS, false),
@@ -113,10 +115,17 @@ export class MarketData extends EventEmitter implements MarketView {
   }
 
   /**
-   * Runs `fn` after `firstDelay`, then every `ms`. With `untilFirstSuccess`, a failed run is
-   * retried quickly (5 s doubling to 60 s) until it first succeeds, then at the normal period.
+   * Runs `fn` after `firstDelay`, then every `ms` (a function is asked again after each run). With
+   * `untilFirstSuccess`, a failed run is retried quickly (5 s doubling to 60 s) until it first
+   * succeeds, then at the normal period.
    */
-  private every(fn: () => Promise<boolean>, ms: number, firstDelay: number, untilFirstSuccess: boolean): void {
+  private every(
+    fn: () => Promise<boolean>,
+    ms: number | (() => number),
+    firstDelay: number,
+    untilFirstSuccess: boolean,
+  ): void {
+    const period = typeof ms === 'number' ? () => ms : ms;
     let cancel: () => void = () => {};
     let ok = false;
     let retry = STARTUP_RETRY_START_MS;
@@ -129,7 +138,7 @@ export class MarketData extends EventEmitter implements MarketView {
           .then((success) => {
             if (this.stopped) return;
             if (success) ok = true;
-            if (ok || !untilFirstSuccess) return arm(ms);
+            if (ok || !untilFirstSuccess) return arm(period());
             arm(retry);
             retry = Math.min(retry * 2, STARTUP_RETRY_MAX_MS);
           });
@@ -189,6 +198,11 @@ export class MarketData extends EventEmitter implements MarketView {
   // MarketView
   isFresh(symbol: string): boolean {
     return this.ruleMap.has(symbol) && this.halted(symbol) === null && this.health.isFresh(symbol, this.now());
+  }
+
+  /** Whether Binance is not trading any of the symbols, as of the last exchangeInfo. */
+  private anyHalted(): boolean {
+    return this.symbols.some((s) => this.halted(s) !== null);
   }
 
   /** Why Binance is not trading the symbol, or null when it is (or its status is not known yet). */

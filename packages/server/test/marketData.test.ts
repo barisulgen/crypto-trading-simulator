@@ -138,6 +138,58 @@ describe('MarketData', () => {
     expect(md.healthSnapshot().BTCUSDT).toEqual({ fresh: true, reason: null });
   });
 
+  it('while a symbol is not TRADING, exchangeInfo is polled again 45 s later; once all trade again, hourly', async () => {
+    const clock = new FakeClock(1_000_000);
+    let status = 'TRADING';
+    const polls: number[] = [];
+    const rest = {
+      exchangeInfo: async () => {
+        polls.push(clock.now);
+        return { symbols: [{ ...(exchangeInfo as any).symbols[0], status }] };
+      },
+      avgPrice: async () => ({ price: '100' }),
+      serverTime: async () => ({ serverTime: clock.now }),
+    };
+    const md = new MarketData({
+      symbols: ['BTCUSDT'],
+      feed: new EventEmitter(),
+      books: new Map([['BTCUSDT', new LocalBook()]]),
+      health: new FeedHealth(['BTCUSDT'], cfg),
+      rest: rest as any,
+      logger: silent,
+      now: () => clock.now,
+      setTimer: clock.setTimer,
+    });
+    const T = clock.now;
+    const advance = async (ms: number) => {
+      clock.advance(ms);
+      await tick();
+    };
+    md.start();
+    await advance(0);
+    expect(polls).toEqual([T]);
+
+    status = 'BREAK';
+    await advance(3_600_000); // the hourly refresh sees the halt
+    expect(polls).toEqual([T, T + 3_600_000]);
+    await advance(44_999);
+    expect(polls).toHaveLength(2);
+    await advance(1); // 45 s after the poll that saw the halt
+    expect(polls).toEqual([T, T + 3_600_000, T + 3_645_000]);
+    await advance(45_000); // still halted: 45 s again
+    expect(polls.at(-1)).toBe(T + 3_690_000);
+
+    status = 'TRADING';
+    await advance(45_000); // trading again
+    expect(polls.at(-1)).toBe(T + 3_735_000);
+    await advance(3_599_999);
+    expect(polls.at(-1)).toBe(T + 3_735_000);
+    await advance(1); // hourly again
+    expect(polls.at(-1)).toBe(T + 7_335_000);
+    expect(polls).toHaveLength(6);
+    md.stop();
+  });
+
   it('rules equal parseSpotRules of the exchangeInfo symbol', async () => {
     const rest: any = {};
     loadRules(rest);

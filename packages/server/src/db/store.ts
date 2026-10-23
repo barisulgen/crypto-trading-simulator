@@ -4,6 +4,7 @@ import type {
   Basis,
   EngineEvent,
   Fill,
+  Market,
   RoundTrip,
   Ledger,
   SimEngine,
@@ -14,19 +15,26 @@ import type {
 import type { Db } from './db.ts';
 
 export interface FeedGap {
+  market: Market;
   symbol: string;
-  market: 'spot';
   startedAt: number;
   endedAt: number;
   reason: string;
+  /**
+   * The engine's trade cursor for the market and symbol when the gap opened: the id of the last
+   * trade processed live before it (null if none had been). A later replay starts after it.
+   */
+  lastTradeIdBefore: number | null;
 }
 
 /** A gap in live data that has started and not yet been recorded as a feed_gap. */
 export interface OpenGap {
-  market: 'spot';
+  market: Market;
   symbol: string;
   startedAt: number;
   reason: string;
+  /** As FeedGap.lastTradeIdBefore; null also for a gap saved before the cursor was kept with it. */
+  lastTradeIdBefore: number | null;
 }
 
 export interface HistoryRow {
@@ -126,7 +134,7 @@ export function loadSpotState(db: Db, seasonId: number, ledger: Ledger): SpotSta
   for (const b of basis) state.basis[b.asset] = reviveBasis(b);
 
   const cursors = db
-    .prepare('SELECT symbol, last_trade_id FROM trade_cursor WHERE season_id = ?')
+    .prepare("SELECT symbol, last_trade_id FROM trade_cursor WHERE season_id = ? AND market = 'spot'")
     .all(seasonId) as { symbol: string; last_trade_id: number }[];
   for (const c of cursors) state.lastTradeId[c.symbol] = c.last_trade_id;
 
@@ -199,8 +207,8 @@ export function persist(
      ON CONFLICT(season_id) DO UPDATE SET total_deposited = excluded.total_deposited`,
   );
   const upCursor = db.prepare(
-    `INSERT INTO trade_cursor (season_id, symbol, last_trade_id) VALUES (?, ?, ?)
-     ON CONFLICT(season_id, symbol) DO UPDATE SET last_trade_id = excluded.last_trade_id`,
+    `INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (?, 'spot', ?, ?)
+     ON CONFLICT(season_id, market, symbol) DO UPDATE SET last_trade_id = excluded.last_trade_id`,
   );
   const insTrip = db.prepare(
     'INSERT INTO round_trips (id, season_id, symbol, opened_at, closed_at, pnl) VALUES (?, ?, ?, ?, ?, ?)',
@@ -257,7 +265,7 @@ export function persist(
     for (const g of gaps) {
       insEvent.run(
         seasonId, g.endedAt, 'feed_gap', g.symbol, g.market,
-        JSON.stringify({ startedAt: g.startedAt, endedAt: g.endedAt, reason: g.reason }),
+        JSON.stringify({ startedAt: g.startedAt, endedAt: g.endedAt, reason: g.reason, lastTradeIdBefore: g.lastTradeIdBefore }),
       );
       delOpenGap.run(seasonId, g.market, g.symbol);
     }
@@ -320,23 +328,24 @@ export function settleLateCancels(db: Db, seasonId: number, now: number): Cancel
 // ---- open gaps ----
 
 /**
- * Saves a gap as open, at once, so a crash keeps its start. A gap already open for the symbol
- * keeps its start and reason unless this one starts earlier.
+ * Saves a gap as open, at once, so a crash keeps its start and trade cursor. A gap already open
+ * for the market and symbol keeps its start, reason and cursor unless this one starts earlier.
  */
 export function openGap(db: Db, seasonId: number, g: OpenGap): void {
   db.prepare(
-    `INSERT INTO open_gaps (season_id, market, symbol, started_at, reason) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(season_id, market, symbol) DO UPDATE SET started_at = excluded.started_at, reason = excluded.reason
+    `INSERT INTO open_gaps (season_id, market, symbol, started_at, reason, last_trade_id_before) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(season_id, market, symbol) DO UPDATE SET started_at = excluded.started_at, reason = excluded.reason,
+       last_trade_id_before = excluded.last_trade_id_before
        WHERE excluded.started_at < open_gaps.started_at`,
-  ).run(seasonId, g.market, g.symbol, g.startedAt, g.reason);
+  ).run(seasonId, g.market, g.symbol, g.startedAt, g.reason, g.lastTradeIdBefore);
 }
 
-/** The season's open gaps (left by a crash, or seeded at startup), by symbol. */
+/** The season's open gaps (left by a crash, or seeded at startup), by market and symbol. */
 export function loadOpenGaps(db: Db, seasonId: number): OpenGap[] {
   return db
     .prepare(
-      `SELECT market, symbol, started_at AS startedAt, reason FROM open_gaps WHERE season_id = ?
-       ORDER BY market, symbol`,
+      `SELECT market, symbol, started_at AS startedAt, reason, last_trade_id_before AS lastTradeIdBefore
+       FROM open_gaps WHERE season_id = ? ORDER BY market, symbol`,
     )
     .all(seasonId) as OpenGap[];
 }

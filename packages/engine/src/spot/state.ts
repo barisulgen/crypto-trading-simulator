@@ -16,7 +16,10 @@ export interface SpotState {
   /** Ids of the orders changed since the last takeDirty: what the next save writes. */
   dirty: Set<string>;
   basis: Record<string, Basis>;
-  /** Per symbol, the id of the last AggTrade processed; older or repeated trades are ignored. */
+  /**
+   * Per symbol, the id of the last spot AggTrade processed (saved as the spot market's trade
+   * cursor); older or repeated trades are ignored, and a trade skipped on stale data leaves it.
+   */
   lastTradeId: Record<string, number>;
 }
 

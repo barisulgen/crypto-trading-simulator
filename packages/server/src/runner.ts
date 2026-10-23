@@ -26,8 +26,6 @@ import {
   checkInvariants,
   insertEquitySnapshot,
   lastAlive,
-  loadOpenGaps,
-  openGap,
   persist,
   settleLateCancels,
   storedOrderExists,
@@ -35,12 +33,14 @@ import {
   touchAlive,
 } from './db/store.ts';
 import type { FeedGap } from './db/store.ts';
+import { FeedGaps, OFFLINE_REASON } from './feedGaps.ts';
 import type { Logger } from './log.ts';
+import { marketKey, splitKey } from './market/marketKey.ts';
+import type { MarketKey } from './market/marketKey.ts';
 import type { SetTimer } from './market/ws.ts';
 
-export { RESTART_REASON };
+export { OFFLINE_REASON, RESTART_REASON };
 export const INTEGRITY_REFUSAL = 'Account state failed integrity check; see server log';
-export const OFFLINE_REASON = 'Server offline';
 export const PAUSED_REASON = 'Server paused (sleep or freeze)';
 const STOPPED_REFUSAL = 'Server stopped after an internal error; see server log';
 
@@ -118,13 +118,7 @@ export interface RunnerDeps {
   logger: Logger;
 }
 
-/** A gap in the live data that has not been recorded as a feed_gap yet. */
-interface Gap {
-  at: number;
-  reason: string;
-  /** Closed only by a health poll that finds the data fresh, never by a trade. */
-  pollOnly: boolean;
-}
+const spotKey = (symbol: string): MarketKey => marketKey('spot', symbol);
 
 /**
  * Drives the pure SpotEngine: feeds it live trades in receive order, runs arrivals at their
@@ -136,21 +130,18 @@ export class EngineRunner {
   private readonly d: RunnerDeps;
   private readonly newId: (prefix: string) => string;
   private readonly timers = new Set<() => void>();
+  /** The market and symbol of every feed the runner watches. */
+  private readonly keys: MarketKey[];
   /**
-   * Per symbol, the open gap: since when (and why) the data is not live. Each is saved in
-   * open_gaps as it opens, and seeded at startup from that table and last_alive.
+   * Per market and symbol, the open gap (since when, and why, the data is not live) and the last
+   * fresh moment. Each gap is saved in open_gaps as it opens, and seeded at startup from that
+   * table and last_alive.
    */
-  private readonly gaps = new Map<string, Gap>();
-  /**
-   * Per symbol, the last fresh moment: when a health poll or a processed trade last found its
-   * data fresh, or the receive time of the last frame by then if earlier. A silence the feed
-   * still tolerated is not counted as fresh once it turns out longer.
-   */
-  private readonly lastFreshAt = new Map<string, number>();
+  private readonly gaps: FeedGaps;
   /** The last health poll, or the moment a pause was handled. */
   private lastPollAt: number | null = null;
-  /** Per symbol, the pending orders re-sent after a restart: they wait for its first fresh data. */
-  private readonly awaitingFresh = new Map<string, Set<string>>();
+  /** Per market and symbol, the pending orders re-sent after a restart: they wait for its first fresh data. */
+  private readonly awaitingFresh = new Map<MarketKey, Set<string>>();
   /** Integrity violations of the loaded state; when set, nothing trades. */
   private readonly violations: string[];
   private dead = false;
@@ -164,6 +155,14 @@ export class EngineRunner {
     this.d = deps;
     this.newId = deps.newId ?? ((prefix) => `${prefix}-${randomUUID()}`);
     this.cursorSavedAt = deps.now();
+    this.keys = deps.symbols.map(spotKey);
+    this.gaps = new FeedGaps({
+      db: deps.db,
+      seasonId: deps.seasonId,
+      now: deps.now,
+      lastFrameAt: () => deps.health.lastFrameAt(),
+      cursorOf: (key) => this.cursorOf(key),
+    });
 
     this.violations = checkInvariants(deps.sim);
     for (const v of this.violations) deps.logger.error(`Account state failed integrity check: ${v}`);
@@ -325,7 +324,7 @@ export class EngineRunner {
   private saveOnStop(): void {
     if (this.dead) return;
     const now = this.d.now();
-    const gaps = [...this.gaps.keys()].flatMap((symbol) => this.takeGap(symbol, now));
+    const gaps = this.gaps.takeAll(now);
     try {
       persist(this.d.db, this.d.seasonId, this.d.sim, [], { feedGaps: gaps, cursor: true });
       this.cursorSavedAt = now;
@@ -460,9 +459,10 @@ export class EngineRunner {
       if (o.type === 'market') {
         events.push(...this.d.sim.spot.rejectRestartedMarket(o.id, ctx));
       } else if (o.arrivesAt !== null) {
-        const ids = this.awaitingFresh.get(o.symbol) ?? new Set<string>();
+        const key = spotKey(o.symbol);
+        const ids = this.awaitingFresh.get(key) ?? new Set<string>();
         ids.add(o.id);
-        this.awaitingFresh.set(o.symbol, ids);
+        this.awaitingFresh.set(key, ids);
       }
     }
     try {
@@ -489,9 +489,9 @@ export class EngineRunner {
     const delays = new Map<string, number>();
     const armed: { id: string; at: number }[] = [];
     const events: EngineEvent[] = [];
-    for (const [symbol, ids] of this.awaitingFresh) {
-      if (!this.d.market.isFresh(symbol)) continue;
-      this.awaitingFresh.delete(symbol);
+    for (const [key, ids] of this.awaitingFresh) {
+      if (!this.d.market.isFresh(splitKey(key).symbol)) continue;
+      this.awaitingFresh.delete(key);
       for (const id of ids) {
         if (state.orders.get(id)?.cancelArrivesAt != null) {
           events.push(...this.d.sim.spot.arriveCancelBeforeResend(id, ctx));
@@ -513,31 +513,23 @@ export class EngineRunner {
   // ---- feed gaps ----
 
   /**
-   * Startup: each symbol's gap is open from the earlier of its saved open gap (left by a crash)
-   * and the last heartbeat (the server may have been down since then), with the saved gap's
-   * reason, else Server offline. The seeds are saved in one transaction before the first
-   * heartbeat, so a crash before the data is fresh again still keeps the earliest start.
+   * Startup: each watched market and symbol has a gap open from the earlier of its saved open gap
+   * (left by a crash) and the last heartbeat (the server may have been down since then), saved
+   * before the first heartbeat (FeedGaps.seed).
    */
   private seedGaps(): void {
-    const now = this.d.now();
-    const alive = lastAlive(this.d.db);
-    const saved = new Map(loadOpenGaps(this.d.db, this.d.seasonId).map((g) => [g.symbol, g]));
-    for (const symbol of this.d.symbols) {
-      const row = saved.get(symbol);
-      if (row === undefined && alive === null) continue;
-      const at = Math.min(row?.startedAt ?? Infinity, alive ?? Infinity, now);
-      this.gaps.set(symbol, { at, reason: row?.reason ?? OFFLINE_REASON, pollOnly: false });
-    }
-    if (this.gaps.size === 0) return;
     try {
-      this.d.db.transaction(() => {
-        for (const [symbol, g] of this.gaps) {
-          openGap(this.d.db, this.d.seasonId, { market: 'spot', symbol, startedAt: g.at, reason: g.reason });
-        }
-      })();
+      this.gaps.seed(this.keys, lastAlive(this.d.db));
     } catch (e) {
       this.die('persist failed', e);
     }
+  }
+
+  /** The engine's trade cursor for a watched key (only spot feeds are watched). */
+  private cursorOf(key: MarketKey): number | null {
+    const { market, symbol } = splitKey(key);
+    if (market !== 'spot') throw new Error(`No engine trades ${key}`);
+    return this.d.sim.spot.state.lastTradeId[symbol] ?? null;
   }
 
   /**
@@ -553,9 +545,10 @@ export class EngineRunner {
     const paused = this.checkStall(now);
     this.lastPollAt = now;
     let changed = false;
-    for (const symbol of paused ? [] : this.d.symbols) {
-      if (!this.d.market.isFresh(symbol)) changed = this.startGap(symbol, this.staleReason(symbol)) || changed;
-      else changed = this.freshAtPoll(symbol, now) || changed;
+    for (const key of paused ? [] : this.keys) {
+      const { symbol } = splitKey(key);
+      if (!this.d.market.isFresh(symbol)) changed = this.startGap(key, this.staleReason(symbol)) || changed;
+      else changed = this.freshAtPoll(key, now) || changed;
     }
     if (changed) this.broadcastHealth();
     this.rearmWhenFresh();
@@ -575,10 +568,8 @@ export class EngineRunner {
     if (!this.started || since === null || now - since <= STALL_MS) return false;
     this.lastPollAt = now;
     this.d.health.markStalled(now);
-    for (const symbol of this.d.symbols) {
-      const open = this.gaps.get(symbol);
-      if (open) open.pollOnly = true;
-      else this.startGap(symbol, PAUSED_REASON, since);
+    for (const key of this.keys) {
+      if (!this.gaps.markPollOnly(key)) this.startGap(key, PAUSED_REASON, since);
     }
     this.broadcastHealth();
     return true;
@@ -591,13 +582,14 @@ export class EngineRunner {
    */
   private noteStale(symbol: string): void {
     this.checkStall(this.d.now());
-    if (!this.d.market.isFresh(symbol) && this.startGap(symbol, this.staleReason(symbol))) this.broadcastHealth();
+    if (!this.d.market.isFresh(symbol) && this.startGap(spotKey(symbol), this.staleReason(symbol))) this.broadcastHealth();
   }
 
-  /** A health poll found the symbol fresh. Returns whether its gap closed. */
-  private freshAtPoll(symbol: string, now: number): boolean {
-    this.markFresh(symbol, now);
-    const gaps = this.takeGap(symbol, now);
+  /** A health poll found the key's data fresh. Returns whether its gap closed. */
+  private freshAtPoll(key: MarketKey, now: number): boolean {
+    const { symbol } = splitKey(key);
+    this.gaps.markFresh(key, now);
+    const gaps = this.gaps.take(key, now);
     if (this.violations.length > 0) {
       if (gaps.length > 0) this.commit([], gaps);
     } else if (gaps.length > 0 || this.d.sim.spot.hasDeferredWork(symbol, this.ctx())) {
@@ -615,43 +607,25 @@ export class EngineRunner {
    */
   private onTrade(symbol: string, trade: AggTrade): void {
     const now = this.d.now();
+    const key = spotKey(symbol);
     this.checkStall(now);
     const fresh = this.d.market.isFresh(symbol);
-    const opened = !fresh && this.startGap(symbol, this.staleReason(symbol));
-    const gaps = fresh && this.gaps.get(symbol)?.pollOnly !== true ? this.takeGap(symbol, now) : [];
+    const opened = !fresh && this.startGap(key, this.staleReason(symbol));
+    const gaps = fresh && !this.gaps.isPollOnly(key) ? this.gaps.take(key, now) : [];
     this.apply((ctx) => this.d.sim.spot.onTrade(symbol, trade, ctx), gaps);
-    if (fresh) this.markFresh(symbol, now);
+    if (fresh) this.gaps.markFresh(key, now);
     if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${symbol}` });
     if (opened || gaps.length > 0) this.broadcastHealth();
   }
 
-  private markFresh(symbol: string, now: number): void {
-    this.lastFreshAt.set(symbol, Math.min(now, this.d.health.lastFrameAt()));
-  }
-
   /**
-   * Opens the symbol's gap, saved at once so a crash keeps its start: the last fresh moment, or
-   * the poll before a pause if that is earlier, or the last frame received if that is earlier
-   * still (after a silent stretch nothing after that frame is known), and never after now (the
-   * wall clock can step back). An open gap is kept. A symbol not fresh since startup has none to
-   * open: the time before is its startup gap. Returns whether it opened.
+   * Opens the key's gap (FeedGaps.start: from its last fresh moment, saved at once with the trade
+   * cursor) and tells the owner. Returns whether it opened.
    */
-  private startGap(symbol: string, reason: string, pausedSince: number | null = null): boolean {
-    const lastFresh = this.lastFreshAt.get(symbol);
-    if (this.gaps.has(symbol) || lastFresh === undefined) return false;
-    const at = Math.min(pausedSince ?? Infinity, lastFresh, this.d.health.lastFrameAt(), this.d.now());
-    openGap(this.d.db, this.d.seasonId, { market: 'spot', symbol, startedAt: at, reason });
-    this.gaps.set(symbol, { at, reason, pollOnly: pausedSince !== null });
-    this.notice({ kind: 'feed_gap', level: 'warn', text: `Live data interrupted for ${symbol}: ${reason}` });
+  private startGap(key: MarketKey, reason: string, pausedSince: number | null = null): boolean {
+    if (!this.gaps.start(key, reason, pausedSince)) return false;
+    this.notice({ kind: 'feed_gap', level: 'warn', text: `Live data interrupted for ${splitKey(key).symbol}: ${reason}` });
     return true;
-  }
-
-  /** The symbol's open gap as a feed_gap ending at `now` (none if no gap is open); the caller persists it. */
-  private takeGap(symbol: string, now: number): FeedGap[] {
-    const gap = this.gaps.get(symbol);
-    if (!gap) return [];
-    this.gaps.delete(symbol);
-    return [{ symbol, market: 'spot', startedAt: gap.at, endedAt: now, reason: gap.reason }];
   }
 
   private staleReason(symbol: string): string {

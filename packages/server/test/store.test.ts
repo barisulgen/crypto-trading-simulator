@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { D, Decimal, SimEngine, SpotEngine, deposit, emptyLedger, emptySpotState } from '@sim/engine';
-import type { AggTrade, EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest, SpotState } from '@sim/engine';
+import type { AggTrade, EngineCtx, EngineEvent, Market, SpotOrder, SpotOrderRequest, SpotState } from '@sim/engine';
 import { FakeMarket, seedCoins, testCtx } from '../../engine/test/fixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
@@ -85,16 +85,16 @@ function partialFillScenario() {
 }
 
 describe('openDb', () => {
-  it('applies migrations once: user_version 2, reopening a file db raises no error', () => {
+  it('applies migrations once: user_version 3, reopening a file db raises no error', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(2);
+    expect(db.pragma('user_version', { simple: true })).toBe(3);
     expect(db.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toEqual({ value: '1' });
     expect(currentSeasonId(db)).toBe(1);
     expect(currentSeasonId(db)).toBe(1);
     expect(db.prepare('SELECT name FROM seasons').all()).toEqual([{ name: 'Season 1' }]);
   });
 
-  it('a second open of the same file keeps version 2 and its data', async () => {
+  it('a second open of the same file keeps version 3 and its data', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -106,7 +106,7 @@ describe('openDb', () => {
       touchAlive(a, 123);
       a.close();
       const b = openDb(file);
-      expect(b.pragma('user_version', { simple: true })).toBe(2);
+      expect(b.pragma('user_version', { simple: true })).toBe(3);
       expect(b.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get()).toEqual({ value: '123' });
       touchAlive(b, 456);
       expect(b.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get()).toEqual({ value: '456' });
@@ -116,13 +116,13 @@ describe('openDb', () => {
     }
   });
 
-  it('migration 002 applies to a Phase 1 database (user_version 1) without touching existing rows', async () => {
+  it('migrations 002 and 003 apply to a Phase 1 database (user_version 1) without touching existing rows', async () => {
     const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
     const { default: Database } = await import('better-sqlite3');
     const dir = mkdtempSync(join(tmpdir(), 'sim-db-'));
-    const tables = ['meta', 'seasons', 'events', 'orders', 'balances', 'account', 'trade_cursor'];
+    const tables = ['meta', 'seasons', 'events', 'orders', 'balances', 'account'];
     const dump = (db: Db) => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
     let db: Db | null = null;
     try {
@@ -146,9 +146,60 @@ describe('openDb', () => {
       v1.close();
 
       db = openDb(file);
-      expect(db.pragma('user_version', { simple: true })).toBe(2);
+      expect(db.pragma('user_version', { simple: true })).toBe(3);
       expect(dump(db)).toEqual(before);
+      expect(db.prepare('SELECT * FROM trade_cursor').all()).toEqual([
+        { season_id: 1, market: 'spot', symbol: 'BTCUSDT', last_trade_id: 42 },
+      ]);
       expect(db.prepare('SELECT * FROM open_gaps').all()).toEqual([]);
+    } finally {
+      db?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('migration 003 on a database at user_version 2: cursor rows become spot rows, open gaps and test_data stay', async () => {
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { default: Database } = await import('better-sqlite3');
+    const dir = mkdtempSync(join(tmpdir(), 'sim-db-'));
+    let db: Db | null = null;
+    try {
+      const file = join(dir, 'sim.sqlite');
+      // A database with 001 and 002 applied, with data in it.
+      const v2 = new Database(file);
+      for (const m of ['001_init.sql', '002_open_gaps.sql']) {
+        v2.exec(readFileSync(new URL(`../src/db/migrations/${m}`, import.meta.url), 'utf8'));
+      }
+      v2.pragma('user_version = 2');
+      v2.exec(`
+        INSERT INTO meta (key, value) VALUES ('test_data', '1'), ('last_alive', '777');
+        INSERT INTO seasons (name, started_at) VALUES ('Season 1', 5);
+        INSERT INTO trade_cursor (season_id, symbol, last_trade_id) VALUES (1, 'BTCUSDT', 42), (1, 'ETHUSDT', 7), (2, 'BTCUSDT', 9);
+        INSERT INTO open_gaps (season_id, market, symbol, started_at, reason) VALUES (1, 'spot', 'BTCUSDT', 700, 'Disconnected');
+      `);
+      v2.close();
+
+      db = openDb(file);
+      expect(db.pragma('user_version', { simple: true })).toBe(3);
+      expect(db.prepare('SELECT * FROM trade_cursor ORDER BY season_id, symbol').all()).toEqual([
+        { season_id: 1, market: 'spot', symbol: 'BTCUSDT', last_trade_id: 42 },
+        { season_id: 1, market: 'spot', symbol: 'ETHUSDT', last_trade_id: 7 },
+        { season_id: 2, market: 'spot', symbol: 'BTCUSDT', last_trade_id: 9 },
+      ]);
+      expect(db.prepare('SELECT key, value FROM meta ORDER BY key').all()).toEqual([
+        { key: 'last_alive', value: '777' },
+        { key: 'test_data', value: '1' },
+      ]);
+      // The gap open before the upgrade does not know its cursor.
+      expect(loadOpenGaps(db, 1)).toEqual([
+        { market: 'spot', symbol: 'BTCUSDT', startedAt: 700, reason: 'Disconnected', lastTradeIdBefore: null },
+      ]);
+      // The same symbol on another market is a separate cursor.
+      db.prepare("INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (1, 'perp', 'BTCUSDT', 5)").run();
+      const state = loadSpotState(db, 1, loadLedger(db, 1, ASSETS));
+      expect(state.lastTradeId).toEqual({ BTCUSDT: 42, ETHUSDT: 7 });
     } finally {
       db?.close();
       rmSync(dir, { recursive: true, force: true });
@@ -310,15 +361,38 @@ describe('persist and loadSpotState', () => {
     expect(checkInvariants(simOf(new SpotEngine(reloaded)))).toEqual([]);
   });
 
-  it('feed gaps become feed_gap events with the gap payload', () => {
+  it('feed gaps become feed_gap events with the gap payload, the trade cursor at the gap start included', () => {
     const { engine, db, seasonId } = setup();
     persist(db, seasonId, simOf(engine), [], {
-      feedGaps: [{ symbol: 'BTCUSDT', market: 'spot', startedAt: 10, endedAt: 20, reason: 'resync' }],
+      feedGaps: [
+        { symbol: 'BTCUSDT', market: 'spot', startedAt: 10, endedAt: 20, reason: 'resync', lastTradeIdBefore: 41 },
+        { symbol: 'ETHUSDT', market: 'spot', startedAt: 12, endedAt: 21, reason: 'resync', lastTradeIdBefore: null },
+      ],
     });
     const { rows } = queryHistory(db, { seasonId, limit: 10 });
     expect(rows).toEqual([
-      { id: 1, time: 20, type: 'feed_gap', symbol: 'BTCUSDT', market: 'spot', payload: { startedAt: 10, endedAt: 20, reason: 'resync' } },
+      {
+        id: 2, time: 21, type: 'feed_gap', symbol: 'ETHUSDT', market: 'spot',
+        payload: { startedAt: 12, endedAt: 21, reason: 'resync', lastTradeIdBefore: null },
+      },
+      {
+        id: 1, time: 20, type: 'feed_gap', symbol: 'BTCUSDT', market: 'spot',
+        payload: { startedAt: 10, endedAt: 20, reason: 'resync', lastTradeIdBefore: 41 },
+      },
     ]);
+  });
+
+  it('the spot trade cursor is saved and loaded as market spot; a perp cursor of the same symbol is left alone', () => {
+    const { engine, ctx, db, seasonId } = setup();
+    db.prepare("INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (?, 'perp', 'BTCUSDT', 999)").run(seasonId);
+    engine.onTrade('BTCUSDT', trade('99.40'), ctx);
+    const id = engine.state.lastTradeId.BTCUSDT!;
+    persist(db, seasonId, simOf(engine), [], { cursor: true });
+    expect(db.prepare('SELECT market, symbol, last_trade_id AS id FROM trade_cursor ORDER BY market').all()).toEqual([
+      { market: 'perp', symbol: 'BTCUSDT', id: 999 },
+      { market: 'spot', symbol: 'BTCUSDT', id },
+    ]);
+    expect(loadSpotState(db, seasonId, loadLedger(db, seasonId, ASSETS)).lastTradeId).toEqual({ BTCUSDT: id });
   });
 
   it('a failure midway rolls back everything from that call', () => {
@@ -343,7 +417,13 @@ describe('persist and loadSpotState', () => {
 });
 
 describe('open gaps', () => {
-  const gap = (symbol: string, startedAt: number, reason: string) => ({ market: 'spot' as const, symbol, startedAt, reason });
+  const gap = (symbol: string, startedAt: number, reason: string, lastTradeIdBefore: number | null = null, market: Market = 'spot') => ({
+    market,
+    symbol,
+    startedAt,
+    reason,
+    lastTradeIdBefore,
+  });
 
   it('openGap keeps the earliest start (with its reason) per symbol; loadOpenGaps reads one season', () => {
     const { db, seasonId } = setup();
@@ -361,7 +441,7 @@ describe('open gaps', () => {
     const { engine, db, seasonId } = setup();
     openGap(db, seasonId, gap('BTCUSDT', 10, 'Disconnected'));
     openGap(db, seasonId, gap('ETHUSDT', 15, 'Disconnected'));
-    const feedGaps = [{ symbol: 'BTCUSDT', market: 'spot' as const, startedAt: 10, endedAt: 20, reason: 'Disconnected' }];
+    const feedGaps = [{ symbol: 'BTCUSDT', market: 'spot' as const, startedAt: 10, endedAt: 20, reason: 'Disconnected', lastTradeIdBefore: null }];
     const gapEvents = () => db.prepare("SELECT count(*) AS n FROM events WHERE type = 'feed_gap'").get();
 
     // The event insert fails: the row stays.
@@ -379,6 +459,27 @@ describe('open gaps', () => {
     persist(db, seasonId, simOf(engine), [], { feedGaps });
     expect(gapEvents()).toEqual({ n: 1 });
     expect(loadOpenGaps(db, seasonId)).toEqual([gap('ETHUSDT', 15, 'Disconnected')]);
+  });
+
+  it('gaps are kept per market: a perp gap of the same symbol is separate, and recording the spot one leaves it open', () => {
+    const { engine, db, seasonId } = setup();
+    openGap(db, seasonId, gap('BTCUSDT', 2000, 'Disconnected', 41));
+    openGap(db, seasonId, gap('BTCUSDT', 1500, 'Mark price stale', 7, 'perp'));
+    openGap(db, seasonId, gap('BTCUSDT', 2500, 'Feed lagging by 6.0s', 50)); // later: the spot gap stays
+    expect(loadOpenGaps(db, seasonId)).toEqual([
+      gap('BTCUSDT', 1500, 'Mark price stale', 7, 'perp'),
+      gap('BTCUSDT', 2000, 'Disconnected', 41),
+    ]);
+    openGap(db, seasonId, gap('BTCUSDT', 1000, 'Server offline', 40)); // earlier: it starts there, with its cursor
+    expect(loadOpenGaps(db, seasonId)).toEqual([
+      gap('BTCUSDT', 1500, 'Mark price stale', 7, 'perp'),
+      gap('BTCUSDT', 1000, 'Server offline', 40),
+    ]);
+
+    persist(db, seasonId, simOf(engine), [], {
+      feedGaps: [{ market: 'spot', symbol: 'BTCUSDT', startedAt: 1000, endedAt: 3000, reason: 'Server offline', lastTradeIdBefore: 40 }],
+    });
+    expect(loadOpenGaps(db, seasonId)).toEqual([gap('BTCUSDT', 1500, 'Mark price stale', 7, 'perp')]);
   });
 });
 

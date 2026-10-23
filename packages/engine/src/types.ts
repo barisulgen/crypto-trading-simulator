@@ -2,6 +2,8 @@ import type { Decimal } from './decimal.ts';
 
 export type Side = 'buy' | 'sell';
 export type Wallet = 'spot' | 'leverage';
+/** A Binance market. Perpetuals reuse the spot symbol names, so every per-symbol key also names the market. */
+export type Market = 'spot' | 'perp';
 export type OrderType = 'market' | 'limit' | 'post_only' | 'stop_loss' | 'take_profit';
 
 export interface SpotRules {

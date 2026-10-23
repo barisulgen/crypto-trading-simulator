@@ -128,7 +128,7 @@ describe('after a stall shorter than the silence limit', () => {
     t.clock.advance(1000); // the next health poll sees fresh data
     expect(t.status()).toBe('filled');
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /)]);
-    expect(gaps(t.db)).toEqual([{ startedAt: lastPoll, endedAt: t.clock.now, reason: PAUSED }]);
+    expect(gaps(t.db)).toEqual([{ startedAt: lastPoll, endedAt: t.clock.now, reason: PAUSED, lastTradeIdBefore: 2 }]);
     expect(openGaps(t.db)).toEqual([]);
   });
 
