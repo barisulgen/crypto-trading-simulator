@@ -612,8 +612,12 @@ export class EngineRunner {
     this.d.onBroadcast({ type: 'health', health: this.d.market.healthSnapshot() });
   }
 
-  /** Every minute while data is fresh; skipped when any held coin's price is stale or missing. */
+  /**
+   * Every minute while data is fresh; skipped when any held coin's price is stale or missing, and
+   * when it is the first to run after a pause (the books are from before it).
+   */
   private snapshotEquity(): void {
+    if (this.checkStall(this.d.now())) return;
     const value = valueAccount(this.d.engine.state, (s) => this.d.market.bestBid(s), this.d.symbols);
     if (value.coins.some((c) => !c.fresh)) return;
     insertEquitySnapshot(this.d.db, this.d.seasonId, value, this.d.now());

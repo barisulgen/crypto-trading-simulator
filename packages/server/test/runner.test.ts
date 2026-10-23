@@ -574,6 +574,26 @@ describe('EngineRunner', () => {
     t.clock.advance(60_000);
     expect(snaps()).toHaveLength(1);
   });
+
+  it('the first equity snapshot after a sleep is skipped: it would price the coins on the book from before the pause', () => {
+    const t = setup();
+    t.runner.start();
+    withBtc(t);
+    t.clock.advance(59_000 - 300); // fresh polls every second, the last at T0 + 59 s
+    const snaps = () => t.db.prepare('SELECT time FROM equity_snapshots').all() as { time: number }[];
+    expect(snaps()).toEqual([]);
+    t.clock.now += 28_800_000; // asleep: no timer runs
+    t.clock.advance(0); // the overdue snapshot runs before the overdue poll
+    expect(snaps()).toEqual([]);
+    expect(t.health.stalls).toEqual([T0 + 59_000 + 28_800_000]);
+    // The pause is recorded from the last poll before it (here closed at once by the overdue poll,
+    // as this test market's data is fresh).
+    expect(t.gaps()).toEqual([
+      { startedAt: T0 + 59_000, endedAt: T0 + 59_000 + 28_800_000, reason: 'Server paused (sleep or freeze)' },
+    ]);
+    t.clock.advance(60_000); // the data is fresh: snapshots resume
+    expect(snaps()).toEqual([{ time: T0 + 59_000 + 28_800_000 + 60_000 }]);
+  });
 });
 
 describe('feed gaps', () => {
