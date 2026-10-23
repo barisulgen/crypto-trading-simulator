@@ -213,12 +213,20 @@ export function arriveTriggered(s: SpotState, order: SpotOrder, ctx: EngineCtx):
   return executeTriggered(s, order, ctx);
 }
 
+/** A leg of a pair attached to a buy that waits for data (fresh book, last price) to arm. */
+export function waitingToArm(o: SpotOrder): boolean {
+  return o.status === 'pending' && o.parentId !== null && o.arrivesAt === null;
+}
+
+/** A triggered order that executes on the next fresh book: deferred by stale data, or past its arrival. */
+export function dueTriggered(o: SpotOrder, now: number): boolean {
+  return o.status === 'triggered' && (o.arrivesAt === null || o.arrivesAt <= now);
+}
+
 /** Arm (or reject) the attached pairs of `symbol` that waited for data (fresh book, last price). */
 export function armWaitingPairs(s: SpotState, symbol: string, ctx: EngineCtx): EngineEvent[] {
   if (!ctx.market.isFresh(symbol)) return [];
-  const waiting = [...s.orders.values()].filter(
-    (o) => o.symbol === symbol && o.status === 'pending' && o.parentId !== null && o.arrivesAt === null,
-  );
+  const waiting = [...s.orders.values()].filter((o) => o.symbol === symbol && waitingToArm(o));
   const events: EngineEvent[] = [];
   for (const { id } of waiting) {
     // Re-read: arriving one leg settles its partner too.
@@ -231,9 +239,7 @@ export function armWaitingPairs(s: SpotState, symbol: string, ctx: EngineCtx): E
 /** Execute every triggered order of `symbol` that is due, deferred ones included. */
 export function executeDue(s: SpotState, symbol: string, ctx: EngineCtx): EngineEvent[] {
   if (!ctx.market.isFresh(symbol)) return [];
-  const due = [...s.orders.values()].filter(
-    (o) => o.symbol === symbol && o.status === 'triggered' && (o.arrivesAt === null || o.arrivesAt <= ctx.now),
-  );
+  const due = [...s.orders.values()].filter((o) => o.symbol === symbol && dueTriggered(o, ctx.now));
   return due.flatMap((o) => executeTriggered(s, o, ctx));
 }
 

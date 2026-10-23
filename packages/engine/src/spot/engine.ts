@@ -43,12 +43,14 @@ import {
   attachOco,
   cancelRequested,
   cancelStop,
+  dueTriggered,
   executeDue,
   expectedNetQty,
   previewStop,
   submitStop,
   triggerStops,
   validateAttachedPair,
+  waitingToArm,
 } from './stops.ts';
 import type { OcoRequest } from './stops.ts';
 import { isStopType } from './triggers.ts';
@@ -190,16 +192,21 @@ export class SpotEngine {
   }
 
   /**
-   * onFresh without activating attached pairs: the caller activates them once for all its events.
-   * A pending order whose own arrival comes no later than its cancel's arrives first, so that
-   * cancel is left to arriveCancel, which runs after the order's arrive().
+   * Whether onFresh has work for `symbol` at `now`: a cancel whose arrival time has passed, an
+   * attached pair waiting for data, or a triggered order that is due (deferred by stale data
+   * included). Reads state only; it does not look at the market.
    */
+  hasDeferredWork(symbol: string, now: number): boolean {
+    for (const o of this.s.orders.values()) {
+      if (o.symbol === symbol && (cancelDue(o, now) || waitingToArm(o) || dueTriggered(o, now))) return true;
+    }
+    return false;
+  }
+
+  /** onFresh without activating attached pairs: the caller activates them once for all its events. */
   private freshWork(symbol: string, ctx: EngineCtx): EngineEvent[] {
     if (!ctx.market.isFresh(symbol)) return [];
-    const arrivesFirst = (o: SpotOrder) => o.status === 'pending' && o.arrivesAt !== null && o.arrivesAt <= o.cancelArrivesAt!;
-    const dueCancels = [...this.s.orders.values()].filter(
-      (o) => o.symbol === symbol && o.cancelArrivesAt !== null && o.cancelArrivesAt <= ctx.now && !arrivesFirst(o),
-    );
+    const dueCancels = [...this.s.orders.values()].filter((o) => o.symbol === symbol && cancelDue(o, ctx.now));
     return [
       ...dueCancels.flatMap((o) => this.deliverCancel(o.id, ctx)),
       ...armWaitingPairs(this.s, symbol, ctx),
@@ -397,6 +404,17 @@ export class SpotEngine {
     }
     return fillOrThin(this.s, order, walk, book, rules, ctx);
   }
+}
+
+/**
+ * The order's cancel has reached the exchange by `now` and onFresh delivers it. A pending order
+ * whose own arrival comes no later than its cancel's arrives first, so that cancel is left to
+ * arriveCancel, which runs after the order's arrive().
+ */
+function cancelDue(o: SpotOrder, now: number): boolean {
+  if (o.cancelArrivesAt === null || o.cancelArrivesAt > now) return false;
+  const arrivesFirst = o.status === 'pending' && o.arrivesAt !== null && o.arrivesAt <= o.cancelArrivesAt;
+  return !arrivesFirst;
 }
 
 /**
