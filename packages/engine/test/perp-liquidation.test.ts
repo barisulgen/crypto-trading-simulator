@@ -7,7 +7,7 @@ import { isolatedModel, nextWarning } from '../src/perp/liquidation.ts';
 import { liquidationPrice } from '../src/perp/math.ts';
 import { emptyPerpState, putOrder } from '../src/perp/state.ts';
 import type { MarginWarning, PerpCtx, PerpEvent, PerpOrder, PerpOrderRequest } from '../src/perp/types.ts';
-import { btcBrackets, FakePerpMarket, perpCtx } from './perpFixtures.ts';
+import { btcBrackets, btcPerpRules, FakePerpMarket, perpCtx } from './perpFixtures.ts';
 
 const NOW = 1_000_000;
 
@@ -164,6 +164,7 @@ describe('liquidation (long 0.1 @80000, margin 396, free 600)', () => {
     expect(s(liq.liquidationFee)).toBe('30');
     expect(s(liq.remainder)).toBe('0');
     expect(s(liq.marginLost)).toBe('396');
+    expect(liq.feeRateKnown).toBe(true);
     expect(liq.cancelledOrderIds).toEqual([]);
 
     const closed = find(r.events, 'position_closed');
@@ -297,11 +298,78 @@ describe('liquidation (long 0.1 @80000, margin 396, free 600)', () => {
     expect(s(lev().free)).toBe('600');
   });
 
+  it('a fee smaller than what is left leaves a remainder, also lost', () => {
+    const { market, ctx, engine, lev } = setup();
+    openLong(engine, ctx);
+    market.setRules('BTCUSDT', { ...btcPerpRules, liquidationFee: D('0.001') });
+    const r = mark(market, engine, '76340', ctx);
+    const liq = find(r.events, 'liquidation');
+    // Fee 0.001 × 7634 = 7.634; remainder 396 − 366 − 7.634.
+    expect(s(liq.tradingLoss)).toBe('366');
+    expect(s(liq.liquidationFee)).toBe('7.634');
+    expect(s(liq.remainder)).toBe('22.366');
+    expect(s(liq.marginLost)).toBe('396');
+    expect(liq.feeRateKnown).toBe(true);
+    const closed = find(r.events, 'position_closed');
+    expect(s(closed.realizedPnl)).toBe('-388.366');
+    // Opening fee 4 plus 7.634: −388.366 − 11.634 = −400, everything put in.
+    expect(s(closed.fees)).toBe('11.634');
+    expect(s(lev().free)).toBe('600');
+    expect(s(lev().locked)).toBe('0');
+  });
+
+  it('rules not loaded: still liquidates, booking all that is left after the trading loss as the fee', () => {
+    const { market, ctx, engine, lev, position } = setup();
+    openLong(engine, ctx);
+    market.clearRules('BTCUSDT');
+    const r = mark(market, engine, '76340', ctx);
+    expect(r.events.map((e) => e.type)).toEqual(['liquidation', 'position_closed']);
+    const liq = find(r.events, 'liquidation');
+    expect(liq.feeRateKnown).toBe(false);
+    expect(s(liq.tradingLoss)).toBe('366');
+    expect(s(liq.liquidationFee)).toBe('30');
+    expect(s(liq.remainder)).toBe('0');
+    expect(s(liq.marginLost)).toBe('396');
+    expect(find(r.events, 'position_closed').reason).toBe('liquidated');
+    expect(position()).toBeUndefined();
+    expect(s(lev().free)).toBe('600');
+  });
+
+  it('tiers not loaded: liquidates once the margin balance is gone, and cannot judge before', () => {
+    const a = setup();
+    openLong(a.engine, a.ctx);
+    a.market.clearBrackets('BTCUSDT');
+    // MB 30 would liquidate with the tiers, but the maintenance margin is unknown.
+    expect(mark(a.market, a.engine, '76340', a.ctx)).toEqual({ events: [], warnings: [] });
+    expect(a.position()).toBeDefined();
+    // MB 0 is at or below any maintenance margin.
+    const r = mark(a.market, a.engine, '76040', a.ctx);
+    expect(r.events.map((e) => e.type)).toEqual(['liquidation', 'position_closed']);
+    const liq = find(r.events, 'liquidation');
+    expect(liq.feeRateKnown).toBe(true);
+    expect(s(liq.tradingLoss)).toBe('396');
+    expect(s(liq.liquidationFee)).toBe('0');
+    expect(s(liq.remainder)).toBe('0');
+    expect(a.position()).toBeUndefined();
+    expect(s(a.lev().free)).toBe('600');
+
+    // Neither tiers nor rules: the same, with the fee rate unknown.
+    const b = setup();
+    openLong(b.engine, b.ctx);
+    b.market.clearBrackets('BTCUSDT');
+    b.market.clearRules('BTCUSDT');
+    const liqB = find(mark(b.market, b.engine, '75000', b.ctx).events, 'liquidation');
+    expect(liqB.feeRateKnown).toBe(false);
+    expect(s(liqB.tradingLoss)).toBe('396');
+    expect(s(liqB.liquidationFee)).toBe('0');
+    expect(s(liqB.remainder)).toBe('0');
+  });
+
   it('a liquidation on one symbol leaves other symbols alone', () => {
     const { market, ctx, engine } = setup();
     openLong(engine, ctx);
     const other = execute(engine, order({ type: 'limit', price: '79900', qty: '0.001' }), ctx);
-    putOrder(engine.state, { ...other, id: 'eth', symbol: 'ETHUSDT', status: 'open' });
+    putOrder(engine.state, { ...other, id: 'eth', symbol: 'ETHUSDT', status: 'open', lockAmount: D(0) });
     mark(market, engine, '76340', ctx);
     expect(engine.state.orders.get('eth')!.status).toBe('open');
   });
@@ -318,6 +386,16 @@ describe('isolatedModel', () => {
     const gone = isolatedModel.evaluate(engine.state, 'BTCUSDT', D('76340'), btcBrackets)!;
     expect(gone.liquidate).toBe(true);
     expect(gone.ratio.gt(1)).toBe(true);
+  });
+
+  it('without tiers: liquidates once the margin balance is at or below 0, null while it is positive', () => {
+    const { ctx, engine } = setup();
+    expect(isolatedModel.evaluate(engine.state, 'BTCUSDT', D('70000'), null)).toBeNull();
+    openLong(engine, ctx);
+    expect(isolatedModel.evaluate(engine.state, 'BTCUSDT', D('76340'), null)).toBeNull();
+    const gone = isolatedModel.evaluate(engine.state, 'BTCUSDT', D('76040'), null)!;
+    expect(gone.liquidate).toBe(true);
+    expect(gone.ratio.toString()).toBe('Infinity');
   });
 });
 

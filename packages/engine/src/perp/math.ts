@@ -122,7 +122,7 @@ export function orderCost(p: {
 
 /**
  * How a liquidated position's margin is spent: first the trading loss at the mark, then the
- * liquidation fee from what is left, and the remainder goes back to the owner.
+ * liquidation fee from what is left. The remainder is lost too: the whole margin always goes.
  */
 export function liquidationSplit(p: {
   margin: Decimal;

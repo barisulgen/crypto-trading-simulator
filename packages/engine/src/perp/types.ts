@@ -244,6 +244,11 @@ export type PerpEvent =
       tradingLoss: Decimal;
       liquidationFee: Decimal;
       remainder: Decimal;
+      /**
+       * False when the symbol's liquidation fee rate was not loaded: everything left after the
+       * trading loss is then booked as the fee, with no remainder. The money lost is the same.
+       */
+      feeRateKnown: boolean;
       /** The live orders on the symbol that the liquidation cancelled. */
       cancelledOrderIds: string[];
     }
