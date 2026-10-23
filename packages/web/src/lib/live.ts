@@ -259,8 +259,21 @@ function clearSilence(): void {
   silenceTimer = null;
 }
 
-/** Forget a socket without waiting for its close event (a dead one may never send it). */
-function detach(ws: WebSocket): void {
+/**
+ * The current socket is gone; it last worked at `workedUntil`. Only a connection that held for a
+ * while resets the backoff: accept-then-drop, or accept-then-silence, keeps doubling.
+ */
+function connectionEnded(workedUntil: number): void {
+  clearSilence();
+  if (openedAt !== null && workedUntil - openedAt >= STABLE_OPEN_MS) retryDelay = RETRY_MIN_MS;
+  openedAt = null;
+}
+
+/**
+ * Forget a socket without waiting for its close event (a dead one may never send it). It last
+ * worked at `workedUntil` (default now).
+ */
+function detach(ws: WebSocket, workedUntil = Date.now()): void {
   ws.onopen = ws.onmessage = ws.onclose = null;
   try {
     ws.close();
@@ -268,16 +281,17 @@ function detach(ws: WebSocket): void {
     // already gone
   }
   if (socket === ws) socket = null;
-  clearSilence();
-  openedAt = null;
+  connectionEnded(workedUntil);
 }
 
 function armSilence(ws: WebSocket): void {
   clearSilence();
+  const heardAt = Date.now();
   silenceTimer = setTimeout(() => {
     silenceTimer = null;
     if (socket !== ws) return;
-    detach(ws);
+    // It last worked when it last spoke (or opened).
+    detach(ws, heardAt);
     useLive.setState({ conn: 'down' });
     scheduleReconnect();
   }, SILENT_MS);
@@ -331,10 +345,7 @@ function connect(): void {
   };
   ws.onclose = () => {
     if (socket === ws) socket = null;
-    clearSilence();
-    // Only a connection that held for a while resets the backoff: accept-then-drop keeps doubling.
-    if (openedAt !== null && Date.now() - openedAt >= STABLE_OPEN_MS) retryDelay = RETRY_MIN_MS;
-    openedAt = null;
+    connectionEnded(Date.now());
     useLive.setState({ conn: 'down' });
     if (opened) return scheduleReconnect();
     void needsLogin().then((login) => {

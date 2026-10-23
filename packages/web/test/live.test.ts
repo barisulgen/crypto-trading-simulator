@@ -229,6 +229,41 @@ describe('live connection', () => {
     expect(FakeSocket.all).toHaveLength(2);
   });
 
+  it('a connection that held for a while and then went silent reconnects after the shortest delay', async () => {
+    const { startLive, useLive } = await freshLive(() => metaWith(['BTCUSDT', 'DOGEUSDT']));
+    startLive();
+    const first = FakeSocket.all[0]!;
+    first.open();
+    first.onclose?.(); // accepted, then dropped at once: the backoff doubles to 2 s
+    await vi.advanceTimersByTimeAsync(1000);
+    const second = FakeSocket.all[1]!;
+    second.open();
+    for (let t = 0; t < 6000; t += 1000) {
+      await vi.advanceTimersByTimeAsync(1000);
+      second.say({ type: 'tickers', tickers: {} });
+    }
+    await vi.advanceTimersByTimeAsync(5000); // silent: dropped
+    expect(useLive.getState().conn).toBe('down');
+    expect(FakeSocket.all).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(FakeSocket.all).toHaveLength(3);
+  });
+
+  it('a connection dropped for silence before it held keeps the backoff growing', async () => {
+    const { startLive } = await freshLive(() => metaWith(['BTCUSDT', 'DOGEUSDT']));
+    startLive();
+    const first = FakeSocket.all[0]!;
+    first.open();
+    first.onclose?.(); // the backoff doubles to 2 s
+    await vi.advanceTimersByTimeAsync(1000);
+    FakeSocket.all[1]!.open();
+    await vi.advanceTimersByTimeAsync(5000); // silent from the start: dropped after 5 s, before it held
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(FakeSocket.all).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeSocket.all).toHaveLength(3);
+  });
+
   it('a message resets the silence timer', async () => {
     const { startLive, useLive } = await freshLive(() => metaWith(['BTCUSDT', 'DOGEUSDT']));
     startLive();
