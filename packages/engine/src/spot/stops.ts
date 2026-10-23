@@ -32,7 +32,7 @@ import {
   takerPreview,
 } from './orders.ts';
 import type { RequestFields } from './orders.ts';
-import { freeOf, lockFunds, releaseFunds } from './state.ts';
+import { freeOf, lockFunds, putOrder, releaseFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import { isStopType, isTriggered } from './triggers.ts';
 import type { StopType } from './triggers.ts';
@@ -112,7 +112,7 @@ export function submitStop(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx):
   const plan = planStop(s, req, ctx);
   const order = newOrder(req, plan.rules, plan.fields, ctx);
   if (plan.reason !== null) return rejectOrder(s, order, plan.reason, ctx);
-  return placePending(s, order, plan.lockAmount!, bestPrice(ctx.market.book(req.symbol), req.side), ctx);
+  return placePending(s, order, plan.lockAmount!, ctx.market.best(req.symbol, req.side), ctx);
 }
 
 /** Estimate: the current book walked as if the order triggered now, taker fee. */
@@ -135,12 +135,12 @@ export function previewStop(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx)
 export function arriveStop(s: SpotState, order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
   const legs = order.ocoGroupId ? pairLegs(s, order.ocoGroupId).filter((l) => l.status === 'pending') : [order];
   if (order.parentId !== null && !canArmNow(order.symbol, ctx)) {
-    for (const l of legs) s.orders.set(l.id, { ...l, arrivesAt: null });
+    for (const l of legs) putOrder(s, { ...l, arrivesAt: null });
     return [];
   }
   const reason = armReason(legs, ctx);
   if (reason !== null) return legs.flatMap((l) => rejectPending(s, l, reason, ctx));
-  for (const l of legs) s.orders.set(l.id, { ...l, status: 'open' });
+  for (const l of legs) putOrder(s, { ...l, status: 'open' });
   return [];
 }
 
@@ -163,16 +163,20 @@ function armReason(legs: SpotOrder[], ctx: EngineCtx): string | null {
 
 // ---- trigger and execution ----
 
-/** Trigger the armed stops of `symbol` that this trade's price reached. Paused while stale. */
+/**
+ * Trigger the armed stops of `symbol` that this trade's price reached. Paused while stale. The
+ * book is copied only when a stop triggers, once for all the stops this trade reaches.
+ */
 export function triggerStops(s: SpotState, symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
   if (!ctx.market.isFresh(symbol)) return [];
-  const book = ctx.market.book(symbol);
+  let book: BookSnapshot | null = null;
   const events: EngineEvent[] = [];
   for (const { id } of [...s.orders.values()]) {
     // Re-read: an earlier trigger in this loop may have cancelled this order as a pair partner.
     const o = s.orders.get(id)!;
     if (o.symbol !== symbol || o.status !== 'open' || !isStopType(o.type)) continue;
     if (!isTriggered(o.type, o.side, o.triggerPrice!, trade.price)) continue;
+    book ??= ctx.market.book(symbol);
     events.push(...trigger(s, o, trade.price, book, ctx));
   }
   return events;
@@ -194,7 +198,7 @@ function trigger(s: SpotState, order: SpotOrder, last: Decimal, book: BookSnapsh
     bestAtSubmit: bestPrice(book, order.side),
     lockAmount,
   };
-  s.orders.set(triggered.id, triggered);
+  putOrder(s, triggered);
   const events: EngineEvent[] = [{ type: 'order_triggered', time: ctx.now, order: triggered, lastPrice: last }];
   for (const p of partners) events.push(cancelLeg(s, p, 'oco', ctx));
   return events;
@@ -207,7 +211,7 @@ function trigger(s: SpotState, order: SpotOrder, last: Decimal, book: BookSnapsh
 export function arriveTriggered(s: SpotState, order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
   if (order.arrivesAt === null || ctx.now < order.arrivesAt) return [];
   if (!ctx.market.isFresh(order.symbol)) {
-    s.orders.set(order.id, { ...order, arrivesAt: null });
+    putOrder(s, { ...order, arrivesAt: null });
     return [];
   }
   return executeTriggered(s, order, ctx);
@@ -293,7 +297,7 @@ export function cancelStop(s: SpotState, order: SpotOrder, ctx: EngineCtx): Engi
 /** Record the leg as cancelled with no lock; the caller has released or moved its lock. */
 function cancelLeg(s: SpotState, leg: SpotOrder, reason: CancelReason, ctx: EngineCtx): EngineEvent {
   const cancelled: SpotOrder = { ...leg, status: 'cancelled', lockAmount: D(0) };
-  s.orders.set(cancelled.id, cancelled);
+  putOrder(s, cancelled);
   // A dollar-sized buy stop reports the coins its dollars buy at the trigger.
   const qty = leg.qty ?? floorToStep(leg.quoteQty!.div(leg.triggerPrice!), ctx.market.rules(leg.symbol).stepSize);
   return { type: 'order_cancelled', time: ctx.now, order: cancelled, reason, cancelledQty: qty };
@@ -381,13 +385,13 @@ function placePair(
   const sent = {
     status: 'pending' as const,
     arrivesAt: ctx.market.isFresh(symbol) ? ctx.now + arrivalDelay(ctx) : null,
-    bestAtSubmit: bestPrice(ctx.market.book(symbol), 'sell'),
+    bestAtSubmit: ctx.market.best(symbol, 'sell'),
   };
   return [
     { ...sl, ...sent, lockAmount: qty },
     { ...tp, ...sent },
   ].map((o): EngineEvent => {
-    s.orders.set(o.id, o);
+    putOrder(s, o);
     return { type: 'order_placed', time: ctx.now, order: o };
   });
 }

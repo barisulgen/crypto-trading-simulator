@@ -1,4 +1,4 @@
-import { D, Decimal, emptyLedger, emptySpotState } from '@sim/engine';
+import { D, Decimal, emptyLedger, emptySpotState, evictTerminal, takeDirty } from '@sim/engine';
 import type {
   AccountValue,
   Basis,
@@ -153,16 +153,24 @@ function eventSymbolMarket(e: EngineEvent): { symbol: string | null; market: str
 /**
  * Write everything one engine call changed, in a single transaction. Call it after every engine
  * call, even with no events: pending -> open has none, but the order's row must still follow.
+ * Orders written: those changed since the last call (takeDirty) and each one an event names.
  * Each feed gap becomes a feed_gap event and its open_gaps row is deleted in the same transaction.
+ * A call with events, changed orders or gaps also writes the balances, basis, account and trade
+ * cursor; one with none writes nothing but the trade cursor, and that only when `cursor` is set.
+ * Afterwards finished orders leave memory (evictTerminal). Returns whether the cursor was written.
  */
 export function persist(
   db: Db,
   seasonId: number,
   sim: SimEngine,
   events: EngineEvent[],
-  extra: { feedGaps?: FeedGap[] } = {},
-): void {
+  extra: { feedGaps?: FeedGap[]; cursor?: boolean } = {},
+): boolean {
   const state = sim.spot.state;
+  const gaps = extra.feedGaps ?? [];
+  const dirty = takeDirty(state);
+  const changed = events.length > 0 || dirty.length > 0 || gaps.length > 0;
+  if (!changed && !extra.cursor) return false;
   const insEvent = db.prepare(
     'INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, ?, ?, ?, ?)',
   );
@@ -202,7 +210,12 @@ export function persist(
   const writeOrder = (o: SpotOrder, time: number) =>
     upOrder.run(o.id, seasonId, o.symbol, o.status, o.createdAt, time, toJson(o));
 
-  db.transaction(() => {
+  const writeCursor = () => {
+    for (const [symbol, id] of Object.entries(state.lastTradeId)) upCursor.run(seasonId, symbol, id);
+  };
+
+  const write = db.transaction(() => {
+    if (!changed) return writeCursor();
     const touched = new Map<string, { order: SpotOrder; time: number }>();
     for (const e of events) {
       const { symbol, market } = eventSymbolMarket(e);
@@ -222,10 +235,11 @@ export function persist(
       if ('order' in e) touched.set(e.order.id, { order: e.order, time: e.time });
     }
 
-    // Every live order, plus the last snapshot of each order an event names (terminal ones included).
-    // The state's own copy wins when it has one.
-    for (const o of state.orders.values()) {
-      if (NON_TERMINAL.includes(o.status) && !touched.has(o.id)) writeOrder(o, o.createdAt);
+    // Each changed order, plus the last snapshot of each order an event names (terminal ones
+    // included). The state's own copy wins when it has one.
+    for (const id of dirty) {
+      const o = state.orders.get(id);
+      if (o && !touched.has(id)) writeOrder(o, o.createdAt);
     }
     for (const { order, time } of touched.values()) writeOrder(state.orders.get(order.id) ?? order, time);
 
@@ -238,16 +252,30 @@ export function persist(
       upBasis.run(seasonId, asset, str(b.qty), str(b.cost), b.roundTripId, b.openedAt, str(b.tripRealized));
     }
     upAccount.run(seasonId, str(sim.ledger.totalDeposited));
-    for (const [symbol, id] of Object.entries(state.lastTradeId)) upCursor.run(seasonId, symbol, id);
+    writeCursor();
 
-    for (const g of extra.feedGaps ?? []) {
+    for (const g of gaps) {
       insEvent.run(
         seasonId, g.endedAt, 'feed_gap', g.symbol, g.market,
         JSON.stringify({ startedAt: g.startedAt, endedAt: g.endedAt, reason: g.reason }),
       );
       delOpenGap.run(seasonId, g.market, g.symbol);
     }
-  })();
+  });
+  try {
+    write();
+  } catch (e) {
+    // Nothing was written: the orders stay marked for the next call.
+    for (const id of dirty) state.dirty.add(id);
+    throw e;
+  }
+  if (changed) evictTerminal(state);
+  return true;
+}
+
+/** Whether the season has a saved order with this id (finished orders included). */
+export function storedOrderExists(db: Db, seasonId: number, id: string): boolean {
+  return db.prepare('SELECT 1 FROM orders WHERE id = ? AND season_id = ?').get(id, seasonId) !== undefined;
 }
 
 // ---- late cancels ----

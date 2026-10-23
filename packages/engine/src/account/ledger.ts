@@ -1,6 +1,6 @@
 import { D } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
-import type { ActionResult, EngineCtx, Wallet } from '../types.ts';
+import type { ActionResult, Wallet } from '../types.ts';
 
 export interface Balance {
   free: Decimal;

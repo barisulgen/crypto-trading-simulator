@@ -46,6 +46,15 @@ describe('MarketData', () => {
     expect(md.bookTop('BTCUSDT', 1).bids).toHaveLength(1);
   });
 
+  it('best(sym, side) is the best ask for a buy and the best bid for a sell; null for an empty side', () => {
+    const { books, md } = setup();
+    expect(md.best('BTCUSDT', 'buy')).toBeNull();
+    expect(md.best('BTCUSDT', 'sell')).toBeNull();
+    books.get('BTCUSDT')!.applySnapshot({ lastUpdateId: 1, bids: [['100', '1'], ['99', '2']], asks: [['101', '3']] });
+    expect(md.best('BTCUSDT', 'buy')!.toString()).toBe('101');
+    expect(md.best('BTCUSDT', 'sell')!.toString()).toBe('100');
+  });
+
   it('isFresh needs loaded rules and fresh health', async () => {
     const rest: any = {};
     loadRules(rest);

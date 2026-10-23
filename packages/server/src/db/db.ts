@@ -19,6 +19,8 @@ export function openDb(file: string): Db {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
   const db = new Database(file);
   db.pragma('journal_mode = WAL');
+  // Every commit is on disk before it returns: in WAL mode NORMAL could lose the last ones on power loss.
+  db.pragma('synchronous = FULL');
   db.pragma('foreign_keys = ON');
   const current = db.pragma('user_version', { simple: true }) as number;
   const pending = migrationFiles().filter((m) => m.version > current);

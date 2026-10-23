@@ -225,9 +225,8 @@ describe('EngineRunner', () => {
 
     a.clock.advance(60_000);
     const b = setup({ db: a.db, clock: a.clock });
-    const m = b.engine.state.orders.get(market.id)!;
-    expect(m.status).toBe('rejected');
-    expect(m.rejectReason).toBe(RESTART_REASON);
+    expect(b.engine.state.orders.has(market.id)).toBe(false); // finished: saved, then out of memory
+    expect(JSON.parse(b.orderRow(market.id)!.data).rejectReason).toBe(RESTART_REASON);
     expect(RESTART_REASON).toBe('Server restarted before execution');
     expect(b.orderRow(market.id)!.status).toBe('rejected');
     expect(b.eventsOf('order_rejected').map((e) => e.payload.reason)).toEqual(['Server restarted before execution']);
@@ -435,7 +434,7 @@ describe('EngineRunner', () => {
     a.clock.advance(60_000);
     const b = setup({ db: a.db, clock: a.clock }); // not started: recovery alone
     for (const id of [limit.id, pending.id]) {
-      expect(b.engine.state.orders.get(id)!.status).toBe('cancelled');
+      expect(b.engine.state.orders.has(id)).toBe(false); // finished: saved, then out of memory
       expect(b.orderRow(id)!.status).toBe('cancelled');
     }
     expect(b.eventsOf('order_cancelled').map((e) => [e.payload.order.id, e.payload.reason, e.time])).toEqual([
@@ -624,6 +623,51 @@ describe('EngineRunner', () => {
     ]);
     t.clock.advance(60_000); // the data is fresh: snapshots resume
     expect(snaps()).toEqual([{ time: T0 + 59_000 + 28_800_000 + 60_000 }]);
+  });
+  it('trades that change nothing write the trade cursor at most every 5 s; stop() writes the last one', () => {
+    const t = setup();
+    t.runner.start();
+    t.db.exec('CREATE TEMP TABLE cursor_writes (id INTEGER)');
+    for (const op of ['INSERT', 'UPDATE']) {
+      t.db.exec(`CREATE TEMP TRIGGER cursor_${op} AFTER ${op} ON trade_cursor BEGIN INSERT INTO cursor_writes VALUES (NEW.last_trade_id); END`);
+    }
+    const writes = () => (t.db.prepare('SELECT id FROM cursor_writes ORDER BY rowid').all() as { id: number }[]).map((r) => r.id);
+    const cursor = () => (t.db.prepare('SELECT last_trade_id AS id FROM trade_cursor').get() as { id: number } | undefined)?.id;
+
+    let last = trade('99.95');
+    for (let i = 0; i < 100; i++) {
+      last = trade('99.95');
+      t.market.trade('BTCUSDT', last);
+      t.clock.advance(10);
+    }
+    expect(t.engine.state.lastTradeId.BTCUSDT).toBe(last.id);
+    expect(writes().length).toBeLessThanOrEqual(1);
+
+    t.clock.advance(5000);
+    const later = trade('99.95');
+    t.market.trade('BTCUSDT', later);
+    expect(cursor()).toBe(later.id);
+    const before = writes().length;
+    const final = trade('99.95');
+    t.market.trade('BTCUSDT', final);
+    expect(writes()).toHaveLength(before); // within 5 s of the last write
+    t.runner.stop();
+    expect(cursor()).toBe(final.id);
+    expect(t.fatal).toEqual([]);
+  });
+
+  it('a finished order leaves memory once persisted; cancelling it is refused as not open, an unknown id as not found', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    const order = submittedOrder(t.runner.submit(limitBuy('99.50', '1')));
+    t.clock.advance(100);
+    t.market.trade('BTCUSDT', trade('99.00', '5'));
+    expect(t.orderRow(order.id)!.status).toBe('filled');
+    expect(t.engine.state.orders.has(order.id)).toBe(false);
+    expect(t.runner.cancel(order.id)).toEqual({ ok: false, reason: 'Order is not open' });
+    expect(t.runner.cancel('nope')).toEqual({ ok: false, reason: 'Order not found' });
+    expect(t.fatal).toEqual([]);
   });
 });
 

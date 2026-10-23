@@ -430,6 +430,7 @@ describe('quick amount: 100% sell in dollars', () => {
       const market: MarketView = {
         isFresh: () => true,
         book: () => book,
+        best: (_symbol, side) => (side === 'buy' ? book.asks : book.bids)[0]?.price ?? null,
         avgPrice: () => D('81229'),
         lastPrice: () => D('81229'),
         rules: () => rules,

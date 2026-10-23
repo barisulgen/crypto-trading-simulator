@@ -8,6 +8,10 @@ import { liveStack } from './helpers.ts';
 const T0 = 1_700_000_000_000;
 const FREEZE_MS = 20_000;
 
+/** The order as saved (a finished order leaves memory once saved), decimals as strings. */
+const savedOrder = (db: Db, id: string) =>
+  JSON.parse((db.prepare('SELECT data FROM orders WHERE id = ?').get(id) as { data: string }).data) as Record<string, unknown>;
+
 /** The real feed, health, market data, engine and runner (liveStack); 1 BTC bought and a 0.5 BTC sell stop at 99 armed. */
 async function setup() {
   const { clock, ws, market, db, engine, runner, notices, depth, trade, ping } = await liveStack(T0);
@@ -21,7 +25,7 @@ async function setup() {
   clock.advance(100);
   expect(engine.state.orders.get(order.id)!.status).toBe('open');
 
-  const status = () => engine.state.orders.get(order.id)!.status;
+  const status = () => savedOrder(db, order.id).status;
   /**
    * The stop is triggered, then the event loop freezes for ms before its arrival time. With timersFirst
    * the due arrival timer and health poll run first, on old data; without, the buffered
@@ -134,7 +138,7 @@ describe('after a stall shorter than the silence limit', () => {
     const order = submittedOrder(s.runner.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1' }));
     s.clock.now += STALL_MS; // no timer ran meanwhile
     s.clock.advance(0);
-    expect(s.engine.state.orders.get(order.id)).toMatchObject({
+    expect(savedOrder(s.db, order.id)).toMatchObject({
       status: 'rejected',
       rejectReason: 'Live data interrupted for BTCUSDT',
     });

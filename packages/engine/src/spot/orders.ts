@@ -16,7 +16,7 @@ import type {
   SpotRules,
 } from '../types.ts';
 import { assertBasisCovers, recordFill } from './accounting.ts';
-import { credit, lockFunds, releaseFunds, spendFunds } from './state.ts';
+import { credit, lockFunds, putOrder, releaseFunds, spendFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import { isStopType } from './triggers.ts';
 
@@ -142,7 +142,7 @@ export function placePending(
     arrivesAt: ctx.now + arrivalDelay(ctx),
     bestAtSubmit,
   };
-  s.orders.set(pending.id, pending);
+  putOrder(s, pending);
   return [{ type: 'order_placed', time: ctx.now, order: pending }];
 }
 
@@ -155,7 +155,7 @@ export function rejectOrder(
   afterTrigger = false,
 ): EngineEvent[] {
   const rejected: SpotOrder = { ...order, status: 'rejected', rejectReason: reason, lockAmount: D(0) };
-  s.orders.set(rejected.id, rejected);
+  putOrder(s, rejected);
   const event: EngineEvent = { type: 'order_rejected', time: ctx.now, order: rejected, reason };
   return [afterTrigger ? { ...event, afterTrigger } : event];
 }
@@ -344,7 +344,7 @@ export function fillOrThin(
     const cancelledQty = unfilledQty(order, walk, levels[walk.levelsUsed - 1]?.price ?? null, marketStep(rules));
     events.push({ type: 'order_cancelled', time: ctx.now, order: current, reason: 'thin_book', cancelledQty });
   }
-  s.orders.set(current.id, current);
+  putOrder(s, current);
   return events;
 }
 

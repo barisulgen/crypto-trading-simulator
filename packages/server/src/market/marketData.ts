@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { D } from '@sim/engine';
-import type { AggTrade, BookSnapshot, Decimal, MarketView, PriceLevel, SpotRules } from '@sim/engine';
+import type { AggTrade, BookSnapshot, Decimal, MarketView, PriceLevel, Side, SpotRules } from '@sim/engine';
 import type { Logger } from '../log.ts';
 import type { BinanceRest } from '../binance/rest.ts';
 import { parseSpotRules, parseSymbolStatus } from '../binance/parseRules.ts';
@@ -187,6 +187,11 @@ export class MarketData extends EventEmitter implements MarketView {
 
   book(symbol: string): BookSnapshot {
     return this.bookOf(symbol).snapshot();
+  }
+
+  best(symbol: string, side: Side): Decimal | null {
+    const b = this.bookOf(symbol);
+    return (side === 'buy' ? b.bestAsk() : b.bestBid())?.price ?? null;
   }
 
   avgPrice(symbol: string): Decimal | null {

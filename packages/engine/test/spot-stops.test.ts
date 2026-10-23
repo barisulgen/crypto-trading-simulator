@@ -4,6 +4,7 @@ import type { Decimal } from '../src/decimal.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
 import { emptyLedger, deposit } from '../src/account/ledger.ts';
 import { emptySpotState } from '../src/spot/state.ts';
+import { triggerStops } from '../src/spot/stops.ts';
 import { isTriggered } from '../src/spot/triggers.ts';
 import type { AggTrade, EngineCtx, EngineEvent, Fill, SpotOrder, SpotOrderRequest } from '../src/types.ts';
 import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
@@ -1307,5 +1308,37 @@ describe('hasDeferredWork', () => {
     expect(engine.cancel(pending.id, ctx).ok).toBe(true);
     expect(pending.arrivesAt!).toBeLessThanOrEqual(engine.state.orders.get(pending.id)!.cancelArrivesAt!);
     expect(engine.hasDeferredWork('BTCUSDT', when(ctx, ctx.now + 10_000))).toBe(false);
+  });
+});
+
+describe('book reads on a trade', () => {
+  it('triggerStops copies the book only when a stop is reached, and once for every stop one trade reaches', () => {
+    const { market, ctx, engine } = setup();
+    const a = arm(engine, sellStop('99', '0.5'), ctx);
+    const b = arm(engine, sellStop('98', '0.5'), ctx);
+    market.bookCalls = 0;
+    expect(triggerStops(engine.state, 'BTCUSDT', trade('99.50'), ctx)).toEqual([]);
+    expect(market.bookCalls).toBe(0);
+
+    const first = only(triggerStops(engine.state, 'BTCUSDT', trade('99.00'), ctx), 'order_triggered');
+    expect(first.order.id).toBe(a);
+    expect(s(first.order.bestAtSubmit)).toBe('99.9');
+    expect(market.bookCalls).toBe(1);
+
+    const c = arm(engine, sellStop('97', '0.5'), ctx);
+    market.bookCalls = 0;
+    const both = triggerStops(engine.state, 'BTCUSDT', trade('96.00'), ctx);
+    expect(both.map((e) => (e.type === 'order_triggered' ? e.order.id : e.type))).toEqual([b, c]);
+    expect(market.bookCalls).toBe(1);
+  });
+
+  it('a trade with nothing to trigger, fill or execute never copies the book', () => {
+    const { market, ctx, engine } = setup();
+    arm(engine, sellStop('99', '0.5'), ctx);
+    const resting = placed(engine.submit(limit('buy', '99.50', '1'), ctx));
+    arriveNow(engine, resting, ctx);
+    market.bookCalls = 0;
+    expect(engine.onTrade('BTCUSDT', trade('99.60'), ctx)).toEqual([]);
+    expect(market.bookCalls).toBe(0);
   });
 });

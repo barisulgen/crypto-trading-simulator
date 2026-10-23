@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Decimal, RESTART_REASON, arrivalDelay, valueAccount } from '@sim/engine';
+import { Decimal, ORDER_NOT_OPEN, RESTART_REASON, arrivalDelay, putOrder, valueAccount } from '@sim/engine';
 import type {
   AccountValue,
   ActionResult,
@@ -28,6 +28,7 @@ import {
   openGap,
   persist,
   settleLateCancels,
+  storedOrderExists,
   toJson,
   touchAlive,
 } from './db/store.ts';
@@ -46,6 +47,11 @@ const HEALTH_POLL_MS = 1000;
 const STALL_MS = 5000;
 const ALIVE_MS = 10_000;
 const EQUITY_MS = 60_000;
+/**
+ * The trade cursor of calls that change nothing else is saved at most this often (and on stop()).
+ * A call with events, changed orders or a gap saves it in its own transaction.
+ */
+export const CURSOR_FLUSH_MS = 5000;
 
 /** An action the runner will not perform in its current state (integrity failure, stopped after an error). */
 export class RefusedError extends Error {
@@ -146,11 +152,14 @@ export class EngineRunner {
   private dead = false;
   private started = false;
   private lastStateKey = '';
+  /** When the trade cursor was last saved. */
+  private cursorSavedAt: number;
   private readonly tradeListener = (symbol: string, trade: AggTrade) => this.background(() => this.onTrade(symbol, trade));
 
   constructor(deps: RunnerDeps) {
     this.d = deps;
     this.newId = deps.newId ?? ((prefix) => `${prefix}-${randomUUID()}`);
+    this.cursorSavedAt = deps.now();
 
     this.violations = checkInvariants(deps.sim);
     for (const v of this.violations) deps.logger.error(`Account state failed integrity check: ${v}`);
@@ -175,14 +184,14 @@ export class EngineRunner {
 
   /**
    * Stops trades, timers and pending arrival timers, and records every gap still open as a
-   * feed_gap ending now (after a fatal error nothing more is written).
+   * feed_gap ending now, with the trade cursor (after a fatal error nothing more is written).
    */
   stop(): void {
     this.started = false;
     this.d.market.off('trade', this.tradeListener);
     for (const cancel of this.timers) cancel();
     this.timers.clear();
-    this.closeOpenGaps();
+    this.saveOnStop();
   }
 
   // ---- actions (each persisted before it returns) ----
@@ -203,9 +212,15 @@ export class EngineRunner {
     return this.apply((ctx) => this.d.sim.spot.submit(req, ctx));
   }
 
-  /** Requests the cancel: ok means it is on its way; arriveCancel runs at the order's cancelArrivesAt. */
+  /**
+   * Requests the cancel: ok means it is on its way; arriveCancel runs at the order's cancelArrivesAt.
+   * A finished order is no longer in memory; its saved row tells it apart from an unknown id.
+   */
   cancel(orderId: string): ActionResult {
     this.refuseTrading();
+    if (!this.d.sim.spot.state.orders.has(orderId) && storedOrderExists(this.d.db, this.d.seasonId, orderId)) {
+      return { ok: false, reason: ORDER_NOT_OPEN };
+    }
     const result = this.apply((ctx) => this.d.sim.spot.cancel(orderId, ctx));
     const at = this.d.sim.spot.state.orders.get(orderId)?.cancelArrivesAt ?? null;
     if (result.ok && at !== null) this.scheduleCancel(orderId, at);
@@ -284,8 +299,10 @@ export class EngineRunner {
   }
 
   private commit(events: EngineEvent[], gaps: FeedGap[] = []): void {
+    const now = this.d.now();
     try {
-      persist(this.d.db, this.d.seasonId, this.d.sim, events, { feedGaps: gaps });
+      const cursor = now - this.cursorSavedAt >= CURSOR_FLUSH_MS;
+      if (persist(this.d.db, this.d.seasonId, this.d.sim, events, { feedGaps: gaps, cursor })) this.cursorSavedAt = now;
     } catch (e) {
       this.die('persist failed', e);
       throw e;
@@ -299,12 +316,14 @@ export class EngineRunner {
     for (const n of noticesFor(events, (s) => this.rulesOf(s))) this.d.onBroadcast({ type: 'notice', ...n });
   }
 
-  private closeOpenGaps(): void {
-    if (this.dead || this.gaps.size === 0) return;
+  /** Every gap still open as a feed_gap ending now, and the trade cursor, in one transaction. */
+  private saveOnStop(): void {
+    if (this.dead) return;
     const now = this.d.now();
     const gaps = [...this.gaps.keys()].flatMap((symbol) => this.takeGap(symbol, now));
     try {
-      persist(this.d.db, this.d.seasonId, this.d.sim, [], { feedGaps: gaps });
+      persist(this.d.db, this.d.seasonId, this.d.sim, [], { feedGaps: gaps, cursor: true });
+      this.cursorSavedAt = now;
     } catch (e) {
       this.die('persist failed', e);
     }
@@ -477,7 +496,7 @@ export class EngineRunner {
         const key = o.ocoGroupId ?? o.id;
         const at = delays.get(key) ?? ctx.now + arrivalDelay(ctx);
         delays.set(key, at);
-        state.orders.set(id, { ...o, arrivesAt: at });
+        putOrder(state, { ...o, arrivesAt: at });
         armed.push({ id, at });
       }
     }

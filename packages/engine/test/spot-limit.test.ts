@@ -4,7 +4,7 @@ import type { Decimal } from '../src/decimal.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
 import { allocateTradeThrough } from '../src/spot/matching.ts';
 import { emptyLedger, deposit } from '../src/account/ledger.ts';
-import { emptySpotState } from '../src/spot/state.ts';
+import { emptySpotState, evictTerminal, takeDirty } from '../src/spot/state.ts';
 import type { AggTrade, EngineCtx, EngineEvent, Fill, SpotOrder, SpotOrderRequest } from '../src/types.ts';
 import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
 
@@ -843,5 +843,55 @@ describe('limit preview', () => {
     const stale = engine.preview(limitBuy('99.50', '1'), ctx);
     expect(stale.rejectReason).toBe('Live data interrupted for BTCUSDT');
     expect(stale.total).toBeNull();
+  });
+});
+
+describe('changed orders and eviction', () => {
+  it('every change to an order marks it changed; takeDirty returns those ids once', () => {
+    const { ctx, engine } = setup();
+    expect(takeDirty(engine.state)).toEqual([]);
+    const order = placed(engine.submit(limitBuy('99.50', '1'), ctx));
+    expect(takeDirty(engine.state)).toEqual([order.id]);
+    expect(takeDirty(engine.state)).toEqual([]);
+    expect(arriveNow(engine, order, ctx)).toEqual([]); // pending -> open: no event, still a change
+    expect(takeDirty(engine.state)).toEqual([order.id]);
+    expect(engine.onTrade('BTCUSDT', trade('99.60', '1', true), ctx)).toEqual([]);
+    expect(takeDirty(engine.state)).toEqual([]);
+    expect(engine.cancel(order.id, ctx).ok).toBe(true);
+    expect(takeDirty(engine.state)).toEqual([order.id]);
+  });
+
+  it('evictTerminal drops finished orders but keeps one whose cancel is in flight until that cancel is answered', () => {
+    const { ctx, engine } = setup();
+    const filled = rest(engine, limitBuy('99.50', '1'), ctx);
+    const cancelling = rest(engine, limitBuy('99.40', '1'), ctx);
+    const resting = rest(engine, limitBuy('99.00', '1'), ctx);
+    expect(engine.cancel(cancelling, ctx).ok).toBe(true);
+    ctx.now += 1;
+    const events = engine.onTrade('BTCUSDT', trade('99.10', '5', true), ctx);
+    expect(fills(events).map((f) => [f.order.id, f.order.status])).toEqual([
+      [filled, 'filled'],
+      [cancelling, 'filled'],
+    ]);
+
+    evictTerminal(engine.state);
+    expect([...engine.state.orders.keys()]).toEqual([cancelling, resting]);
+
+    ctx.now = engine.state.orders.get(cancelling)!.cancelArrivesAt!;
+    expect(only(engine.arriveCancel(cancelling, ctx), 'cancel_rejected').reason).toBe(
+      'Cancel arrived too late: order already filled',
+    );
+    evictTerminal(engine.state);
+    expect([...engine.state.orders.keys()]).toEqual([resting]);
+    expect(engine.cancel(filled, ctx)).toEqual({ ok: false, reason: 'Order not found' });
+  });
+
+  it('a trade-through fill takes its best price without copying the book', () => {
+    const { market, ctx, engine } = setup();
+    rest(engine, limitBuy('99.50', '1'), ctx);
+    market.bookCalls = 0;
+    const { fill } = onlyFill(engine.onTrade('BTCUSDT', trade('99.40', '1', true), ctx));
+    expect(s(fill.bestAtArrival)).toBe('100');
+    expect(market.bookCalls).toBe(0);
   });
 });

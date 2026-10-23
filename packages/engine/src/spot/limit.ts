@@ -31,7 +31,7 @@ import {
   settleTaker,
 } from './orders.ts';
 import type { RequestFields } from './orders.ts';
-import { credit, freeOf, releaseFunds, spendFunds } from './state.ts';
+import { credit, freeOf, putOrder, releaseFunds, spendFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import { expectedNetQty, validateAttachedPair } from './stops.ts';
 
@@ -95,8 +95,7 @@ export function submitLimit(s: SpotState, req: SpotOrderRequest, ctx: EngineCtx)
   const plan = planLimit(s, req, ctx);
   const order = newOrder(req, plan.rules, plan.fields, ctx);
   if (plan.reason !== null) return rejectOrder(s, order, plan.reason, ctx);
-  const best = bestPrice(ctx.market.book(req.symbol), req.side);
-  return placePending(s, order, plan.lockAmount!, best, ctx);
+  return placePending(s, order, plan.lockAmount!, ctx.market.best(req.symbol, req.side), ctx);
 }
 
 /** Would the order trade against the book right now? (buy: best ask ≤ L; sell: best bid ≥ L) */
@@ -117,7 +116,7 @@ export function arriveLimit(s: SpotState, order: SpotOrder, ctx: EngineCtx): Eng
   const book = ctx.market.book(order.symbol);
   const price = order.price!;
   if (!marketable(book, order.side, price)) {
-    s.orders.set(order.id, { ...order, status: 'open' });
+    putOrder(s, { ...order, status: 'open' });
     return [];
   }
   if (order.type === 'post_only') return rejectPending(s, order, POST_ONLY_REJECT, ctx);
@@ -129,14 +128,14 @@ export function arriveLimit(s: SpotState, order: SpotOrder, ctx: EngineCtx): Eng
   const retain = order.side === 'buy' ? remaining.mul(price) : remaining;
   const status: OrderStatus = remaining.isZero() ? 'filled' : 'partially_filled';
   const settled = settleTaker(s, order, walk, rules, status, ctx, retain);
-  s.orders.set(order.id, settled.order);
+  putOrder(s, settled.order);
   return recordFill(s, settled.fill, settled.order, rules, ctx);
 }
 
 /**
  * Fill resting orders of `symbol` that this real trade went strictly through.
  * Fills are at the order's own price, maker fee, and share the trade's volume.
- * Matching pauses while the symbol is stale.
+ * Matching pauses while the symbol is stale. The book is never copied: a fill needs only its best price.
  */
 export function matchTrade(s: SpotState, symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
   if (!ctx.market.isFresh(symbol)) return [];
@@ -145,8 +144,7 @@ export function matchTrade(s: SpotState, symbol: string, trade: AggTrade, ctx: E
   if (allocations.length === 0) return [];
 
   const rules = ctx.market.rules(symbol);
-  const book = ctx.market.book(symbol);
-  return allocations.flatMap(({ orderId, qty }) => makerFill(s, s.orders.get(orderId)!, qty, rules, book, ctx));
+  return allocations.flatMap(({ orderId, qty }) => makerFill(s, s.orders.get(orderId)!, qty, rules, ctx));
 }
 
 function makerFill(
@@ -154,7 +152,6 @@ function makerFill(
   order: SpotOrder,
   qty: Decimal,
   rules: SpotRules,
-  book: BookSnapshot,
   ctx: EngineCtx,
 ): EngineEvent[] {
   assertBasisCovers(s, rules, order.side, qty);
@@ -178,14 +175,14 @@ function makerFill(
       quote,
       liquidity: 'maker',
       fee,
-      bestAtArrival: bestPrice(book, order.side),
+      bestAtArrival: ctx.market.best(order.symbol, order.side),
       slippageUsd: D(0),
       driftUsd: D(0),
     },
     ctx,
   );
   const updated = applyFill(order, fill, done ? 'filled' : 'partially_filled', lock);
-  s.orders.set(updated.id, updated);
+  putOrder(s, updated);
   return recordFill(s, fill, updated, rules, ctx);
 }
 

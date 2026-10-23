@@ -1,7 +1,7 @@
 import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import type { SpotState } from '../src/spot/state.ts';
-import type { BookSnapshot, EngineCtx, MarketView, SpotRules } from '../src/types.ts';
+import type { BookSnapshot, EngineCtx, MarketView, Side, SpotRules } from '../src/types.ts';
 
 export const btcRules: SpotRules = {
   symbol: 'BTCUSDT',
@@ -41,8 +41,12 @@ export const sampleBook: BookSnapshot = {
   ],
 };
 
-/** In-memory MarketView. BTCUSDT starts fresh on sampleBook, avg price 100, last price 99.95. */
+/**
+ * In-memory MarketView. BTCUSDT starts fresh on sampleBook, avg price 100, last price 99.95.
+ * `bookCalls` counts book() calls (copies of the whole book), for tests of what reads it.
+ */
 export class FakeMarket implements MarketView {
+  bookCalls = 0;
   private books = new Map<string, BookSnapshot>([['BTCUSDT', sampleBook]]);
   private freshness = new Map<string, boolean>([['BTCUSDT', true]]);
   private avgPrices = new Map<string, Decimal | null>([['BTCUSDT', D('100')]]);
@@ -73,7 +77,12 @@ export class FakeMarket implements MarketView {
     return this.freshness.get(symbol) ?? false;
   }
   book(symbol: string): BookSnapshot {
+    this.bookCalls += 1;
     return this.books.get(symbol) ?? { bids: [], asks: [] };
+  }
+  best(symbol: string, side: Side): Decimal | null {
+    const book = this.books.get(symbol);
+    return (side === 'buy' ? book?.asks : book?.bids)?.[0]?.price ?? null;
   }
   avgPrice(symbol: string): Decimal | null {
     return this.avgPrices.get(symbol) ?? null;

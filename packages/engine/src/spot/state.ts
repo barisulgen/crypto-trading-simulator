@@ -1,15 +1,20 @@
 import type { Decimal } from '../decimal.ts';
 import * as ledger from '../account/ledger.ts';
 import type { Balance, Ledger } from '../account/ledger.ts';
-import type { Basis, SpotOrder, Wallet } from '../types.ts';
+import type { Basis, OrderStatus, SpotOrder, Wallet } from '../types.ts';
 
 export type { Balance };
 
 export interface SpotState {
   /** The account's wallets, shared with every other market engine. */
   ledger: Ledger;
-  /** Every order seen this session, terminal ones included. */
+  /**
+   * Live orders, plus finished ones until they are saved (evictTerminal); a finished order whose
+   * owner cancel is still in flight stays until that cancel is answered.
+   */
   orders: Map<string, SpotOrder>;
+  /** Ids of the orders changed since the last takeDirty: what the next save writes. */
+  dirty: Set<string>;
   basis: Record<string, Basis>;
   /** Per symbol, the id of the last AggTrade processed; older or repeated trades are ignored. */
   lastTradeId: Record<string, number>;
@@ -17,7 +22,33 @@ export interface SpotState {
 
 /** Empty spot state over the given ledger. */
 export function emptySpotState(l: Ledger): SpotState {
-  return { ledger: l, orders: new Map(), basis: {}, lastTradeId: {} };
+  return { ledger: l, orders: new Map(), dirty: new Set(), basis: {}, lastTradeId: {} };
+}
+
+const TERMINAL: ReadonlySet<OrderStatus> = new Set(['filled', 'cancelled', 'rejected']);
+
+/** Store the order and mark it changed. Every engine change to an order goes through here. */
+export function putOrder(state: SpotState, order: SpotOrder): void {
+  state.orders.set(order.id, order);
+  state.dirty.add(order.id);
+}
+
+/** The ids of the orders changed since the last call; the set is cleared. */
+export function takeDirty(state: SpotState): string[] {
+  const ids = [...state.dirty];
+  state.dirty.clear();
+  return ids;
+}
+
+/**
+ * Drop finished orders (filled, cancelled, rejected) from memory once they are saved. One whose
+ * owner cancel is still in flight is kept: when that cancel arrives it is answered as too late
+ * (cancel_rejected), which clears it, and the next call drops the order.
+ */
+export function evictTerminal(state: SpotState): void {
+  for (const [id, o] of state.orders) {
+    if (TERMINAL.has(o.status) && o.cancelArrivesAt === null) state.orders.delete(id);
+  }
 }
 
 /** The balance row for wallet/asset, created at zero if missing. */

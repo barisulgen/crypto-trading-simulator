@@ -32,7 +32,7 @@ import {
   takerPreview,
 } from './orders.ts';
 import type { RequestFields } from './orders.ts';
-import { freeOf, releaseFunds } from './state.ts';
+import { freeOf, putOrder, releaseFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import {
   activateAttachedPairs,
@@ -59,6 +59,7 @@ export const UNKNOWN_ORDER_TYPE = 'Unknown order type';
 export const RESTART_REASON = 'Server restarted before execution';
 export const RULES_NOT_LOADED = 'Exchange rules not loaded yet; try again in a moment';
 export const CANCEL_REQUESTED = 'Cancel already requested';
+export const ORDER_NOT_OPEN = 'Order is not open';
 
 /** Statuses an owner cancel still acts on when it reaches the exchange. */
 const CANCELLABLE: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled']);
@@ -206,14 +207,14 @@ export class SpotEngine {
     const order = this.s.orders.get(orderId);
     if (!order) return { ok: false, reason: 'Order not found' };
     if (order.status === 'filled' || order.status === 'cancelled' || order.status === 'rejected') {
-      return { ok: false, reason: 'Order is not open' };
+      return { ok: false, reason: ORDER_NOT_OPEN };
     }
     if (order.status === 'triggered' || order.type === 'market') {
       return { ok: false, reason: 'Order is already executing and cannot be cancelled' };
     }
     if (cancelRequested(this.s, order)) return { ok: false, reason: CANCEL_REQUESTED };
     if (cancelNeedsRules(order) && !rulesLoaded(order.symbol, ctx)) return { ok: false, reason: RULES_NOT_LOADED };
-    this.s.orders.set(order.id, { ...order, cancelArrivesAt: ctx.now + arrivalDelay(ctx) });
+    putOrder(this.s, { ...order, cancelArrivesAt: ctx.now + arrivalDelay(ctx) });
     return { ok: true, events: [] };
   }
 
@@ -251,7 +252,7 @@ export class SpotEngine {
     }
     const arrived: SpotOrder = { ...order, cancelArrivesAt: null };
     if (!CANCELLABLE.has(order.status)) {
-      this.s.orders.set(arrived.id, arrived);
+      putOrder(this.s, arrived);
       const reason = `Cancel arrived too late: order already ${order.status}`;
       return [{ type: 'cancel_rejected', time: ctx.now, order: arrived, reason }];
     }
@@ -259,7 +260,7 @@ export class SpotEngine {
     if (isStopType(order.type)) return cancelStop(this.s, arrived, ctx);
     releaseFunds(this.s, order.lockAsset, order.lockAmount);
     const cancelled: SpotOrder = { ...arrived, status: 'cancelled', lockAmount: D(0) };
-    this.s.orders.set(cancelled.id, cancelled);
+    putOrder(this.s, cancelled);
     const cancelledQty = order.qty!.minus(order.filledQty);
     return [{ type: 'order_cancelled', time: ctx.now, order: cancelled, reason: 'user', cancelledQty }];
   }

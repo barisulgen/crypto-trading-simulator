@@ -328,7 +328,8 @@ describe('REST', () => {
     const again = await t.call('DELETE', `/api/orders/${limit.body.order.id}`);
     expect([again.status, again.body]).toEqual([400, { error: 'Cancel already requested' }]);
     t.clock.advance(100);
-    expect(t.runner.state.orders.get(limit.body.order.id)!.status).toBe('cancelled');
+    expect(t.runner.state.orders.has(limit.body.order.id)).toBe(false); // finished: saved, then out of memory
+    expect(t.db.prepare('SELECT status FROM orders WHERE id = ?').get(limit.body.order.id)).toEqual({ status: 'cancelled' });
     expect((await t.call('DELETE', `/api/orders/${limit.body.order.id}`)).body).toEqual({ error: 'Order is not open' });
     expect((await t.call('DELETE', '/api/orders/nope')).status).toBe(404);
 

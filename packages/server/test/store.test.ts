@@ -591,3 +591,119 @@ describe('currentSeasonId clock', () => {
     expect(db.prepare('SELECT started_at FROM seasons').get()).toEqual({ started_at: 4242 });
   });
 });
+
+describe('openDb durability', () => {
+  it('sets PRAGMA synchronous = FULL (2)', async () => {
+    expect(openDb(':memory:').pragma('synchronous', { simple: true })).toBe(2);
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'sim-db-'));
+    let db: Db | null = null;
+    try {
+      db = openDb(join(dir, 'sim.sqlite'));
+      expect(db.pragma('synchronous', { simple: true })).toBe(2);
+    } finally {
+      db?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('persist writes what changed', () => {
+  /** Counts rows inserted or updated in `table` from now on (an upsert counts once). */
+  function countWrites(db: Db, table: string): () => number {
+    db.exec('CREATE TEMP TABLE IF NOT EXISTS writes (tbl TEXT NOT NULL)');
+    for (const op of ['INSERT', 'UPDATE']) {
+      db.exec(`CREATE TEMP TRIGGER count_${table}_${op} AFTER ${op} ON ${table} BEGIN INSERT INTO writes VALUES ('${table}'); END`);
+    }
+    return () => (db.prepare('SELECT count(*) AS n FROM writes WHERE tbl = ?').get(table) as { n: number }).n;
+  }
+
+  /** deposit 1000; limit buys 1 @ 99.50 and 1 @ 99.00 resting; persisted. */
+  function twoResting() {
+    const t = setup();
+    const { engine, ctx, db, seasonId } = t;
+    const events: EngineEvent[] = [...(deposit(engine.state.ledger, 'spot', D('1000'), ctx) as { events: EngineEvent[] }).events];
+    const a = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
+    const b = placedOrder(engine.submit(limitBuy('99.00', '1'), ctx));
+    events.push(...arrive(engine, a, ctx), ...arrive(engine, b, ctx));
+    persist(db, seasonId, simOf(engine), events);
+    return { ...t, a, b };
+  }
+
+  it('a trade that changes nothing upserts no order; a fill upserts only the order it fills', () => {
+    const { engine, ctx, db, seasonId, a } = twoResting();
+    const orderWrites = countWrites(db, 'orders');
+    persist(db, seasonId, simOf(engine), engine.onTrade('BTCUSDT', trade('99.60', '1', true), ctx));
+    expect(orderWrites()).toBe(0);
+    const events = engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill']);
+    persist(db, seasonId, simOf(engine), events);
+    expect(orderWrites()).toBe(1);
+    expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(a.id)).toEqual({ status: 'partially_filled' });
+  });
+
+  it('a call with no events and no changed order writes nothing, the trade cursor only when asked', () => {
+    const { engine, ctx, db, seasonId } = twoResting();
+    const cursorOf = () => db.prepare('SELECT last_trade_id AS id FROM trade_cursor').get() as { id: number } | undefined;
+    const before = cursorOf();
+    const writes = ['orders', 'balances', 'basis', 'account', 'trade_cursor', 'events'].map((tbl) => countWrites(db, tbl));
+    const noop = trade('99.60', '1', true);
+    expect(persist(db, seasonId, simOf(engine), engine.onTrade('BTCUSDT', noop, ctx))).toBe(false);
+    expect(writes.map((n) => n())).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(cursorOf()).toEqual(before);
+
+    expect(persist(db, seasonId, simOf(engine), [], { cursor: true })).toBe(true);
+    expect(cursorOf()).toEqual({ id: noop.id });
+    expect(writes.map((n) => n())).toEqual([0, 0, 0, 0, 1, 0]);
+  });
+
+  it('a call with events writes the trade cursor in its own transaction', () => {
+    const { engine, ctx, db, seasonId } = twoResting();
+    const fill = trade('99.40', '0.5', true);
+    expect(persist(db, seasonId, simOf(engine), engine.onTrade('BTCUSDT', fill, ctx))).toBe(true);
+    expect(db.prepare('SELECT last_trade_id AS id FROM trade_cursor').get()).toEqual({ id: fill.id });
+  });
+
+  it('after persist a finished order leaves memory; loadSpotState still finds only the live ones', () => {
+    const { engine, ctx, db, seasonId, a, b } = twoResting();
+    persist(db, seasonId, simOf(engine), engine.onTrade('BTCUSDT', trade('99.40', '5', true), ctx));
+    expect(db.prepare('SELECT status FROM orders WHERE id = ?').get(a.id)).toEqual({ status: 'filled' });
+    expect([...engine.state.orders.keys()]).toEqual([b.id]);
+    const reloaded = loadSpotState(db, seasonId, loadLedger(db, seasonId, ASSETS));
+    expect([...reloaded.orders.keys()]).toEqual([b.id]);
+    expect(snapshot(reloaded)).toBe(snapshot(engine.state));
+  });
+
+  it('an order that fills while its cancel is in flight stays in memory until the cancel arrives, which is recorded as too late', () => {
+    const { engine, ctx, db, seasonId, a } = twoResting();
+    expect(engine.cancel(a.id, ctx).ok).toBe(true);
+    persist(db, seasonId, simOf(engine), []);
+    ctx.now += 1;
+    persist(db, seasonId, simOf(engine), engine.onTrade('BTCUSDT', trade('99.40', '1', true), ctx));
+    expect(engine.state.orders.get(a.id)!.status).toBe('filled');
+
+    ctx.now = engine.state.orders.get(a.id)!.cancelArrivesAt!;
+    const events = engine.arriveCancel(a.id, ctx);
+    expect(events.map((e) => (e.type === 'cancel_rejected' ? e.reason : e.type))).toEqual([
+      'Cancel arrived too late: order already filled',
+    ]);
+    persist(db, seasonId, simOf(engine), events);
+    expect(engine.state.orders.has(a.id)).toBe(false);
+    const row = db.prepare('SELECT status, data FROM orders WHERE id = ?').get(a.id) as { status: string; data: string };
+    expect([row.status, JSON.parse(row.data).cancelArrivesAt]).toEqual(['filled', null]);
+    expect(settleLateCancels(db, seasonId, ctx.now + 60_000)).toEqual([]);
+  });
+
+  it('a failed write keeps the changed orders marked, so the next persist still writes them', () => {
+    const { engine, ctx, db, seasonId, a } = twoResting();
+    expect(engine.cancel(a.id, ctx).ok).toBe(true);
+    db.exec("CREATE TEMP TRIGGER no_orders BEFORE UPDATE ON orders BEGIN SELECT RAISE(ABORT, 'no'); END");
+    expect(() => persist(db, seasonId, simOf(engine), [])).toThrow('no');
+    db.exec('DROP TRIGGER no_orders');
+    persist(db, seasonId, simOf(engine), []);
+    const row = db.prepare('SELECT data FROM orders WHERE id = ?').get(a.id) as { data: string };
+    expect(JSON.parse(row.data).cancelArrivesAt).toBe(engine.state.orders.get(a.id)!.cancelArrivesAt);
+  });
+});

@@ -73,7 +73,10 @@ export interface AggTrade {
 /** What the engine may know about the market. Implemented by the server's MarketData. */
 export interface MarketView {
   isFresh(symbol: string): boolean;
+  /** A copy of the whole book: costly, so read only when a walk needs the levels. */
   book(symbol: string): BookSnapshot;
+  /** Best price a taker would hit (best ask for a buy, best bid for a sell), without copying the book. */
+  best(symbol: string, side: Side): Decimal | null;
   avgPrice(symbol: string): Decimal | null;
   lastPrice(symbol: string): Decimal | null;
   rules(symbol: string): SpotRules;
