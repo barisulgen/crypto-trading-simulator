@@ -44,6 +44,13 @@ function readEnvFile(path: string): Record<string, string> {
   }
 }
 
+function parsePort(raw: string | undefined): number {
+  if (!raw) return 8787;
+  const port = /^\d{1,5}$/.test(raw) ? Number(raw) : NaN;
+  if (!(port >= 1 && port <= 65535)) throw new Error('PORT must be a whole number from 1 to 65535');
+  return port;
+}
+
 export function loadConfig(
   envFile = '.env.local',
   env: Record<string, string | undefined> = process.env,
@@ -59,7 +66,7 @@ export function loadConfig(
   );
   const config = {
     host,
-    port: merged.PORT ? Number(merged.PORT) : 8787,
+    port: parsePort(merged.PORT),
     dbPath: merged.DB_PATH || 'data/sim.sqlite',
     coins: [...COINS],
     symbols: COINS.map((c) => `${c}USDT`),

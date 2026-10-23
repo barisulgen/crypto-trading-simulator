@@ -124,10 +124,10 @@ export class ApiError extends Error {
   }
 }
 
-let unauthorized: () => void = () => {};
+let unauthorized: (message: string) => void = () => {};
 
 /** Called on every 401 (LAN password mode without a session). */
-export function onUnauthorized(cb: () => void): void {
+export function onUnauthorized(cb: (message: string) => void): void {
   unauthorized = cb;
 }
 
@@ -151,8 +151,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     // not JSON: handled below
   }
   if (!res.ok) {
-    if (res.status === 401 && path !== '/api/login') unauthorized();
     const error = (json as { error?: unknown } | null)?.error;
+    if (res.status === 401 && path !== '/api/login') unauthorized(typeof error === 'string' ? error : '');
     throw new ApiError(res.status, typeof error === 'string' ? error : `Request failed (${res.status})`);
   }
   return json as T;

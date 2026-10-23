@@ -1,12 +1,15 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { fmtPct, fmtUsd, fmtUsdFloor } from '../lib/format.ts';
-import { pricesPausedLabel } from '../lib/holdings.ts';
+import { pricesLoading, pricesPausedLabel } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
 import { changeClass } from './CoinList.tsx';
 import { DepositDialog } from './DepositDialog.tsx';
 import { TransferDialog } from './TransferDialog.tsx';
 import { Button } from './ui.tsx';
+
+const DASH = '\u2013';
+const LOADING_TITLE = 'A coin you hold has no price yet: total value and net P&L are shown once every held coin has been priced';
 
 function Stat({
   label,
@@ -65,7 +68,10 @@ export function AccountBar() {
   // Our server connection is down: the numbers are the last ones received, dimmed and labelled.
   const frozen = useLive((s) => s.conn === 'down');
   // Some held coin has no live bid (feed interrupted): total value and net P&L are not live either.
-  const paused = a ? pricesPausedLabel(a) : null;
+  // Right after start a held coin may have no bid yet: its value is a placeholder 0, so the headline
+  // would show a loss that is not real. Show a dash until every held coin has been priced once.
+  const loading = a ? pricesLoading(a) : false;
+  const paused = a && !loading ? pricesPausedLabel(a) : null;
   const pausedTitle = paused
     ? `No live bid for ${a!.pricesPaused.join(', ')}: valued at the last real bid received (a coin with no price yet counts as $0)`
     : undefined;
@@ -82,24 +88,26 @@ export function AccountBar() {
         <div className="flex min-w-0 flex-wrap items-end gap-x-4 gap-y-1 desk:contents">
           <Stat
             dim={paused !== null}
-            title={pausedTitle}
+            title={loading ? LOADING_TITLE : pausedTitle}
             label={
               <span className="flex flex-wrap items-center gap-x-1.5">
                 Total value
                 {frozen ? (
                   <Badge title="Connection to the simulator lost - showing the last values received">Not live</Badge>
+                ) : loading ? (
+                  <Badge title={LOADING_TITLE}>Prices loading</Badge>
                 ) : (
                   paused && <Badge title={pausedTitle!}>{paused}</Badge>
                 )}
               </span>
             }
           >
-            <span className="text-lg font-semibold whitespace-nowrap [font-stretch:108%] min-[80rem]:text-xl">{fmtUsd(a?.total)}</span>
+            <span className="text-lg font-semibold whitespace-nowrap [font-stretch:108%] min-[80rem]:text-xl">{loading ? DASH : fmtUsd(a?.total)}</span>
           </Stat>
-          <Stat label="Net P&L" dim={paused !== null} title={pausedTitle}>
-            <span className={`text-base font-semibold whitespace-nowrap ${changeClass(a?.netPnl)}`}>{fmtUsd(a?.netPnl, { sign: true })}</span>
-            <span className={`ml-1.5 text-xs whitespace-nowrap ${changeClass(a?.netPnlPct)}`}>
-              {a ? (a.netPnlPct === null ? 'no deposits yet' : fmtPct(a.netPnlPct)) : ''}
+          <Stat label="Net P&L" dim={paused !== null} title={loading ? LOADING_TITLE : pausedTitle}>
+            <span className={`text-base font-semibold whitespace-nowrap ${changeClass(loading ? null : a?.netPnl)}`}>{loading ? DASH : fmtUsd(a?.netPnl, { sign: true })}</span>
+            <span className={`ml-1.5 text-xs whitespace-nowrap ${changeClass(loading ? null : a?.netPnlPct)}`}>
+              {a && !loading ? (a.netPnlPct === null ? 'no deposits yet' : fmtPct(a.netPnlPct)) : ''}
             </span>
           </Stat>
         </div>

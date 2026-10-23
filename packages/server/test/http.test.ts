@@ -78,6 +78,7 @@ async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
     fees: config.fees,
     appPassword: opts.password === false ? null : config.appPassword,
     logger,
+    now: () => clock.now,
     webDist: opts.webDist ?? null,
   });
 
@@ -133,6 +134,11 @@ afterAll(async () => {
   for (const a of apps) await a.close();
 });
 
+/** Moves the fake clock without running its timers (days of ticking would be slow and pointless here). */
+const jump = (clock: { now: number }, ms: number) => {
+  clock.now += ms;
+};
+
 describe('auth', () => {
   it('with a LAN password, /api and /ws need the session cookie set by POST /api/login', async () => {
     const t = await makeApp();
@@ -150,6 +156,63 @@ describe('auth', () => {
     expect((await t.call('GET', '/api/account')).status).toBe(200);
     const { ws } = await t.connect();
     ws.terminate();
+  });
+
+  it('refuses a sixth login within 15 minutes of five failures, then lets the owner back in', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    for (let i = 0; i < 5; i++) {
+      expect((await t.call('POST', '/api/login', { password: `wrong${i}` }, false)).status).toBe(401);
+      jump(t.clock, 1000);
+    }
+    const right = { password: SECRET_ENV.APP_PASSWORD };
+    const blocked = await t.call('POST', '/api/login', right, false);
+    expect(blocked.status).toBe(429);
+    // The oldest failure was 5 s ago: 14 min 55 s remain, shown rounded up.
+    expect(blocked.body).toEqual({ error: 'Too many failed logins; try again in 15 min' });
+    expect(blocked.headers['set-cookie']).toBeUndefined();
+    jump(t.clock, 15 * 60_000 - 5000 - 1);
+    expect((await t.call('POST', '/api/login', right, false)).status).toBe(429);
+    jump(t.clock, 1);
+    expect((await t.call('POST', '/api/login', right, false)).status).toBe(200);
+  });
+
+  it('a successful login clears the failures, and failures older than 15 minutes do not count', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    for (let i = 0; i < 4; i++) await t.call('POST', '/api/login', { password: 'wrong' }, false);
+    await t.login();
+    for (let i = 0; i < 4; i++) expect((await t.call('POST', '/api/login', { password: 'wrong' }, false)).status).toBe(401);
+    jump(t.clock, 15 * 60_000);
+    for (let i = 0; i < 4; i++) expect((await t.call('POST', '/api/login', { password: 'wrong' }, false)).status).toBe(401);
+    expect((await t.call('POST', '/api/login', { password: SECRET_ENV.APP_PASSWORD }, false)).status).toBe(200);
+  });
+
+  it('a session idle for 24 h, or 7 days old, is refused with a message the login screen can show', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    const res = await t.login();
+    expect(String(res.headers['set-cookie'])).toContain('Max-Age=604800');
+    jump(t.clock, 24 * 3_600_000 - 1);
+    expect((await t.call('GET', '/api/account')).status).toBe(200); // use renews the idle timer
+    jump(t.clock, 24 * 3_600_000);
+    expect(await t.call('GET', '/api/account')).toMatchObject({
+      status: 401,
+      body: { error: 'Session expired; log in again' },
+    });
+
+    await t.login();
+    for (let day = 1; day <= 6; day++) {
+      jump(t.clock, 24 * 3_600_000 - 1000);
+      expect((await t.call('GET', '/api/account')).status).toBe(200);
+    }
+    jump(t.clock, 24 * 3_600_000 - 1000); // 7 days - 7 s
+    expect((await t.call('GET', '/api/account')).status).toBe(200);
+    jump(t.clock, 7000); // now 7 days after login, though never idle
+    expect(await t.call('GET', '/api/account')).toMatchObject({
+      status: 401,
+      body: { error: 'Session expired; log in again' },
+    });
   });
 
   it('LAN mode gates the matched route: percent-encoded /api and /ws paths still need the session', async () => {

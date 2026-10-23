@@ -44,4 +44,14 @@ describe('loadConfig', () => {
     expect(Object.keys(c)).not.toContain('appPassword');
     expect(JSON.stringify(c)).not.toContain('pw');
   });
+
+  it('accepts only a whole PORT from 1 to 65535', () => {
+    const bad = 'PORT must be a whole number from 1 to 65535';
+    for (const port of ['0', '70000', '12a', '65536', '-1', '80.5', '1e3', ' ']) {
+      expect(() => loadConfig(fx('missing.env'), { PORT: port }), port).toThrow(bad);
+    }
+    expect(loadConfig(fx('missing.env'), { PORT: '8080' }).port).toBe(8080);
+    expect(loadConfig(fx('missing.env'), { PORT: '65535' }).port).toBe(65535);
+    expect(loadConfig(fx('missing.env'), { PORT: '1' }).port).toBe(1);
+  });
 });

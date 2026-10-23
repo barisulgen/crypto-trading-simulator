@@ -76,6 +76,15 @@ export function pricesPausedLabel(account: AccountSnapshot): string | null {
   return n === 0 ? null : `Prices paused (${n} ${n === 1 ? 'coin' : 'coins'})`;
 }
 
+/**
+ * True while a held coin has never had a bid since the server started: its value is a placeholder 0,
+ * so total value and net P&L would show a loss that is not real. (A coin priced earlier that is now
+ * stale is a different case: 'Prices paused'.)
+ */
+export function pricesLoading(account: AccountSnapshot): boolean {
+  return account.coins.some((c) => cmpDec(c.qty, '0') > 0 && cmpDec(c.bid, '0') <= 0);
+}
+
 /** Average fill price of an order (filled quote / filled qty) with `dp` decimals; null before any fill. */
 export function avgFill(filledQuote: string, filledQty: string, dp: number): string | null {
   return cmpDec(filledQty, '0') > 0 ? divDec(filledQuote, filledQty, dp) : null;

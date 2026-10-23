@@ -79,6 +79,8 @@ export interface LiveState extends LiveData {
   conn: Connection;
   /** LAN password mode and no session: show the login screen. */
   needsLogin: boolean;
+  /** Why the session ended ('Session expired; log in again'); empty on a first visit. */
+  loginNotice: string;
   /** Times our WebSocket opened again after the first connection (views reload what they may have missed). */
   reconnects: number;
   /** The last order-book price the owner clicked (the order form prefills its limit price); `seq` changes on every click. */
@@ -187,6 +189,7 @@ export const useLive = create<LiveState>()((set) => ({
   meta: null,
   conn: 'connecting',
   needsLogin: false,
+  loginNotice: '',
   reconnects: 0,
   priceClick: null,
   select(symbol) {
@@ -373,7 +376,13 @@ export function reconnectNow(): void {
 export function startLive(): void {
   if (started) return;
   started = true;
-  onUnauthorized(() => useLive.setState({ needsLogin: true }));
+  onUnauthorized((message) =>
+    useLive.setState((s) => ({
+      needsLogin: true,
+      // Keep the expiry message when later requests only say a login is required.
+      loginNotice: message && message !== 'Login required' ? message : s.loginNotice,
+    })),
+  );
   void loadMeta();
   connect();
   window.addEventListener('online', reconnectNow);
@@ -381,7 +390,7 @@ export function startLive(): void {
 
 /** After a successful login: reload the data and reconnect. */
 export function afterLogin(): void {
-  useLive.setState({ needsLogin: false });
+  useLive.setState({ needsLogin: false, loginNotice: '' });
   void loadMeta();
   reconnectNow();
 }

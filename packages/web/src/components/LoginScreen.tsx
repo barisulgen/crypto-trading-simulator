@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, ApiError } from '../lib/api.ts';
-import { afterLogin } from '../lib/live.ts';
+import { afterLogin, useLive } from '../lib/live.ts';
 import { Button, ErrorText, TextField } from './ui.tsx';
 
 /** Shown on any 401: the server runs on the LAN with a password (APP_PASSWORD). */
 export function LoginScreen() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const notice = useLive((s) => s.loginNotice);
   const [busy, setBusy] = useState(false);
 
   async function submit(e: FormEvent) {
@@ -39,7 +40,7 @@ export function LoginScreen() {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        <ErrorText>{error}</ErrorText>
+        <ErrorText>{error || notice}</ErrorText>
         <Button type="submit" tone="primary" className="h-10" disabled={busy || password === ''}>
           {busy ? 'Logging in...' : 'Log in'}
         </Button>

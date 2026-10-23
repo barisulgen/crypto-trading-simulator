@@ -26,6 +26,8 @@ export interface AppDeps {
   fees: { spot: FeeSchedule; perp: FeeSchedule };
   appPassword: string | null;
   logger: Logger;
+  /** Clock for session expiry and the login rate limit (ms); defaults to Date.now. */
+  now?: () => number;
   /** Built web UI to serve at /, or null. */
   webDist?: string | null;
 }
@@ -89,7 +91,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 16 * 1024 });
   await app.register(websocket, { options: { maxPayload: 4096 } });
   // @fastify/static serves the UI under the wildcard route '/*' (and its HEAD twin).
-  registerAuth(app, { appPassword: d.appPassword, logger: d.logger, publicRoutes: d.webDist ? ['/*'] : [] });
+  registerAuth(app, { appPassword: d.appPassword, logger: d.logger, ...(d.now ? { now: d.now } : {}), publicRoutes: d.webDist ? ['/*'] : [] });
 
   app.setErrorHandler((err: unknown, req, reply) => {
     if (err instanceof InputError) return send(reply, 400, { error: err.message });

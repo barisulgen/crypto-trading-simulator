@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountSnapshot } from '../src/lib/api.ts';
-import { avgFill, holdingRows, pricesPausedLabel, valueTitle } from '../src/lib/holdings.ts';
+import { avgFill, holdingRows, pricesLoading, pricesPausedLabel, valueTitle } from '../src/lib/holdings.ts';
 import { divDec, floorToStep, pctOf } from '../src/lib/market.ts';
 
 describe('decimal division', () => {
@@ -139,5 +139,30 @@ describe('average fill price of an order', () => {
   it('is filled quote / filled qty, null before any fill', () => {
     expect(avgFill('50.03', '0.5', 4)).toBe('100.0600');
     expect(avgFill('0', '0', 4)).toBeNull();
+  });
+});
+
+describe('prices loading after start', () => {
+  it('is true while a held coin has never had a bid, so the headline cannot show a false loss', () => {
+    const unpriced = account({
+      coins: [{ asset: 'BTC', qty: '0.999', bid: '0', value: '0', fresh: false, bidAt: null }],
+      total: '899.95',
+      netPnl: '-100.05',
+      pricesPaused: ['BTC'],
+    });
+    expect(pricesLoading(unpriced)).toBe(true);
+  });
+
+  it('is false for a coin priced earlier that is merely stale, or for coins with no holding', () => {
+    const stale = account({
+      coins: [{ asset: 'BTC', qty: '0.999', bid: '101', value: '100.899', fresh: false, bidAt: 1000 }],
+      pricesPaused: ['BTC'],
+    });
+    expect(pricesLoading(stale)).toBe(false);
+    expect(pricesLoading(account())).toBe(false);
+    expect(pricesLoading(account({ coins: [], pricesPaused: [] }))).toBe(false);
+    expect(
+      pricesLoading(account({ coins: [{ asset: 'BTC', qty: '0', bid: '0', value: '0', fresh: false, bidAt: null }] })),
+    ).toBe(false);
   });
 });

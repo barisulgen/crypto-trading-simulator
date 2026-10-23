@@ -707,7 +707,7 @@ describe('SpotFeed', () => {
 
 describe('CandleService', () => {
   const k = (t: number) => [t, '1', '2', '0.5', '1.5', '10', t + 59999, '15', 3, '5', '7', '0'];
-  it('history parses klines, caches 5 s by key, rejects other intervals', async () => {
+  it('history parses klines, caches the newest page 60 s by key, rejects other intervals', async () => {
     const clock = { t: 0 };
     const klines = vi.fn(async () => [k(60000), k(120000)]);
     const svc = new CandleService({ rest: { klines } as any, logger: silent, now: () => clock.t, setTimer: fakeTimers().setTimer });
@@ -720,6 +720,11 @@ describe('CandleService', () => {
     expect(klines).toHaveBeenCalledTimes(2);
     clock.t = 5001;
     await svc.history('BTCUSDT', '1m');
+    expect(klines).toHaveBeenCalledTimes(2);
+    clock.t = 60_001;
+    await svc.history('BTCUSDT', '1m');
+    expect(klines).toHaveBeenCalledTimes(3);
+    await svc.history('BTCUSDT', '1m', 5); // an older page does not go stale
     expect(klines).toHaveBeenCalledTimes(3);
     await expect(svc.history('BTCUSDT', '3m')).rejects.toThrow('Unsupported interval 3m');
     expect(() => svc.subscribe('BTCUSDT', '2h', () => {})).toThrow('Unsupported interval 2h');

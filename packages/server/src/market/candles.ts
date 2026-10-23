@@ -25,7 +25,10 @@ export interface CandleServiceDeps {
   setTimer?: SetTimer;
 }
 
-const CACHE_MS = 5000;
+/** The newest page (no endTime) is re-fetched after this long; older pages never change. */
+const CACHE_MS = 60_000;
+/** Most series kept; the least recently used goes first. */
+const CACHE_MAX = 64;
 const KLINE_WS_URL = 'wss://stream.binance.com:9443/ws';
 const WATCHDOG_MS = 30_000;
 const WATCHDOG_CHECK_MS = 5000;
@@ -74,7 +77,11 @@ export class CandleService {
     checkSymbol(symbol);
     const key = `${symbol}:${interval}:${endTime ?? ''}`;
     const hit = this.cache.get(key);
-    if (hit && this.now() - hit.at <= CACHE_MS) return hit.value;
+    if (hit && (endTime !== undefined || this.now() - hit.at <= CACHE_MS)) {
+      this.cache.delete(key); // re-insert: Map order is least recently used first
+      this.cache.set(key, hit);
+      return hit.value;
+    }
     const value = this.rest.klines(symbol, interval, 500, endTime).then((rows: unknown) => {
       if (!Array.isArray(rows)) throw new Error('Unexpected klines response');
       return rows
@@ -88,7 +95,9 @@ export class CandleService {
           volume: String(r[5]),
         }));
     });
+    this.cache.delete(key);
     this.cache.set(key, { at: this.now(), value });
+    while (this.cache.size > CACHE_MAX) this.cache.delete(this.cache.keys().next().value!);
     value.catch(() => {
       if (this.cache.get(key)?.value === value) this.cache.delete(key);
     });
