@@ -344,9 +344,23 @@ export class EngineRunner {
     this.scheduleAt(arrivesAt, orderId, (ctx) => this.d.engine.arrive(orderId, ctx));
   }
 
-  /** arriveCancel() at cancelArrivesAt; the engine ignores orders with no cancel in flight. */
+  /**
+   * arriveCancel() at cancelArrivesAt; the engine ignores orders with no cancel in flight. An order
+   * held back after a restart to be sent again never had its old arrival, so the cancel does not
+   * wait for it.
+   */
   private scheduleCancel(orderId: string, cancelArrivesAt: number): void {
-    this.scheduleAt(cancelArrivesAt, orderId, (ctx) => this.d.engine.arriveCancel(orderId, ctx));
+    this.scheduleAt(cancelArrivesAt, orderId, (ctx) =>
+      this.heldBack(orderId)
+        ? this.d.engine.arriveCancelBeforeResend(orderId, ctx)
+        : this.d.engine.arriveCancel(orderId, ctx),
+    );
+  }
+
+  /** Whether recover() holds the order back to send it again once its symbol is fresh. */
+  private heldBack(orderId: string): boolean {
+    for (const ids of this.awaitingFresh.values()) if (ids.has(orderId)) return true;
+    return false;
   }
 
   /**
@@ -395,8 +409,11 @@ export class EngineRunner {
     const ctx = this.ctx();
     const events: EngineEvent[] = [];
     for (const { id } of [...state.orders.values()]) {
-      // Re-read: cancelling one leg of a pair settles its partner too.
-      if (state.orders.get(id)!.cancelArrivesAt !== null) events.push(...this.d.engine.arriveCancel(id, ctx));
+      // Re-read: cancelling one leg of a pair settles its partner too. A pending order is sent
+      // again below, so its old arrival never happened and does not come before the cancel.
+      if (state.orders.get(id)!.cancelArrivesAt !== null) {
+        events.push(...this.d.engine.arriveCancelBeforeResend(id, ctx));
+      }
     }
     for (const o of [...state.orders.values()]) {
       if (o.status !== 'pending') continue;
@@ -436,7 +453,9 @@ export class EngineRunner {
       if (!this.d.market.isFresh(symbol)) continue;
       this.awaitingFresh.delete(symbol);
       for (const id of ids) {
-        if (state.orders.get(id)?.cancelArrivesAt != null) events.push(...this.d.engine.arriveCancel(id, ctx));
+        if (state.orders.get(id)?.cancelArrivesAt != null) {
+          events.push(...this.d.engine.arriveCancelBeforeResend(id, ctx));
+        }
         const o = state.orders.get(id);
         if (!o || o.status !== 'pending') continue; // cancelled meanwhile
         const key = o.ocoGroupId ?? o.id;

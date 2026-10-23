@@ -146,14 +146,19 @@ export class SpotEngine {
     const order = this.s.orders.get(orderId);
     if (!order) return [];
     if (order.status === 'triggered') return arriveTriggered(this.s, order, ctx);
+    return activateAttachedPairs(this.s, this.arrivePending(order, ctx), ctx);
+  }
+
+  /** A submitted order reaches the exchange, without activating attached pairs; a no-op unless pending and due. */
+  private arrivePending(order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
     if (order.status !== 'pending') return [];
     if (order.arrivesAt !== null && ctx.now < order.arrivesAt) return [];
     switch (order.type) {
       case 'market':
-        return activateAttachedPairs(this.s, this.arriveMarket(order, ctx), ctx);
+        return this.arriveMarket(order, ctx);
       case 'limit':
       case 'post_only':
-        return activateAttachedPairs(this.s, arriveLimit(this.s, order, ctx), ctx);
+        return arriveLimit(this.s, order, ctx);
       case 'stop_loss':
       case 'take_profit':
         return arriveStop(this.s, order, ctx);
@@ -211,7 +216,7 @@ export class SpotEngine {
     if (!ctx.market.isFresh(symbol)) return [];
     const dueCancels = [...this.s.orders.values()].filter((o) => o.symbol === symbol && cancelDue(o, ctx.now));
     return [
-      ...dueCancels.flatMap((o) => this.deliverCancel(o.id, ctx)),
+      ...dueCancels.flatMap((o) => this.deliverCancel(o.id, ctx, true)),
       ...armWaitingPairs(this.s, symbol, ctx),
       ...executeDue(this.s, symbol, ctx),
     ];
@@ -251,16 +256,31 @@ export class SpotEngine {
    * triggered, was rejected or was cancelled meanwhile stays as it is, and the late cancel is
    * recorded as cancel_rejected. A cancel that needs the exchange rules while they are not loaded
    * stays in flight: onFresh delivers it once the symbol's data is fresh, except for a pending
-   * order whose own arrival comes first, which needs arriveCancel again.
+   * order whose own arrival comes first, which needs arriveCancel again. A pending order whose own
+   * arrival is due no later than the cancel's arrives first, here, whichever timer runs first.
    */
   arriveCancel(orderId: string, ctx: EngineCtx): EngineEvent[] {
-    return activateAttachedPairs(this.s, this.deliverCancel(orderId, ctx), ctx);
+    return activateAttachedPairs(this.s, this.deliverCancel(orderId, ctx, true), ctx);
   }
 
-  /** arriveCancel without activating attached pairs. */
-  private deliverCancel(orderId: string, ctx: EngineCtx): EngineEvent[] {
+  /**
+   * arriveCancel for a pending order the server sends again after a restart, with a new arrival
+   * delay: its old arrival never happened, so a cancel that has reached the exchange cancels it
+   * whatever that old arrival time was. The same as arriveCancel for any other order.
+   */
+  arriveCancelBeforeResend(orderId: string, ctx: EngineCtx): EngineEvent[] {
+    return activateAttachedPairs(this.s, this.deliverCancel(orderId, ctx, false), ctx);
+  }
+
+  /** arriveCancel without activating attached pairs; `arrivalFirst` runs a due earlier arrival first. */
+  private deliverCancel(orderId: string, ctx: EngineCtx, arrivalFirst: boolean): EngineEvent[] {
     const order = this.s.orders.get(orderId);
     if (!order || order.cancelArrivesAt === null || ctx.now < order.cancelArrivesAt) return [];
+    if (arrivalFirst && arrivesBeforeCancel(order)) {
+      // The arrival changes the status, or leaves an attached pair waiting for data with no
+      // arrival time, so the cancel is then delivered against what the arrival left.
+      return [...this.arrivePending(order, ctx), ...this.deliverCancel(orderId, ctx, true)];
+    }
     const arrived: SpotOrder = { ...order, cancelArrivesAt: null };
     if (!CANCELLABLE.has(order.status)) {
       this.s.orders.set(arrived.id, arrived);
@@ -416,8 +436,13 @@ export class SpotEngine {
  */
 function cancelDue(o: SpotOrder, now: number): boolean {
   if (o.cancelArrivesAt === null || o.cancelArrivesAt > now) return false;
-  const arrivesFirst = o.status === 'pending' && o.arrivesAt !== null && o.arrivesAt <= o.cancelArrivesAt;
-  return !arrivesFirst;
+  return !arrivesBeforeCancel(o);
+}
+
+/** A pending order whose own arrival is due no later than its cancel's. */
+function arrivesBeforeCancel(o: SpotOrder): boolean {
+  if (o.status !== 'pending' || o.arrivesAt === null || o.cancelArrivesAt === null) return false;
+  return o.arrivesAt <= o.cancelArrivesAt;
 }
 
 /**
