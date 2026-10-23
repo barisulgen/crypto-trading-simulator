@@ -63,10 +63,54 @@ describe('FeedHealth', () => {
     const h = mk();
     h.onTrade('BTCUSDT', 1000, Number.NaN);
     expect(h.reason('BTCUSDT', 1000)).toBe('Feed lagging (invalid event time)');
-    h.onTicker('BTCUSDT', 1100, 1100);
+    h.onTrade('BTCUSDT', 1100, 1100);
     expect(h.isFresh('BTCUSDT', 1100)).toBe(true);
     h.onTicker('BTCUSDT', 1200, Number.NaN);
     expect(h.reason('BTCUSDT', 1200)).toBe('Feed lagging (invalid event time)');
+    h.onTicker('BTCUSDT', 1300, 1300);
+    expect(h.isFresh('BTCUSDT', 1300)).toBe(true);
+  });
+  it('lag is tracked per stream: a current event clears only its own stream', () => {
+    const h = mk();
+    h.onDepth('BTCUSDT', 10000, 4000); // depth 6 s late
+    h.onTrade('BTCUSDT', 10100, 10100);
+    h.onTicker('BTCUSDT', 10100, 10100);
+    expect(h.reason('BTCUSDT', 10100)).toBe('Feed lagging by 6.0s'); // current trades and tickers do not vouch for the book
+    h.onDepth('BTCUSDT', 10200, 10200);
+    expect(h.isFresh('BTCUSDT', 10200)).toBe(true);
+
+    h.onTrade('BTCUSDT', 11000, 5000); // trade 6 s late
+    h.onDepth('BTCUSDT', 11100, 11100);
+    h.onTicker('BTCUSDT', 11100, 11100);
+    expect(h.reason('BTCUSDT', 11100)).toBe('Feed lagging by 6.0s');
+    h.onTrade('BTCUSDT', 11200, 11200);
+    expect(h.isFresh('BTCUSDT', 11200)).toBe(true);
+
+    h.onTicker('BTCUSDT', 12000, 6000); // ticker 6 s late
+    h.onDepth('BTCUSDT', 12100, 12100);
+    h.onTrade('BTCUSDT', 12100, 12100);
+    expect(h.reason('BTCUSDT', 12100)).toBe('Feed lagging by 6.0s');
+    h.onTicker('BTCUSDT', 12200, 12200);
+    expect(h.isFresh('BTCUSDT', 12200)).toBe(true);
+  });
+  it('reports the largest lag when several streams are lagging; an invalid event time outranks any lag', () => {
+    const h = mk();
+    h.onDepth('BTCUSDT', 10000, 4000); // 6 s
+    h.onTrade('BTCUSDT', 10000, 2000); // 8 s
+    h.onTicker('BTCUSDT', 10000, 3000); // 7 s
+    expect(h.reason('BTCUSDT', 10000)).toBe('Feed lagging by 8.0s');
+    h.onTicker('BTCUSDT', 10100, Number.NaN);
+    expect(h.reason('BTCUSDT', 10100)).toBe('Feed lagging (invalid event time)');
+  });
+  it('trades and tickers are not depth updates: with no depth the symbol still goes stale', () => {
+    const h = mk();
+    for (let t = 10000; t <= 110000; t += 10000) {
+      h.onTrade('BTCUSDT', t, t);
+      h.onTicker('BTCUSDT', t, t);
+    }
+    expect(h.isFresh('BTCUSDT', 110000)).toBe(true);
+    h.onTrade('BTCUSDT', 120001, 120001);
+    expect(h.reason('BTCUSDT', 120001)).toBe('No order-book updates for 120s');
   });
   it('a trade or ticker applies the clock offset to lag', () => {
     const h = mk();
@@ -98,13 +142,14 @@ describe('FeedHealth', () => {
     h.onDepth('ETHUSDT', 20100, 20100);
     expect(h.isFresh('ETHUSDT', 20100)).toBe(true);
   });
-  it('a depth update that is itself lagging does not end the wait', () => {
+  it('a depth update that is itself lagging does not end the wait, and a current trade does not hide it', () => {
     const h = mk();
     h.onFrame(20000);
     h.onDepth('BTCUSDT', 20000, 12000); // buffered during the freeze: 8 s old
     expect(h.reason('BTCUSDT', 20000)).toBe('Feed lagging by 8.0s');
-    h.onTrade('BTCUSDT', 20100, 20100); // a current trade clears the lag but not the wait
-    expect(h.reason('BTCUSDT', 20100)).toBe('Waiting for order-book update after a silent connection');
+    h.onTrade('BTCUSDT', 20100, 20100);
+    h.onTicker('BTCUSDT', 20100, 20100);
+    expect(h.reason('BTCUSDT', 20100)).toBe('Feed lagging by 8.0s');
     h.onDepth('BTCUSDT', 20200, 20200);
     expect(h.isFresh('BTCUSDT', 20200)).toBe(true);
   });

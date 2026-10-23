@@ -46,6 +46,11 @@ const LOG_EVERY_MS = 60_000;
 const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 
+/** The exchange event time of a message that parsed; NaN for a malformed one, which proves nothing about lag. */
+function eventTime(parsed: boolean, data: any): number {
+  return parsed ? data.E : Number.NaN;
+}
+
 /** A finite Decimal > 0 from a string, else null. */
 function positive(x: unknown): Decimal | null {
   if (typeof x !== 'string') return null;
@@ -284,8 +289,7 @@ export class SpotFeed extends EventEmitter {
     const price = positive(d.p);
     const qty = positive(d.q);
     const valid = price !== null && qty !== null && Number.isSafeInteger(d.a) && Number.isSafeInteger(d.T);
-    // Like a depth event, a trade shows the feed is current only by its own exchange event time.
-    this.health.onTrade(symbol, now, valid ? d.E : Number.NaN);
+    this.health.onTrade(symbol, now, eventTime(valid, d));
     if (!valid) {
       this.warnLimited(`${symbol}:aggTrade`, `spot feed: invalid aggTrade for ${symbol}; dropped`);
       return;
@@ -297,8 +301,9 @@ export class SpotFeed extends EventEmitter {
   private onTicker(symbol: string, d: any, now: number): void {
     const last = positive(d.c);
     const open = positive(d.o);
-    this.health.onTicker(symbol, now, last !== null && open !== null ? d.E : Number.NaN);
-    if (!last || !open) {
+    const valid = last !== null && open !== null;
+    this.health.onTicker(symbol, now, eventTime(valid, d));
+    if (!valid) {
       this.warnLimited(`${symbol}:miniTicker`, `spot feed: invalid miniTicker for ${symbol}; dropped`);
       return;
     }
@@ -312,7 +317,7 @@ export class SpotFeed extends EventEmitter {
   private onDepth(symbol: string, data: any, now: number): void {
     const s = this.st.get(symbol)!;
     const diff = parseDiff(data);
-    this.health.onDepth(symbol, now, diff ? data.E : Number.NaN);
+    this.health.onDepth(symbol, now, eventTime(diff !== null, data));
     if (!diff) {
       this.log.warn(`spot feed: malformed depth event for ${symbol}; resyncing`);
       this.invalidate(symbol);

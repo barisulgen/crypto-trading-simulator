@@ -11,11 +11,13 @@ export interface HealthTransition {
   at: number;
 }
 
+type Stream = 'depth' | 'trade' | 'ticker';
+
 interface SymState {
   bookValid: boolean;
   lastDepth: number | null;
-  lag: number;
-  lagging: boolean;
+  /** Lag in ms of the latest event of each stream; infinite when its event time was unusable. */
+  lag: Record<Stream, number>;
   /** A frame came after a silent stretch: the book is old until a current depth event arrives. */
   needsDepth: boolean;
   reportedFresh: boolean;
@@ -34,8 +36,7 @@ export class FeedHealth {
       this.syms.set(s, {
         bookValid: false,
         lastDepth: null,
-        lag: 0,
-        lagging: false,
+        lag: { depth: 0, trade: 0, ticker: 0 },
         needsDepth: false,
         reportedFresh: false,
       });
@@ -75,32 +76,36 @@ export class FeedHealth {
     this.lastFrame = now;
   }
 
-  /** Records how late an event stamped by the exchange at `eventTime` is when seen locally at `now`. */
-  private measureLag(s: SymState, now: number, eventTime: number): void {
+  private late(lag: number): boolean {
+    return !(lag <= this.cfg.lagMs);
+  }
+
+  /**
+   * Records how late the latest event of `stream`, stamped by the exchange at `eventTime`, is when
+   * seen locally at `now`. Each stream keeps its own verdict: a current trade or ticker says
+   * nothing about a late order book, so only a later event of the same stream clears a lag.
+   */
+  private measure(symbol: string, stream: Stream, now: number, eventTime: number): SymState {
+    const s = this.st(symbol);
+    this.touch(now);
     // A missing or non-numeric event time can never prove the feed is current.
-    s.lag = Number.isFinite(eventTime) ? now - (eventTime - this.clockOffset) : Number.POSITIVE_INFINITY;
-    s.lagging = !(s.lag <= this.cfg.lagMs);
+    s.lag[stream] = Number.isFinite(eventTime) ? now - (eventTime - this.clockOffset) : Number.POSITIVE_INFINITY;
+    return s;
   }
 
   onDepth(symbol: string, now: number, eventTime: number): void {
-    const s = this.st(symbol);
-    this.touch(now);
+    const s = this.measure(symbol, 'depth', now, eventTime);
     s.lastDepth = now;
-    this.measureLag(s, now, eventTime);
     // Only a current depth event shows the book is no older than the silence that preceded it.
-    if (!s.lagging) s.needsDepth = false;
+    if (!this.late(s.lag.depth)) s.needsDepth = false;
   }
 
   onTrade(symbol: string, now: number, eventTime: number): void {
-    const s = this.st(symbol);
-    this.touch(now);
-    this.measureLag(s, now, eventTime);
+    this.measure(symbol, 'trade', now, eventTime);
   }
 
   onTicker(symbol: string, now: number, eventTime: number): void {
-    const s = this.st(symbol);
-    this.touch(now);
-    this.measureLag(s, now, eventTime);
+    this.measure(symbol, 'ticker', now, eventTime);
   }
 
   setBookValid(symbol: string, valid: boolean): void {
@@ -118,8 +123,10 @@ export class FeedHealth {
     if (!this.connected) return 'Disconnected';
     if (now - this.lastFrame > silentMs) return `Connection silent for ${silentMs / 1000}s`;
     if (!s.bookValid) return 'Order book resyncing';
-    if (s.lagging) {
-      return Number.isFinite(s.lag) ? `Feed lagging by ${(s.lag / 1000).toFixed(1)}s` : 'Feed lagging (invalid event time)';
+    const late = Object.values(s.lag).filter((lag) => this.late(lag));
+    if (late.length > 0) {
+      const worst = Math.max(...late);
+      return Number.isFinite(worst) ? `Feed lagging by ${(worst / 1000).toFixed(1)}s` : 'Feed lagging (invalid event time)';
     }
     if (s.needsDepth) return 'Waiting for order-book update after a silent connection';
     if (now - (s.lastDepth ?? this.connectAt) > noUpdateMs) {

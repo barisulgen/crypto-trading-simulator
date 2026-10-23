@@ -91,15 +91,20 @@ async function setup() {
   clock.advance(100);
   expect(engine.state.orders.get(order.id)!.status).toBe('open');
 
-  /** The stop is triggered, then the event loop freezes before its arrival time. */
-  const triggerThenFreeze = () => {
+  const status = () => engine.state.orders.get(order.id)!.status;
+  /**
+   * The stop is triggered, then the event loop freezes before its arrival time. With timersFirst
+   * the due arrival timer and health poll run first, on silent data; without, the buffered
+   * frames are processed before them.
+   */
+  const triggerThenFreeze = (timersFirst = true) => {
     trade(2, '98.90');
-    expect(engine.state.orders.get(order.id)!.status).toBe('triggered');
+    expect(status()).toBe('triggered');
     clock.now += FREEZE_MS; // no timer ran meanwhile
-    clock.advance(0); // the arrival timer and the health poll run first, on silent data
+    if (!timersFirst) return;
+    clock.advance(0);
     expect(engine.state.orders.get(order.id)).toMatchObject({ status: 'triggered', arrivesAt: null });
   };
-  const status = () => engine.state.orders.get(order.id)!.status;
   const notices = () => sent.flatMap((m) => (m.type === 'notice' ? [m.text] : []));
   return { clock, ws, market, depth, trade, ping: () => ws.emit('ping'), triggerThenFreeze, status, notices };
 }
@@ -114,10 +119,13 @@ describe('after a freeze', () => {
     expect(t.market.isFresh('BTCUSDT')).toBe(false);
     expect(t.status()).toBe('triggered');
 
-    // The book moved during the freeze: a fresh depth event ends the wait.
+    // The book moved during the freeze. A current depth event ends the wait for depth, but the
+    // late trade's own lag stays until a later trade shows trades are current again.
     t.depth(102, [['99.90', '0'], ['99.80', '0'], ['99.00', '0'], ['95.00', '5']]);
-    expect(t.market.isFresh('BTCUSDT')).toBe(true);
-    t.clock.advance(1000); // the next health poll sees fresh data
+    expect(t.market.healthSnapshot().BTCUSDT).toEqual({ fresh: false, reason: 'Feed lagging by 20.0s' });
+    t.clock.advance(1000);
+    expect(t.status()).toBe('triggered');
+    t.trade(4, '95.10');
     expect(t.status()).toBe('filled');
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([
       expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /),
@@ -142,6 +150,24 @@ describe('after a freeze', () => {
     t.depth(102, [['99.90', '0'], ['99.80', '0'], ['99.00', '0'], ['95.00', '5']]);
     t.clock.advance(1000);
     expect(t.status()).toBe('filled');
+    expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([
+      expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /),
+    ]);
+  });
+
+  it('buffered frames processed before the arrival timer and the health poll execute the stop on the new book only', async () => {
+    const t = await setup();
+    t.triggerThenFreeze(false);
+
+    t.trade(3, '98.50', t.clock.now - FREEZE_MS); // buffered during the freeze
+    expect(t.market.isFresh('BTCUSDT')).toBe(false);
+    expect(t.status()).toBe('triggered');
+    t.depth(102, [['99.90', '0'], ['99.80', '0'], ['99.00', '0'], ['95.00', '5']]);
+    expect(t.status()).toBe('triggered');
+    t.trade(4, '95.10'); // the last buffered frame is current: now fresh on the new book
+    expect(t.status()).toBe('filled');
+
+    t.clock.advance(1000); // the late timer and poll find nothing left to do
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([
       expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /),
     ]);

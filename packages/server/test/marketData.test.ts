@@ -494,15 +494,38 @@ describe('SpotFeed', () => {
 
     ws.msg(aggTrade(undefined));
     expect(lag()).toBe('Feed lagging (invalid event time)');
-    ws.msg(miniTicker(clock.t));
+    ws.msg(miniTicker(clock.t)); // a ticker does not clear a trade's lag
+    expect(lag()).toBe('Feed lagging (invalid event time)');
+    ws.msg(aggTrade(clock.t));
     expect(lag()).toBeNull();
     ws.msg(aggTrade(clock.t, 'x')); // a bad price proves nothing, whatever its event time
     expect(lag()).toBe('Feed lagging (invalid event time)');
     ws.msg(aggTrade(clock.t));
+    expect(lag()).toBeNull();
     ws.msg(miniTicker(clock.t, 'x'));
     expect(lag()).toBe('Feed lagging (invalid event time)');
     ws.msg(miniTicker(clock.t));
     expect(lag()).toBeNull();
+  });
+
+  it('a current trade or ticker does not clear the lag of a late depth event', async () => {
+    const { feed, sockets, timers, snaps, health, clock } = setup();
+    snaps.BTCUSDT = [snap(100)];
+    feed.start();
+    const ws = sockets[0]!;
+    ws.open();
+    timers.fire();
+    await tick();
+    ws.msg(diff('BTCUSDT', 99, 101));
+    expect(health.isFresh('BTCUSDT', clock.t)).toBe(true);
+
+    ws.msg(diff('BTCUSDT', 102, 102, [], [], clock.t - 6000)); // the book is 6 s old
+    expect(health.reason('BTCUSDT', clock.t)).toBe('Feed lagging by 6.0s');
+    ws.msg({ stream: 'btcusdt@aggTrade', data: { e: 'aggTrade', E: clock.t, a: 7, p: '100', q: '1', T: 1, m: false } });
+    ws.msg({ stream: 'btcusdt@miniTicker', data: { e: '24hrMiniTicker', E: clock.t, c: '100', o: '99' } });
+    expect(health.isFresh('BTCUSDT', clock.t)).toBe(false);
+    ws.msg(diff('BTCUSDT', 103, 103, [], [], clock.t));
+    expect(health.isFresh('BTCUSDT', clock.t)).toBe(true);
   });
 });
 
