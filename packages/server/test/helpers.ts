@@ -1,7 +1,16 @@
 import { EventEmitter } from 'node:events';
+import { D, SpotEngine } from '@sim/engine';
 import type { AggTrade, BookSnapshot, Decimal } from '@sim/engine';
 import { FakeMarket } from '../../engine/test/fixtures.ts';
-import type { HealthTransition } from '../src/market/feedHealth.ts';
+import { currentSeasonId, openDb } from '../src/db/db.ts';
+import { loadSpotState } from '../src/db/store.ts';
+import { FeedHealth } from '../src/market/feedHealth.ts';
+import { LocalBook } from '../src/market/localBook.ts';
+import { MarketData } from '../src/market/marketData.ts';
+import { SpotFeed } from '../src/market/spotFeed.ts';
+import { EngineRunner } from '../src/runner.ts';
+import type { RunnerMessage } from '../src/runner.ts';
+import exchangeInfo from './fixtures/btcusdt-exchangeinfo.json' with { type: 'json' };
 
 export const WATCHDOG_MS = 5000;
 export const tick = () => new Promise<void>((r) => setImmediate(r));
@@ -140,21 +149,93 @@ export class TestMarket extends FakeMarket {
   }
 }
 
-/** FeedHealth.poll over a TestMarket's freshness; like FeedHealth, every symbol starts unreported (stale). */
+/** FeedHealth's lastFrameAt for runner tests over a TestMarket: frames keep arriving, the last one just now. */
 export class FakeHealth {
-  private reported = new Map<string, boolean>();
-  constructor(
-    private readonly market: TestMarket,
-    private readonly symbols: string[],
-  ) {}
-  poll(now: number): HealthTransition[] {
-    const out: HealthTransition[] = [];
-    for (const symbol of this.symbols) {
-      const fresh = this.market.isFresh(symbol);
-      if (fresh === (this.reported.get(symbol) ?? false)) continue;
-      this.reported.set(symbol, fresh);
-      out.push({ symbol, fresh, reason: fresh ? null : this.market.staleReason, at: now });
-    }
-    return out;
+  constructor(private readonly now: () => number) {}
+  lastFrameAt(): number {
+    return this.now();
   }
+}
+
+type Levels = [string, string][];
+
+/**
+ * The real feed, health, market data, engine and runner over a fake socket, a fake clock and a
+ * ':memory:' DB: connected, BTCUSDT's book synced (bids 99.90 x 0.4, 99.80 x 1.0, 99.00 x 3.0;
+ * asks 100.00 x 0.5, 100.10 x 1.0, 100.50 x 2.0) by depth update 101 at t0 + 1 s, rules and
+ * average price loaded, the runner started: fresh on return. The rules carry the symbol's
+ * Binance trading status as of the last refreshRules() (setTradingStatus changes it).
+ */
+export async function liveStack(t0: number) {
+  const clock = new FakeClock(t0);
+  const sockets: FakeWs[] = [];
+  const symbols = ['BTCUSDT'];
+  const silent = { info() {}, warn() {}, error() {} };
+  const health = new FeedHealth(symbols, { silentMs: 15_000, lagMs: 5000, noUpdateMs: 120_000 });
+  const books = new Map([['BTCUSDT', new LocalBook()]]);
+  let tradingStatus = 'TRADING';
+  const rest = {
+    depth: async () => ({
+      lastUpdateId: 100,
+      bids: [['99.90', '0.4'], ['99.80', '1.0'], ['99.00', '3.0']] as Levels,
+      asks: [['100.00', '0.5'], ['100.10', '1.0'], ['100.50', '2.0']] as Levels,
+    }),
+    exchangeInfo: async () => ({ symbols: [{ ...exchangeInfo.symbols[0]!, status: tradingStatus }] }),
+    avgPrice: async () => ({ price: '100' }),
+    serverTime: async () => ({ serverTime: clock.now }),
+  };
+  const common = { symbols, logger: silent, now: () => clock.now, setTimer: clock.setTimer };
+  const feed = new SpotFeed({
+    ...common,
+    rest,
+    health,
+    books,
+    wsFactory: (url) => {
+      const w = new FakeWs(url);
+      sockets.push(w);
+      return w as any;
+    },
+  });
+  const market = new MarketData({ ...common, feed, books, health, rest });
+  const db = openDb(':memory:');
+  const seasonId = currentSeasonId(db, () => clock.now);
+  const engine = new SpotEngine(loadSpotState(db, seasonId, ['USDT', 'BTC']));
+  const sent: RunnerMessage[] = [];
+  const runner = new EngineRunner({
+    ...common,
+    db,
+    seasonId,
+    engine,
+    market,
+    health,
+    fees: { maker: D('0.001'), taker: D('0.001') },
+    rng: () => 0,
+    onBroadcast: (m) => sent.push(m),
+    onFatal: (e) => {
+      throw e;
+    },
+  });
+
+  feed.start();
+  const ws = sockets[0]!;
+  ws.open();
+  clock.advance(1000);
+  await tick(); // the snapshot
+  /** A depth update (event time now) with update id U. */
+  const depth = (U: number, b: Levels = [], a: Levels = []) =>
+    ws.msg({ stream: 'btcusdt@depth@100ms', data: { e: 'depthUpdate', E: clock.now, s: 'BTCUSDT', U, u: U, b, a } });
+  /** An aggTrade with id `id`, stamped by the exchange at E (default now). */
+  const trade = (id: number, price: string, E = clock.now) =>
+    ws.msg({ stream: 'btcusdt@aggTrade', data: { e: 'aggTrade', E, s: 'BTCUSDT', a: id, p: price, q: '1', T: E, m: true } });
+  depth(101);
+  await market.refreshRules();
+  await market.pollAvgPrice('BTCUSDT');
+  runner.start();
+  if (!market.isFresh('BTCUSDT')) throw new Error('live stack not fresh after setup');
+
+  const notices = () => sent.flatMap((m) => (m.type === 'notice' ? [m.text] : []));
+  const setTradingStatus = (status: string) => {
+    tradingStatus = status;
+  };
+  return { clock, ws, market, db, engine, runner, notices, depth, trade, ping: () => ws.emit('ping'), setTradingStatus };
 }

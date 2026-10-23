@@ -50,7 +50,7 @@ async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
     seasonId,
     engine,
     market,
-    health: new FakeHealth(market, config.symbols),
+    health: new FakeHealth(() => clock.now),
     symbols: config.symbols,
     fees: config.fees.spot,
     now: () => clock.now,

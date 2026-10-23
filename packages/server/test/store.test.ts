@@ -4,7 +4,16 @@ import type { AggTrade, EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest, Spo
 import { FakeMarket, seedCoins, testCtx } from '../../engine/test/fixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
-import { checkInvariants, insertEquitySnapshot, loadSpotState, persist, queryHistory, touchAlive } from '../src/db/store.ts';
+import {
+  checkInvariants,
+  insertEquitySnapshot,
+  loadOpenGaps,
+  loadSpotState,
+  openGap,
+  persist,
+  queryHistory,
+  touchAlive,
+} from '../src/db/store.ts';
 
 const NOW = 1_000_000;
 const ASSETS = ['USDT', 'BTC'];
@@ -72,16 +81,16 @@ function partialFillScenario() {
 }
 
 describe('openDb', () => {
-  it('applies migrations once: user_version 1, reopening a file db raises no error', () => {
+  it('applies migrations once: user_version 2, reopening a file db raises no error', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(1);
+    expect(db.pragma('user_version', { simple: true })).toBe(2);
     expect(db.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toEqual({ value: '1' });
     expect(currentSeasonId(db)).toBe(1);
     expect(currentSeasonId(db)).toBe(1);
     expect(db.prepare('SELECT name FROM seasons').all()).toEqual([{ name: 'Season 1' }]);
   });
 
-  it('a second open of the same file keeps version 1 and its data', async () => {
+  it('a second open of the same file keeps version 2 and its data', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -93,12 +102,51 @@ describe('openDb', () => {
       touchAlive(a, 123);
       a.close();
       const b = openDb(file);
-      expect(b.pragma('user_version', { simple: true })).toBe(1);
+      expect(b.pragma('user_version', { simple: true })).toBe(2);
       expect(b.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get()).toEqual({ value: '123' });
       touchAlive(b, 456);
       expect(b.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get()).toEqual({ value: '456' });
       b.close();
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('migration 002 applies to a Phase 1 database (user_version 1) without touching existing rows', async () => {
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { default: Database } = await import('better-sqlite3');
+    const dir = mkdtempSync(join(tmpdir(), 'sim-db-'));
+    const tables = ['meta', 'seasons', 'events', 'orders', 'balances', 'account', 'trade_cursor'];
+    const dump = (db: Db) => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
+    let db: Db | null = null;
+    try {
+      const file = join(dir, 'sim.sqlite');
+      // A database as Phase 1 left it: only 001 applied, with data in it.
+      const v1 = new Database(file);
+      v1.exec(readFileSync(new URL('../src/db/migrations/001_init.sql', import.meta.url), 'utf8'));
+      v1.pragma('user_version = 1');
+      v1.exec(`
+        INSERT INTO meta (key, value) VALUES ('test_data', '1'), ('last_alive', '777');
+        INSERT INTO seasons (name, started_at) VALUES ('Season 1', 5);
+        INSERT INTO events (season_id, time, type, symbol, market, payload)
+          VALUES (1, 20, 'feed_gap', 'BTCUSDT', 'spot', '{"startedAt":10,"endedAt":20,"reason":"Disconnected"}');
+        INSERT INTO orders (id, season_id, symbol, market, status, created_at, updated_at, data)
+          VALUES ('o-1', 1, 'BTCUSDT', 'spot', 'open', 30, 30, '{"id":"o-1"}');
+        INSERT INTO balances (season_id, wallet, asset, free, locked) VALUES (1, 'spot', 'USDT', '900.5', '99.5');
+        INSERT INTO account (season_id, total_deposited) VALUES (1, '1000');
+        INSERT INTO trade_cursor (season_id, symbol, last_trade_id) VALUES (1, 'BTCUSDT', 42);
+      `);
+      const before = dump(v1 as unknown as Db);
+      v1.close();
+
+      db = openDb(file);
+      expect(db.pragma('user_version', { simple: true })).toBe(2);
+      expect(dump(db)).toEqual(before);
+      expect(db.prepare('SELECT * FROM open_gaps').all()).toEqual([]);
+    } finally {
+      db?.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -245,6 +293,46 @@ describe('persist and loadSpotState', () => {
     for (const table of ['events', 'fills', 'orders', 'balances', 'account']) {
       expect(db.prepare(`SELECT count(*) c FROM ${table}`).get()).toEqual({ c: 0 });
     }
+  });
+});
+
+describe('open gaps', () => {
+  const gap = (symbol: string, startedAt: number, reason: string) => ({ market: 'spot' as const, symbol, startedAt, reason });
+
+  it('openGap keeps the earliest start (with its reason) per symbol; loadOpenGaps reads one season', () => {
+    const { db, seasonId } = setup();
+    expect(loadOpenGaps(db, seasonId)).toEqual([]);
+    openGap(db, seasonId, gap('BTCUSDT', 2000, 'Disconnected'));
+    openGap(db, seasonId, gap('BTCUSDT', 3000, 'Feed lagging by 6.0s')); // later: the open gap stays
+    openGap(db, seasonId, gap('ETHUSDT', 5000, 'Order book resyncing'));
+    openGap(db, seasonId + 1, gap('BTCUSDT', 1, 'Server offline'));
+    expect(loadOpenGaps(db, seasonId)).toEqual([gap('BTCUSDT', 2000, 'Disconnected'), gap('ETHUSDT', 5000, 'Order book resyncing')]);
+    openGap(db, seasonId, gap('ETHUSDT', 4000, 'Server offline')); // earlier: it starts there
+    expect(loadOpenGaps(db, seasonId)).toEqual([gap('BTCUSDT', 2000, 'Disconnected'), gap('ETHUSDT', 4000, 'Server offline')]);
+  });
+
+  it('persist records a feed_gap and deletes its open gap row in one transaction', () => {
+    const { engine, db, seasonId } = setup();
+    openGap(db, seasonId, gap('BTCUSDT', 10, 'Disconnected'));
+    openGap(db, seasonId, gap('ETHUSDT', 15, 'Disconnected'));
+    const feedGaps = [{ symbol: 'BTCUSDT', market: 'spot' as const, startedAt: 10, endedAt: 20, reason: 'Disconnected' }];
+    const gapEvents = () => db.prepare("SELECT count(*) AS n FROM events WHERE type = 'feed_gap'").get();
+
+    // The event insert fails: the row stays.
+    db.exec("CREATE TEMP TRIGGER no_gap BEFORE INSERT ON events WHEN NEW.type = 'feed_gap' BEGIN SELECT RAISE(ABORT, 'no'); END");
+    expect(() => persist(db, seasonId, engine.state, [], { feedGaps })).toThrow('no');
+    expect(loadOpenGaps(db, seasonId).map((g) => g.symbol)).toEqual(['BTCUSDT', 'ETHUSDT']);
+    db.exec('DROP TRIGGER no_gap');
+
+    // The row delete fails: no feed_gap event either.
+    db.exec("CREATE TEMP TRIGGER keep_gap BEFORE DELETE ON open_gaps BEGIN SELECT RAISE(ABORT, 'keep'); END");
+    expect(() => persist(db, seasonId, engine.state, [], { feedGaps })).toThrow('keep');
+    expect(gapEvents()).toEqual({ n: 0 });
+    db.exec('DROP TRIGGER keep_gap');
+
+    persist(db, seasonId, engine.state, [], { feedGaps });
+    expect(gapEvents()).toEqual({ n: 1 });
+    expect(loadOpenGaps(db, seasonId)).toEqual([gap('ETHUSDT', 15, 'Disconnected')]);
   });
 });
 

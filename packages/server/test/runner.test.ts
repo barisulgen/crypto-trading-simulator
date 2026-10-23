@@ -7,7 +7,7 @@ import { loadSpotState, toJson } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import { EngineRunner, RefusedError, RESTART_REASON, submittedOrder } from '../src/runner.ts';
 import { btcRules } from '../../engine/test/fixtures.ts';
-import { FakeClock, FakeHealth, TestMarket } from './helpers.ts';
+import { FakeClock, FakeHealth, TestMarket, liveStack } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
 const SYMBOLS = ['BTCUSDT'];
@@ -33,6 +33,14 @@ const stopSell = (qty: string, triggerPrice: string): SpotOrderRequest => ({
   triggerPrice,
 });
 
+/** The gaps saved as open, as rows. */
+const openGapsOf = (db: Db) => db.prepare('SELECT symbol, started_at AS startedAt, reason FROM open_gaps').all();
+/** The recorded feed_gap payloads, oldest first. */
+const gapsOf = (db: Db) =>
+  (db.prepare("SELECT payload FROM events WHERE type = 'feed_gap' ORDER BY id").all() as { payload: string }[]).map(
+    (r) => JSON.parse(r.payload),
+  );
+
 interface Msg {
   type: string;
   [k: string]: any;
@@ -44,7 +52,7 @@ function setup(opts: { db?: Db; market?: TestMarket; clock?: FakeClock } = {}) {
   const clock = opts.clock ?? new FakeClock(T0);
   const seasonId = currentSeasonId(db, () => clock.now);
   const market = opts.market ?? new TestMarket(SYMBOLS);
-  const health = new FakeHealth(market, SYMBOLS);
+  const health = new FakeHealth(() => clock.now);
   const engine = new SpotEngine(loadSpotState(db, seasonId, ASSETS));
   const sent: Msg[] = [];
   const fatal: unknown[] = [];
@@ -74,7 +82,9 @@ function setup(opts: { db?: Db; market?: TestMarket; clock?: FakeClock } = {}) {
       symbol: string | null;
       payload: string;
     }[]).map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
-  return { db, clock, seasonId, market, health, engine, runner, sent, fatal, logs, logger, notices, orderRow, eventsOf };
+  const openGapRows = () => openGapsOf(db);
+  const gaps = () => gapsOf(db);
+  return { db, clock, seasonId, market, health, engine, runner, sent, fatal, logs, logger, notices, orderRow, eventsOf, openGapRows, gaps };
 }
 
 /** Deposit 1000 USDT and buy 1 BTC at market (fills at 100.00 x 0.5 + 100.10 x 0.5). */
@@ -154,9 +164,10 @@ describe('EngineRunner', () => {
     t.market.trade('BTCUSDT', trade('98.90'));
     expect(t.orderRow(order.id)!.status).toBe('triggered');
 
-    // The data goes stale before the triggered order's arrival: it waits, never rejected.
+    // The data goes stale before the triggered order's arrival: it waits, never rejected. The
+    // gap starts at the last fresh moment, the trade just processed, not at the poll that sees it.
     t.market.setFresh('BTCUSDT', false); // at T0 + 400; health is polled every second from T0
-    const staleAt = T0 + 1000;
+    const staleAt = T0 + 400;
     t.clock.advance(1000);
     expect(t.orderRow(order.id)!.status).toBe('triggered');
     expect(JSON.parse(t.orderRow(order.id)!.data).arrivesAt).toBeNull();
@@ -283,22 +294,22 @@ describe('EngineRunner', () => {
     b.runner.start();
     expect(b.orderRow(order.id)!.status).toBe('filled');
     expect(b.eventsOf('feed_gap').map((g) => g.payload)).toEqual([
-      // closed by a.runner.stop(): stale since the poll at T0 + 1 s, stopped at T0 + 5.5 s
-      { startedAt: T0 + 1000, endedAt: T0 + 5500, reason: 'Disconnected' },
+      // closed by a.runner.stop(): stale after the trade at T0 + 400, stopped at T0 + 5.5 s
+      { startedAt: T0 + 400, endedAt: T0 + 5500, reason: 'Disconnected' },
       { startedAt: lastAlive, endedAt: startAt, reason: 'Server offline' },
     ]);
   });
 
-  it('stop() persists a gap still open at shutdown, ending at the stop time', () => {
+  it('stop() records a gap still open at shutdown as a feed_gap ending at the stop time and clears its row', () => {
     const t = setup();
-    t.runner.start();
+    t.runner.start(); // fresh at the first poll, T0
     t.market.setFresh('BTCUSDT', false);
-    t.clock.advance(1000); // stale at T0 + 1000
+    t.clock.advance(1000); // seen stale at T0 + 1000: the gap starts at T0, the last fresh moment
+    expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0, reason: 'Disconnected' }]);
     t.clock.advance(4500);
     t.runner.stop(); // at T0 + 5500
-    expect(t.eventsOf('feed_gap').map((g) => g.payload)).toEqual([
-      { startedAt: T0 + 1000, endedAt: T0 + 5500, reason: 'Disconnected' },
-    ]);
+    expect(t.gaps()).toEqual([{ startedAt: T0, endedAt: T0 + 5500, reason: 'Disconnected' }]);
+    expect(t.openGapRows()).toEqual([]);
     t.runner.stop(); // a second stop records nothing more
     expect(t.eventsOf('feed_gap')).toHaveLength(1);
   });
@@ -538,5 +549,183 @@ describe('EngineRunner', () => {
     t.market.setFresh('BTCUSDT', false);
     t.clock.advance(60_000);
     expect(snaps()).toHaveLength(1);
+  });
+});
+
+describe('feed gaps', () => {
+  const PAUSED = 'Server paused (sleep or freeze)';
+  const lastAliveOf = (db: Db) => Number((db.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get() as { value: string }).value);
+
+  it('a poll more than 5 s after the previous one (sleep) opens a gap there, closed by the next poll that finds fresh data', () => {
+    const t = setup();
+    t.runner.start();
+    t.clock.advance(10_000); // fresh polls every second, the last at T0 + 10 s
+    t.clock.now += 5000; // a stall: the overdue poll runs 5 s after the previous one, not yet a pause
+    t.clock.advance(0);
+    expect(t.openGapRows()).toEqual([]);
+
+    const T = t.clock.now; // that poll, the last before the PC sleeps
+    t.clock.now += 28_800_000; // no timer runs while asleep
+    t.clock.advance(0); // the overdue poll: the data looks fresh, but the server was paused
+    expect(t.gaps()).toEqual([]);
+    expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T, reason: PAUSED }]);
+    t.market.trade('BTCUSDT', trade('99.95')); // processed, but only a poll ends a pause
+    expect(t.gaps()).toEqual([]);
+
+    t.clock.advance(1000); // the next poll finds the symbol fresh
+    expect(t.gaps()).toEqual([{ startedAt: T, endedAt: T + 28_801_000, reason: PAUSED }]);
+    expect(t.openGapRows()).toEqual([]);
+    expect(t.notices()).toEqual([`Live data interrupted for BTCUSDT: ${PAUSED}`, 'Live data restored for BTCUSDT']);
+  });
+
+  it('a silent connection: the gap starts at the last frame received, not at the poll that detects the silence', async () => {
+    const s = await liveStack(T0);
+    const T = s.clock.now; // the last frame: the depth update that synced the book
+    s.clock.advance(15_000); // the polls keep finding the data fresh until T + 15 s
+    expect(s.market.isFresh('BTCUSDT')).toBe(true);
+    expect(openGapsOf(s.db)).toEqual([]);
+    s.clock.advance(1000); // the poll at T + 16 s sees the silence
+    expect(openGapsOf(s.db)).toEqual([{ symbol: 'BTCUSDT', startedAt: T, reason: 'Connection silent for 15s' }]);
+
+    s.depth(102); // frames again; a current depth update ends the wait for the book
+    s.clock.advance(1000);
+    expect(gapsOf(s.db)).toEqual([{ startedAt: T, endedAt: T + 17_000, reason: 'Connection silent for 15s' }]);
+    expect(openGapsOf(s.db)).toEqual([]);
+  });
+
+  it('a silence that ends before any poll sees it still starts the gap at its last frame', async () => {
+    const s = await liveStack(T0);
+    const T = s.clock.now; // the last frame before the silence
+    s.clock.advance(15_000); // the polls up to T + 15 s still find the data fresh
+    s.clock.advance(500);
+    s.trade(2, '99.95'); // frames again at T + 15.5 s: the book may be old, so this trade is skipped
+    expect(openGapsOf(s.db)).toEqual([
+      { symbol: 'BTCUSDT', startedAt: T, reason: 'Waiting for order-book update after a silent connection' },
+    ]);
+    s.depth(102);
+    s.clock.advance(500);
+    expect(gapsOf(s.db)).toEqual([
+      { startedAt: T, endedAt: T + 16_000, reason: 'Waiting for order-book update after a silent connection' },
+    ]);
+  });
+
+  it('a halt on Binance (status BREAK) is a gap with the halt as its reason', async () => {
+    const s = await liveStack(T0);
+    const T = s.clock.now; // fresh at the poll when the runner started
+    s.setTradingStatus('BREAK');
+    await s.market.refreshRules();
+    for (let i = 0; i < 6; i++) {
+      s.ping(); // the connection itself stays alive
+      s.clock.advance(5000);
+    }
+    expect(openGapsOf(s.db)).toEqual([{ symbol: 'BTCUSDT', startedAt: T, reason: 'Trading halted on Binance (BREAK)' }]);
+
+    s.setTradingStatus('TRADING');
+    await s.market.refreshRules();
+    s.clock.advance(1000);
+    expect(gapsOf(s.db)).toEqual([{ startedAt: T, endedAt: T + 31_000, reason: 'Trading halted on Binance (BREAK)' }]);
+  });
+
+  it.each([
+    ['the next poll', 1000],
+    ['the next processed trade', 250],
+  ])('a stale stretch between two polls: a skipped trade opens a gap at once, closed by %s', (closer, endedAt) => {
+    const t = setup();
+    t.runner.start(); // fresh at the poll at T0
+    t.market.setBook('BTCUSDT', {
+      bids: [{ price: D('59100'), qty: D('1') }, { price: D('59000'), qty: D('1') }, { price: D('58900'), qty: D('5') }],
+      asks: [{ price: D('59110'), qty: D('1') }, { price: D('59200'), qty: D('2') }],
+    });
+    t.market.setLastPrice('BTCUSDT', D('59100'));
+    t.market.setAvgPrice('BTCUSDT', D('59100'));
+    t.runner.deposit('spot', D('10000'));
+    t.runner.submit(marketBuy('0.1'));
+    t.clock.advance(100);
+    const stop = submittedOrder(t.runner.submit(stopSell('0.05', '59000')));
+    t.clock.advance(100);
+    expect(t.orderRow(stop.id)!.status).toBe('open');
+
+    // Lag on, a trade through the stop, lag off: all at T0 + 200, between the polls at T0 and T0 + 1 s.
+    t.market.staleReason = 'Feed lagging by 6.0s';
+    t.market.setFresh('BTCUSDT', false);
+    t.market.trade('BTCUSDT', trade('58900'));
+    t.market.setFresh('BTCUSDT', true);
+    expect(t.orderRow(stop.id)!.status).toBe('open'); // the stale trade was skipped
+    expect(t.engine.state.lastTradeId.BTCUSDT).toBeUndefined();
+    expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0, reason: 'Feed lagging by 6.0s' }]);
+    expect(t.gaps()).toEqual([]);
+
+    if (closer === 'the next poll') {
+      t.clock.advance(800);
+    } else {
+      t.clock.advance(50);
+      const next = trade('59050');
+      t.market.trade('BTCUSDT', next);
+      // The cursor passes the skipped trade only in the transaction that records the gap.
+      expect(t.db.prepare('SELECT last_trade_id AS id FROM trade_cursor').get()).toEqual({ id: next.id });
+    }
+    expect(t.gaps()).toEqual([{ startedAt: T0, endedAt: T0 + endedAt, reason: 'Feed lagging by 6.0s' }]);
+    expect(t.openGapRows()).toEqual([]);
+    expect(t.orderRow(stop.id)!.status).toBe('open');
+    expect(t.fatal).toEqual([]);
+  });
+
+  it('crash while stale: the next start keeps the gap start saved in open_gaps, not the last heartbeat', () => {
+    const a = setup();
+    a.runner.start();
+    a.clock.advance(2000); // fresh at the polls up to T0 + 2 s
+    a.market.setFresh('BTCUSDT', false);
+    a.clock.advance(3_598_000); // seen stale at T0 + 3 s; the heartbeat keeps writing until T0 + 3600 s
+    expect(lastAliveOf(a.db)).toBe(T0 + 3_600_000);
+
+    // The process dies: no stop(), and none of its timers runs again.
+    const b = setup({ db: a.db, clock: new FakeClock(a.clock.now) });
+    expect(b.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0 + 2000, reason: 'Disconnected' }]);
+    b.runner.start();
+    expect(b.gaps()).toEqual([{ startedAt: T0 + 2000, endedAt: T0 + 3_600_000, reason: 'Disconnected' }]);
+    expect(b.openGapRows()).toEqual([]);
+  });
+
+  it('a second crash during startup, before any fresh data, keeps the gap start from the first one', () => {
+    const a = setup();
+    a.runner.start();
+    a.clock.advance(15_000); // fresh throughout; the last heartbeat at T0 + 10 s
+    const L = T0 + 10_000;
+    expect(lastAliveOf(a.db)).toBe(L);
+
+    // Dies. Starts again at T0 + 60 s with no fresh data: the seed is saved before the first heartbeat.
+    const stale = new TestMarket(SYMBOLS);
+    stale.setFresh('BTCUSDT', false);
+    const b = setup({ db: a.db, clock: new FakeClock(T0 + 60_000), market: stale });
+    expect(b.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: L, reason: 'Server offline' }]);
+    expect(lastAliveOf(a.db)).toBe(L);
+    b.runner.start();
+    b.clock.advance(3000);
+    expect(lastAliveOf(a.db)).toBe(T0 + 60_000);
+
+    // Dies again before the data was ever fresh; the third start still begins the gap at L.
+    const c = setup({ db: a.db, clock: new FakeClock(T0 + 120_000) });
+    c.runner.start();
+    expect(c.gaps()).toEqual([{ startedAt: L, endedAt: T0 + 120_000, reason: 'Server offline' }]);
+    expect(c.openGapRows()).toEqual([]);
+  });
+
+  it('a deferred triggered stop executes at the next fresh poll even when no poll saw the data stale, without a trade', () => {
+    const t = setup();
+    t.runner.start();
+    withBtc(t);
+    const order = submittedOrder(t.runner.submit(stopSell('0.5', '99')));
+    t.clock.advance(100);
+    t.market.trade('BTCUSDT', trade('98.90')); // triggered at T0 + 400, arriving at T0 + 500
+    t.market.setFresh('BTCUSDT', false);
+    t.clock.advance(100); // the arrival lands on stale data: deferred
+    expect(JSON.parse(t.orderRow(order.id)!.data)).toMatchObject({ status: 'triggered', arrivesAt: null });
+    t.market.setFresh('BTCUSDT', true); // fresh again before any poll saw it stale
+
+    t.clock.advance(499);
+    expect(t.orderRow(order.id)!.status).toBe('triggered');
+    t.clock.advance(1); // the poll at T0 + 1 s finds the data fresh, as the one before did
+    expect(t.orderRow(order.id)!.status).toBe('filled');
+    expect(t.fatal).toEqual([]);
   });
 });

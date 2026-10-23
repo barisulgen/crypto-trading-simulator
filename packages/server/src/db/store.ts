@@ -19,6 +19,14 @@ export interface FeedGap {
   reason: string;
 }
 
+/** A gap in live data that has started and not yet been recorded as a feed_gap. */
+export interface OpenGap {
+  market: 'spot';
+  symbol: string;
+  startedAt: number;
+  reason: string;
+}
+
 export interface HistoryRow {
   id: number;
   time: number;
@@ -138,6 +146,7 @@ function eventSymbolMarket(e: EngineEvent): { symbol: string | null; market: str
 /**
  * Write everything one engine call changed, in a single transaction. Call it after every engine
  * call, even with no events: pending -> open has none, but the order's row must still follow.
+ * Each feed gap becomes a feed_gap event and its open_gaps row is deleted in the same transaction.
  */
 export function persist(
   db: Db,
@@ -180,6 +189,7 @@ export function persist(
   const insTrip = db.prepare(
     'INSERT INTO round_trips (id, season_id, symbol, opened_at, closed_at, pnl) VALUES (?, ?, ?, ?, ?, ?)',
   );
+  const delOpenGap = db.prepare('DELETE FROM open_gaps WHERE season_id = ? AND market = ? AND symbol = ?');
 
   const writeOrder = (o: SpotOrder, time: number) =>
     upOrder.run(o.id, seasonId, o.symbol, o.status, o.createdAt, time, toJson(o));
@@ -227,8 +237,33 @@ export function persist(
         seasonId, g.endedAt, 'feed_gap', g.symbol, g.market,
         JSON.stringify({ startedAt: g.startedAt, endedAt: g.endedAt, reason: g.reason }),
       );
+      delOpenGap.run(seasonId, g.market, g.symbol);
     }
   })();
+}
+
+// ---- open gaps ----
+
+/**
+ * Saves a gap as open, at once, so a crash keeps its start. A gap already open for the symbol
+ * keeps its start and reason unless this one starts earlier.
+ */
+export function openGap(db: Db, seasonId: number, g: OpenGap): void {
+  db.prepare(
+    `INSERT INTO open_gaps (season_id, market, symbol, started_at, reason) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(season_id, market, symbol) DO UPDATE SET started_at = excluded.started_at, reason = excluded.reason
+       WHERE excluded.started_at < open_gaps.started_at`,
+  ).run(seasonId, g.market, g.symbol, g.startedAt, g.reason);
+}
+
+/** The season's open gaps (left by a crash, or seeded at startup), by symbol. */
+export function loadOpenGaps(db: Db, seasonId: number): OpenGap[] {
+  return db
+    .prepare(
+      `SELECT market, symbol, started_at AS startedAt, reason FROM open_gaps WHERE season_id = ?
+       ORDER BY market, symbol`,
+    )
+    .all(seasonId) as OpenGap[];
 }
 
 // ---- invariants ----

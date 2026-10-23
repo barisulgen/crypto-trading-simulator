@@ -215,24 +215,21 @@ describe('FeedHealth', () => {
     h.onDepth('BTCUSDT', 3100, 3100);
     expect(h.isFresh('BTCUSDT', 3100)).toBe(true);
   });
-  it('poll reports each transition once', () => {
+  it('lastFrameAt is the receive time of the last frame of any kind, kept through a disconnect', () => {
     const h = mk();
-    const t1 = h.poll(1000);
-    expect(t1.map((t) => [t.symbol, t.fresh, t.reason, t.at])).toEqual([
-      ['BTCUSDT', true, null, 1000],
-      ['ETHUSDT', true, null, 1000],
-    ]);
-    expect(h.poll(1001)).toEqual([]);
-    h.onDisconnect(2000);
-    const t2 = h.poll(2000);
-    expect(t2).toHaveLength(2);
-    expect(t2[0]).toEqual({ symbol: 'BTCUSDT', fresh: false, reason: 'Disconnected', at: 2000 });
-    expect(h.poll(2001)).toEqual([]);
-    h.onConnect(3000);
-    expect(h.poll(3000)).toEqual([]); // stale -> stale (reason change) is not a transition
-    h.setBookValid('BTCUSDT', true);
-    h.onDepth('BTCUSDT', 3100, 3100);
-    expect(h.poll(3100)).toEqual([{ symbol: 'BTCUSDT', fresh: true, reason: null, at: 3100 }]);
+    expect(h.lastFrameAt()).toBe(0);
+    h.onFrame(1000);
+    expect(h.lastFrameAt()).toBe(1000);
+    h.onDepth('BTCUSDT', 2000, 1500);
+    expect(h.lastFrameAt()).toBe(2000);
+    h.onTrade('ETHUSDT', 3000, 3000);
+    expect(h.lastFrameAt()).toBe(3000);
+    h.onTicker('BTCUSDT', 4000, 4000);
+    expect(h.lastFrameAt()).toBe(4000);
+    h.onDisconnect(9000); // nothing was received at the disconnect
+    expect(h.lastFrameAt()).toBe(4000);
+    h.onConnect(12_000);
+    expect(h.lastFrameAt()).toBe(12_000);
   });
   it('throws on unknown symbol', () => {
     expect(() => mk().reason('XXX', 0)).toThrow('Unknown symbol XXX');

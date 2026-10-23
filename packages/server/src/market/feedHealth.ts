@@ -4,13 +4,6 @@ export interface HealthCfg {
   noUpdateMs: number;
 }
 
-export interface HealthTransition {
-  symbol: string;
-  fresh: boolean;
-  reason: string | null;
-  at: number;
-}
-
 type Stream = 'depth' | 'trade' | 'ticker';
 
 interface SymState {
@@ -20,7 +13,6 @@ interface SymState {
   lag: Record<Stream, number>;
   /** A frame came after a silent stretch: the book is old until a current depth event arrives. */
   needsDepth: boolean;
-  reportedFresh: boolean;
 }
 
 /** Judges per-symbol data freshness from connection health plus a long no-update limit. */
@@ -38,7 +30,6 @@ export class FeedHealth {
         lastDepth: null,
         lag: { depth: 0, trade: 0, ticker: 0 },
         needsDepth: false,
-        reportedFresh: false,
       });
     }
   }
@@ -144,16 +135,8 @@ export class FeedHealth {
     return this.reason(symbol, now) === null;
   }
 
-  poll(now: number): HealthTransition[] {
-    const out: HealthTransition[] = [];
-    for (const [symbol, s] of this.syms) {
-      const reason = this.reason(symbol, now);
-      const fresh = reason === null;
-      if (fresh !== s.reportedFresh) {
-        s.reportedFresh = fresh;
-        out.push({ symbol, fresh, reason, at: now });
-      }
-    }
-    return out;
+  /** When the last frame of any kind, or the connection's opening, was received (0 before the first). */
+  lastFrameAt(): number {
+    return this.lastFrame;
   }
 }
