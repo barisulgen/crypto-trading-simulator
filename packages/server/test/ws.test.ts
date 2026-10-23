@@ -30,7 +30,7 @@ function setup() {
   const clock = new FakeClock(1_000_000);
   const market = new TestMarket(['BTCUSDT']);
   const kline = { subscribed: 0, unsubscribed: 0 };
-  const candles = {
+  const service = {
     subscribe(_s: string, _i: string, _cb: (c: Candle) => void) {
       kline.subscribed += 1;
       return () => {
@@ -38,6 +38,7 @@ function setup() {
       };
     },
   };
+  const candles = { spot: service, perp: service };
   const runner = { account: () => ({}) as any, openOrders: () => [] };
   const hub = new ClientHub({ market, candles, runner, symbols: ['BTCUSDT'], setTimer: clock.setTimer, logger: silent });
   hub.start();

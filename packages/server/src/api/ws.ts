@@ -1,4 +1,4 @@
-import type { AggTrade, BookSnapshot, SpotOrder } from '@sim/engine';
+import type { AggTrade, BookSnapshot, Market, SpotOrder } from '@sim/engine';
 import { toJson } from '../db/store.ts';
 import type { Logger } from '../log.ts';
 import { INTERVALS } from '../market/candles.ts';
@@ -44,7 +44,7 @@ export interface HubSocket {
 
 export interface HubDeps {
   market: HubMarket;
-  candles: { subscribe(symbol: string, interval: string, cb: (c: Candle) => void): () => void };
+  candles: Record<Market, { subscribe(symbol: string, interval: string, cb: (c: Candle) => void): () => void }>;
   runner: { account(): AccountSnapshot; openOrders(): SpotOrder[] };
   symbols: string[];
   setTimer: SetTimer;
@@ -52,6 +52,7 @@ export interface HubDeps {
 }
 
 interface Client {
+  /** The symbol whose spot book and trades the client gets; null when it follows a perp chart. */
   symbol: string | null;
   unsubscribeKline: (() => void) | null;
   /** Answered the last ping (or connected since it). */
@@ -61,8 +62,8 @@ interface Client {
 /**
  * The browser clients. Every client gets tickers (1/s, with the revalued account), health (every
  * 5 s and on change) and the runner's account / orders / notice messages; a client that sent
- * `{ type: 'subscribe', symbol, interval }` also gets that symbol's book (top 20, at most 4/s),
- * trades and klines. Every message is JSON with decimals as strings.
+ * `{ type: 'subscribe', market, symbol, interval }` (market defaults to spot) also gets that
+ * symbol's klines and, for spot, its book (top 20, at most 4/s) and trades. Every message is JSON with decimals as strings.
  * Backpressure: live messages are skipped while a client has more than 1 MB unsent and the
  * client is terminated above 4 MB; a client that misses a 30 s ping is terminated. Whenever a
  * client goes, its kline subscription is released.
@@ -160,7 +161,7 @@ export class ClientHub {
   }
 
   private onMessage(socket: HubSocket, client: Client, raw: unknown): void {
-    let msg: { type?: unknown; symbol?: unknown; interval?: unknown };
+    let msg: { type?: unknown; market?: unknown; symbol?: unknown; interval?: unknown };
     try {
       msg = JSON.parse(String(raw)) as typeof msg;
     } catch {
@@ -168,6 +169,10 @@ export class ClientHub {
     }
     if (msg?.type !== 'subscribe') return this.sendTo(socket, { type: 'error', error: 'Unknown message type' });
     const { symbol, interval } = msg;
+    const market = msg.market ?? 'spot';
+    if (market !== 'spot' && market !== 'perp') {
+      return this.sendTo(socket, { type: 'error', error: `Unknown market ${String(market)}` });
+    }
     if (typeof symbol !== 'string' || !this.d.symbols.includes(symbol)) {
       return this.sendTo(socket, { type: 'error', error: `Unknown symbol ${String(symbol)}` });
     }
@@ -176,14 +181,15 @@ export class ClientHub {
     }
     client.unsubscribeKline?.();
     client.unsubscribeKline = null;
-    client.symbol = symbol;
+    client.symbol = market === 'spot' ? symbol : null;
     try {
-      client.unsubscribeKline = this.d.candles.subscribe(symbol, interval, (candle) =>
-        this.sendTo(socket, { type: 'kline', symbol, interval, candle }),
+      client.unsubscribeKline = this.d.candles[market].subscribe(symbol, interval, (candle) =>
+        this.sendTo(socket, { type: 'kline', market, symbol, interval, candle }),
       );
     } catch (e) {
       this.d.logger.warn(`kline subscribe ${symbol} ${interval} failed: ${(e as Error).message}`);
     }
+    if (market === 'perp') return; // the perp book is not served yet; a spot book would be a false price
     // The subscription's starting snapshot.
     this.sendTo(socket, { type: 'book', symbol, ...this.d.market.bookTop(symbol, BOOK_LEVELS) }, true);
     const trades = this.d.market.recentTrades(symbol, TRADES_ON_SUBSCRIBE);

@@ -43,7 +43,10 @@ const health = new FeedHealth(config.symbols, config.health);
 const books = new Map(config.symbols.map((s) => [s, new LocalBook()]));
 const feed = new SpotFeed({ symbols: config.symbols, rest, health, books, logger, limiter });
 const market = new MarketData({ symbols: config.symbols, feed, books, health, rest, logger });
-const candles = new CandleService({ rest, logger, limiter });
+const candles = {
+  spot: new CandleService({ rest, logger, limiter }),
+  perp: new CandleService({ market: 'perp', rest: futuresRest, logger, limiter }),
+};
 
 const perpHealths = perpHealth(config.symbols, config.health);
 const perpBooks = new Map(config.symbols.map((s) => [s, new LocalBook({ mode: 'futures' })]));
@@ -78,7 +81,8 @@ async function shutdown(code: number): Promise<void> {
   market.stop();
   perpFeed.close();
   perpMarket.stop();
-  candles.close();
+  candles.spot.close();
+  candles.perp.close();
   rest.dispose(); // queued REST requests are dropped, never sent after shutdown began
   futuresRest.dispose();
   await app?.close().catch(() => {});

@@ -24,9 +24,10 @@ const seen: string[] = [];
 const logs: string[] = [];
 
 class FakeCandles {
+  constructor(private readonly tag = '') {}
   subs: { symbol: string; interval: string; active: boolean; cb: (c: Candle) => void }[] = [];
   async history(symbol: string, interval: string, endTime?: number): Promise<Candle[]> {
-    return [{ time: endTime ?? T0, open: '1', high: '2', low: '0.5', close: `${symbol}:${interval}`, volume: '3' }];
+    return [{ time: endTime ?? T0, open: '1', high: '2', low: '0.5', close: `${this.tag}${symbol}:${interval}`, volume: '3' }];
   }
   subscribe(symbol: string, interval: string, cb: (c: Candle) => void): () => void {
     const s = { symbol, interval, active: true, cb };
@@ -63,14 +64,15 @@ async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
     logger,
   });
   const candles = new FakeCandles();
-  hub = new ClientHub({ market, candles, runner, symbols: config.symbols, setTimer: clock.setTimer, logger });
+  const perpCandles = new FakeCandles('perp:');
+  hub = new ClientHub({ market, candles: { spot: candles, perp: perpCandles }, runner, symbols: config.symbols, setTimer: clock.setTimer, logger });
   runner.start();
   hub.start();
   const app = await buildApp({
     runner,
     market,
     hub,
-    candles,
+    candles: { spot: candles, perp: perpCandles },
     db,
     seasonId,
     coins: config.coins,
@@ -116,7 +118,7 @@ async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
     );
     return { ws, msgs };
   };
-  return { app, db, clock, market, runner, hub, candles, call, login, connect };
+  return { app, db, clock, market, runner, hub, candles, perpCandles, call, login, connect };
 }
 
 async function waitFor<T>(find: () => T | undefined, ms = 2000): Promise<T> {
@@ -415,6 +417,10 @@ describe('REST', () => {
     const candles = await t.call('GET', `/api/candles?symbol=BTCUSDT&interval=1h&endTime=${T0}`);
     expect(candles.body.candles).toEqual([{ time: T0, open: '1', high: '2', low: '0.5', close: 'BTCUSDT:1h', volume: '3' }]);
     expect((await t.call('GET', '/api/candles?symbol=BTCUSDT&interval=7m')).body).toEqual({ error: 'Unsupported interval 7m' });
+    const perp = await t.call('GET', `/api/candles?market=perp&symbol=BTCUSDT&interval=1m&endTime=${T0}`);
+    expect(perp.body.candles).toEqual([{ time: T0, open: '1', high: '2', low: '0.5', close: 'perp:BTCUSDT:1m', volume: '3' }]);
+    expect((await t.call('GET', '/api/candles?market=spot&symbol=BTCUSDT&interval=1h')).body.candles[0].close).toBe('BTCUSDT:1h');
+    expect((await t.call('GET', '/api/candles?market=margin&symbol=BTCUSDT&interval=1h')).body).toEqual({ error: 'Unknown market margin' });
   });
 });
 
@@ -451,6 +457,31 @@ describe('WS /ws', () => {
     ws.send(JSON.stringify({ type: 'subscribe', symbol: 'NOPE', interval: '5m' }));
     const err = await waitFor(() => msgs.find((m) => m.type === 'error'));
     expect(err.error).toBe('Unknown symbol NOPE');
+    ws.terminate();
+  });
+
+  it('a perp subscribe opens a kline subscription on the perp service only, with no spot book or trades', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    await t.login();
+    const { ws, msgs } = await t.connect();
+    await waitFor(() => (msgs.length >= 4 ? true : undefined));
+    ws.send(JSON.stringify({ type: 'subscribe', market: 'perp', symbol: 'BTCUSDT', interval: '1m' }));
+    await waitFor(() => (t.perpCandles.subs.length === 1 ? true : undefined));
+    expect(t.candles.subs).toEqual([]);
+    t.perpCandles.subs[0]!.cb({ time: T0, open: '1', high: '1', low: '1', close: '1', volume: '0' });
+    const kline = await waitFor(() => msgs.find((m) => m.type === 'kline'));
+    expect(kline).toMatchObject({ market: 'perp', symbol: 'BTCUSDT', interval: '1m', candle: { time: T0 } });
+    t.market.trade('BTCUSDT', { id: 1, price: D('100'), qty: D('0.1'), sellerInitiated: false, time: T0 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(msgs.some((m) => m.type === 'book' || m.type === 'trades')).toBe(false);
+    // switching to spot (market omitted) releases the perp subscription
+    ws.send(JSON.stringify({ type: 'subscribe', symbol: 'BTCUSDT', interval: '1m' }));
+    await waitFor(() => (t.candles.subs.length === 1 ? true : undefined));
+    expect(t.perpCandles.subs[0]!.active).toBe(false);
+    ws.send(JSON.stringify({ type: 'subscribe', market: 'margin', symbol: 'BTCUSDT', interval: '1m' }));
+    const err = await waitFor(() => msgs.find((m) => m.type === 'error'));
+    expect(err.error).toBe('Unknown market margin');
     ws.terminate();
   });
 });

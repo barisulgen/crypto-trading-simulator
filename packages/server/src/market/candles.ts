@@ -1,4 +1,6 @@
+import type { Market } from '@sim/engine';
 import type { Logger } from '../log.ts';
+import type { FuturesRest } from '../binance/futuresRest.ts';
 import type { BinanceRest } from '../binance/rest.ts';
 import { ControlQueue } from './controlQueue.ts';
 import { defaultSetTimer, defaultWsFactory, rawToString } from './ws.ts';
@@ -18,7 +20,10 @@ export interface Candle {
 }
 
 export interface CandleServiceDeps {
-  rest: Pick<BinanceRest, 'klines'>;
+  /** Which Binance market this service reads; default spot. */
+  market?: Market;
+  /** The spot client for the spot market, the futures client for the perp market. */
+  rest: Pick<BinanceRest, 'klines'> | Pick<FuturesRest, 'klines'>;
   logger: Logger;
   wsFactory?: WsFactory;
   now?: () => number;
@@ -28,10 +33,13 @@ export interface CandleServiceDeps {
 }
 
 /** The newest page (no endTime) is re-fetched after this long; older pages never change. */
-const CACHE_MS = 60_000;
+export const NEWEST_PAGE_TTL_MS = 5000;
 /** Most series kept; the least recently used goes first. */
 const CACHE_MAX = 64;
-const KLINE_WS_URL = 'wss://stream.binance.com:9443/ws';
+const KLINE_WS_URLS: Record<Market, string> = {
+  spot: 'wss://stream.binance.com:9443/ws',
+  perp: 'wss://fstream.binance.com/market/ws',
+};
 const WATCHDOG_MS = 30_000;
 const WATCHDOG_CHECK_MS = 5000;
 const BACKOFF_START_MS = 1000;
@@ -50,6 +58,7 @@ function checkSymbol(s: string): void {
 }
 
 export class CandleService {
+  private readonly market: Market;
   private readonly rest: CandleServiceDeps['rest'];
   private readonly log: Logger;
   private readonly wsFactory: WsFactory;
@@ -68,6 +77,7 @@ export class CandleService {
   private cancelReconnect: (() => void) | null = null;
 
   constructor(d: CandleServiceDeps) {
+    this.market = d.market ?? 'spot';
     this.rest = d.rest;
     this.log = d.logger;
     this.wsFactory = d.wsFactory ?? defaultWsFactory;
@@ -81,12 +91,16 @@ export class CandleService {
     checkSymbol(symbol);
     const key = `${symbol}:${interval}:${endTime ?? ''}`;
     const hit = this.cache.get(key);
-    if (hit && (endTime !== undefined || this.now() - hit.at <= CACHE_MS)) {
+    if (hit && (endTime !== undefined || this.now() - hit.at <= NEWEST_PAGE_TTL_MS)) {
       this.cache.delete(key); // re-insert: Map order is least recently used first
       this.cache.set(key, hit);
       return hit.value;
     }
-    const value = this.rest.klines(symbol, interval, 500, endTime).then((rows: unknown) => {
+    const request =
+      this.market === 'perp'
+        ? (this.rest as Pick<FuturesRest, 'klines'>).klines(symbol, interval, 500, undefined, endTime)
+        : (this.rest as Pick<BinanceRest, 'klines'>).klines(symbol, interval, 500, endTime);
+    const value = request.then((rows: unknown) => {
       if (!Array.isArray(rows)) throw new Error('Unexpected klines response');
       return rows
         .filter((r: unknown): r is unknown[] => Array.isArray(r) && r.length >= 6)
@@ -177,7 +191,7 @@ export class CandleService {
       }, wait);
       return;
     }
-    const ws = this.wsFactory(KLINE_WS_URL);
+    const ws = this.wsFactory(KLINE_WS_URLS[this.market]);
     this.ws = ws;
     let dead = false;
     let lastFrame = this.now();

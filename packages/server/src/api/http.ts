@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { InputError, parseAmount } from '@sim/engine';
-import type { FeeSchedule, SpotOrder, SpotOrderRequest, SpotRules, Wallet } from '@sim/engine';
+import type { FeeSchedule, Market, SpotOrder, SpotOrderRequest, SpotRules, Wallet } from '@sim/engine';
 import type { Db } from '../db/db.ts';
 import { queryFills, queryHistory, recentOrders, toJson } from '../db/store.ts';
 import type { Logger } from '../log.ts';
@@ -18,7 +18,7 @@ export interface AppDeps {
   runner: EngineRunner;
   market: { rules(symbol: string): SpotRules };
   hub: ClientHub;
-  candles: { history(symbol: string, interval: string, endTime?: number): Promise<Candle[]> };
+  candles: Record<Market, { history(symbol: string, interval: string, endTime?: number): Promise<Candle[]> }>;
   db: Db;
   seasonId: number;
   coins: string[];
@@ -253,9 +253,11 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     const interval = queryStr(q, 'interval') ?? '';
     if (!(INTERVALS as readonly string[]).includes(interval)) throw new InputError(`Unsupported interval ${interval}`);
     const endTime = queryInt(q, 'endTime', 0, Number.MAX_SAFE_INTEGER);
+    const market = queryStr(q, 'market') ?? 'spot';
+    if (market !== 'spot' && market !== 'perp') throw new InputError(`Unknown market ${market}`);
     let candles: Candle[];
     try {
-      candles = await d.candles.history(s, interval, endTime);
+      candles = await d.candles[market].history(s, interval, endTime);
     } catch (e) {
       d.logger.warn(`candles ${s} ${interval} failed: ${(e as Error).message}`);
       return send(reply, 502, { error: 'Candle history unavailable' });
