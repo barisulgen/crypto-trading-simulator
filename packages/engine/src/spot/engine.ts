@@ -62,9 +62,13 @@ export const RESTART_REASON = 'Server restarted before execution';
 export const RULES_NOT_LOADED = 'Exchange rules not loaded yet; try again in a moment';
 export const CANCEL_REQUESTED = 'Cancel already requested';
 export const ORDER_NOT_OPEN = 'Order is not open';
+export const ALREADY_EXECUTING = 'Order is already executing and cannot be cancelled';
 
 /** Statuses an owner cancel still acts on when it reaches the exchange. */
-const CANCELLABLE: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled']);
+export const CANCELLABLE: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled']);
+
+/** What the cancel timing reads of an order, spot or perp. */
+type CancelTiming = Pick<SpotOrder, 'status' | 'arrivesAt' | 'cancelArrivesAt'>;
 
 /** Everything submit and preview work out for a market order before touching state. */
 interface MarketPlan {
@@ -225,7 +229,7 @@ export class SpotEngine {
       return { ok: false, reason: ORDER_NOT_OPEN };
     }
     if (order.status === 'triggered' || order.type === 'market') {
-      return { ok: false, reason: 'Order is already executing and cannot be cancelled' };
+      return { ok: false, reason: ALREADY_EXECUTING };
     }
     if (cancelRequested(this.s, order)) return { ok: false, reason: CANCEL_REQUESTED };
     if (cancelNeedsRules(order) && !rulesLoaded(order.symbol, ctx)) return { ok: false, reason: RULES_NOT_LOADED };
@@ -418,13 +422,13 @@ export class SpotEngine {
  * whose own arrival comes no later than its cancel's arrives first, so that cancel is left to
  * arriveCancel, which runs after the order's arrive().
  */
-function cancelDue(o: SpotOrder, now: number): boolean {
+export function cancelDue(o: CancelTiming, now: number): boolean {
   if (o.cancelArrivesAt === null || o.cancelArrivesAt > now) return false;
   return !arrivesBeforeCancel(o);
 }
 
 /** A pending order whose own arrival is due no later than its cancel's. */
-function arrivesBeforeCancel(o: SpotOrder): boolean {
+export function arrivesBeforeCancel(o: CancelTiming): boolean {
   if (o.status !== 'pending' || o.arrivesAt === null || o.cancelArrivesAt === null) return false;
   return o.arrivesAt <= o.cancelArrivesAt;
 }

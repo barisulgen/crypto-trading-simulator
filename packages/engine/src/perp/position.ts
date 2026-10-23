@@ -38,27 +38,26 @@ function pnlOf(position: Position, qty: Decimal, quote: Decimal): Decimal {
 }
 
 /**
- * Where reducing `qty` of the position at `quote` leaves the money: the trading P&L, the fee, the
- * margin released pro rata, and the margin left in the position once any shortfall of
- * released + P&L − fee has been taken from it. `owed` is the shortfall the margin left could not
- * cover (to come from free USDT); `toWallet` is what the wallet receives otherwise.
+ * Where reducing `qty` of the position at `quote`, paying `fee`, leaves the money: the trading
+ * P&L, the margin released pro rata (all of it on a full close), and the margin left in the
+ * position once any shortfall of released + P&L − fee has been taken from it. `owed` is the
+ * shortfall the margin left could not cover (to come from free USDT); `toWallet` is what the
+ * wallet receives otherwise.
  */
 export function reduceOutcome(
   position: Position,
   qty: Decimal,
   quote: Decimal,
-  rate: Decimal,
-): { pnl: Decimal; fee: Decimal; released: Decimal; marginLeft: Decimal; toWallet: Decimal; owed: Decimal } {
+  fee: Decimal,
+): { pnl: Decimal; released: Decimal; marginLeft: Decimal; toWallet: Decimal; owed: Decimal } {
   const pnl = pnlOf(position, qty, quote);
-  const fee = perpFee(quote, rate);
-  const released = roundDown8(position.margin.mul(qty).div(position.qty));
+  const released = qty.eq(position.qty) ? position.margin : roundDown8(position.margin.mul(qty).div(position.qty));
   const net = released.plus(pnl).minus(fee);
   const kept = position.margin.minus(released);
-  if (net.gte(0)) return { pnl, fee, released, marginLeft: kept, toWallet: net, owed: D(0) };
+  if (net.gte(0)) return { pnl, released, marginLeft: kept, toWallet: net, owed: D(0) };
   const fromMargin = Decimal.min(net.neg(), kept);
   return {
     pnl,
-    fee,
     released,
     marginLeft: kept.minus(fromMargin),
     toWallet: D(0),
@@ -107,7 +106,8 @@ function fillEvent(fill: PerpFill, order: PerpOrder, t: PerpFillTerms, ctx: Perp
 /**
  * An opening fill: quote ÷ leverage (rounded down) is spent from `lockShare`, the fill's share of the
  * order's lock, and the rest of that share is released. The fee comes out of the position's margin.
- * Opens the position, or adds to it at the quantity-weighted average entry.
+ * Opens the position, or adds to it at the quantity-weighted average entry. Throws when the position
+ * held is on the other side: one-way mode never flips a position.
  */
 export function applyOpeningFill(
   s: PerpState,
@@ -117,11 +117,14 @@ export function applyOpeningFill(
   status: OrderStatus,
   ctx: PerpCtx,
 ): { order: PerpOrder; events: PerpEvent[] } {
+  const held = s.positions[order.symbol];
+  if (held && held.side !== positionSideOf(order.side)) {
+    throw new Error(`Order ${order.id}: opening fill on the other side of the ${held.side} position`);
+  }
   const marginIn = marginInOf(t.quote, order.leverage);
   const fee = perpFee(t.quote, t.rate);
   releaseUsdt(s, spendUsdt(s, marginIn, lockShare));
 
-  const held = s.positions[order.symbol];
   let position: Position;
   if (held) {
     const qty = held.qty.plus(t.qty);
@@ -180,7 +183,8 @@ export function applyReducingFill(
 ): { order: PerpOrder; events: PerpEvent[]; closed: Position | null } {
   const held = s.positions[order.symbol];
   if (!held || t.qty.gt(held.qty)) throw new Error(`Order ${order.id}: reducing fill larger than the position`);
-  const out = reduceOutcome(held, t.qty, t.quote, t.rate);
+  const fee = perpFee(t.quote, t.rate);
+  const out = reduceOutcome(held, t.qty, t.quote, fee);
   creditUsdt(s, out.toWallet);
   const fromFree = Decimal.min(out.owed, Decimal.max(0, freeUsdt(s)));
   debitUsdt(s, fromFree);
@@ -191,7 +195,7 @@ export function applyReducingFill(
     qty: held.qty.minus(t.qty),
     margin: out.marginLeft,
     realizedPnl: held.realizedPnl.plus(out.pnl),
-    fees: held.fees.plus(out.fee),
+    fees: held.fees.plus(fee),
   };
   const closed = position.qty.isZero() ? position : null;
   if (closed) delete s.positions[order.symbol];
@@ -200,7 +204,7 @@ export function applyReducingFill(
   const fill = makeFill(
     order,
     t,
-    out.fee,
+    fee,
     { positionId: held.id, marginIn: null, uncovered: uncovered.gt(0) ? uncovered : null, realizedPnl: out.pnl },
     ctx,
   );
@@ -209,7 +213,7 @@ export function applyReducingFill(
     status,
     filledQty: order.filledQty.plus(t.qty),
     filledQuote: order.filledQuote.plus(t.quote),
-    fee: order.fee.plus(out.fee),
+    fee: order.fee.plus(fee),
     realizedPnl: order.realizedPnl.plus(out.pnl),
   };
   putOrder(s, after);

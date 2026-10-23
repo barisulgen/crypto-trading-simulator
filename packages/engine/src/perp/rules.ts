@@ -16,6 +16,7 @@ export interface NormalizedPerpRequest {
 }
 
 export const MARK_UNAVAILABLE = 'Mark price unavailable; order rejected (never guessed)';
+export const TIERS_NOT_LOADED = 'Leverage tiers not loaded yet; try again in a moment';
 
 /**
  * Returns a rejection reason, or null if the order passes every Binance futures filter. The mark

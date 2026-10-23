@@ -33,7 +33,7 @@ export type {
   TierSource,
 } from './perp/types.ts';
 export { PerpEngine } from './perp/engine.ts';
-export { MARK_UNAVAILABLE, validatePerpOrder } from './perp/rules.ts';
+export { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './perp/rules.ts';
 export type { NormalizedPerpRequest } from './perp/rules.ts';
 export {
   DEFAULT_LEVERAGE,

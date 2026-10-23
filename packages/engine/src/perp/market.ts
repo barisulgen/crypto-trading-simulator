@@ -8,6 +8,7 @@ import {
   cancelOrder,
   liveOrders,
   newPerpOrder,
+  noPerpFields,
   placePending,
   readPerpAmount,
   rejectOrder,
@@ -24,7 +25,7 @@ import {
   reduceOutcome,
 } from './position.ts';
 import type { PerpFillTerms } from './position.ts';
-import { MARK_UNAVAILABLE, validatePerpOrder } from './rules.ts';
+import { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './rules.ts';
 import { DEFAULT_LEVERAGE, freeUsdt, leverageFor } from './state.ts';
 import type { PerpState } from './state.ts';
 import { maxLeverage, maxNotionalAt } from './tiers.ts';
@@ -57,12 +58,13 @@ interface MarketPlan {
   reason: string | null;
 }
 
-function liveDataReason(symbol: string, ctx: PerpCtx): string | null {
+/** Why the symbol's data cannot be traded on right now (book, trades or mark stale), or null. */
+export function liveDataReason(symbol: string, ctx: PerpCtx): string | null {
   const m = ctx.market;
   return m.isFresh(symbol) && m.isMarkFresh(symbol) ? null : `Live data interrupted for ${symbol}`;
 }
 
-function validMark(symbol: string, ctx: PerpCtx): Decimal | null {
+export function validMark(symbol: string, ctx: PerpCtx): Decimal | null {
   const mark = ctx.market.markPrice(symbol);
   return mark && mark.gt(0) ? mark : null;
 }
@@ -98,7 +100,7 @@ function walkInBand(
 }
 
 /** A reduce-only order's position: the open one on the other side, or null. */
-function opposite(s: PerpState, symbol: string, side: Side): Position | null {
+export function opposite(s: PerpState, symbol: string, side: Side): Position | null {
   const p = s.positions[symbol];
   return p && p.side !== positionSideOf(side) ? p : null;
 }
@@ -117,7 +119,8 @@ function costOf(
   return orderCost({ side, qty, imPrice, olPrice: walkAvg, mark, leverage, takerRate: ctx.fees.taker }).total;
 }
 
-function bracketsOrNull(symbol: string, ctx: PerpCtx): Bracket[] | null {
+/** The symbol's leverage tiers, or null while they are not loaded. */
+export function bracketsOrNull(symbol: string, ctx: PerpCtx): Bracket[] | null {
   try {
     return ctx.market.brackets(symbol);
   } catch {
@@ -126,15 +129,56 @@ function bracketsOrNull(symbol: string, ctx: PerpCtx): Bracket[] | null {
 }
 
 /**
- * Freshness, amounts, exchange filters, leverage, the one-way rule, reduce-only, the maximum
- * notional at the leverage, the book within the price band, and the funds, in that order. Stops at
- * the first problem; later fields stay null. Reads state, never writes it.
+ * The checks every order type makes against the account, in this order: the leverage setting (not
+ * for a reduce-only order, which adds no margin, so a setting the tiers no longer allow never
+ * blocks a close), then for a reduce-only order the position it reduces, and for an opening order
+ * the one-way rule and the maximum notional at the leverage (the position, the open opening orders
+ * and this one, at the mark).
+ */
+export function positionChecks(
+  s: PerpState,
+  o: { symbol: string; side: Side; qty: Decimal; reduceOnly: boolean },
+  lev: { leverage: number; maxLeverage: number },
+  brackets: Bracket[],
+  mark: Decimal,
+): { position: Position | null; reason: string | null } {
+  const { symbol, qty } = o;
+  const fail = (reason: string) => ({ position: null, reason });
+  const leverageOk = Number.isInteger(lev.leverage) && lev.leverage >= 1 && lev.leverage <= lev.maxLeverage;
+  if (!o.reduceOnly && !leverageOk) return fail(`Leverage must be a whole number from 1 to ${lev.maxLeverage}`);
+
+  if (o.reduceOnly) {
+    const position = opposite(s, symbol, o.side);
+    if (!position) return fail(`Reduce-only order would not reduce a position on ${symbol}`);
+    return { position, reason: null };
+  }
+  const held = s.positions[symbol];
+  if (held && held.side !== positionSideOf(o.side)) {
+    return fail(`One-way mode: you hold a ${held.side} position on ${symbol}; use reduce-only to reduce it`);
+  }
+  const live = liveOrders(s, symbol);
+  const against = live.find((x) => !x.reduceOnly && x.side !== o.side);
+  if (against) return fail(`One-way mode: you have open orders to go ${positionSideOf(against.side)} on ${symbol}`);
+
+  const opening = live.filter((x) => !x.reduceOnly).reduce((sum, x) => sum.plus(remainingQty(x)), D(0));
+  const max = maxNotionalAt(brackets, lev.leverage);
+  if (mark.mul((held?.qty ?? D(0)).plus(opening).plus(qty)).gt(max)) {
+    const at = `the maximum at ${lev.leverage}x on ${symbol}`;
+    return fail(`Position would exceed ${max} USDT, ${at}; lower the leverage`);
+  }
+  return { position: null, reason: null };
+}
+
+/**
+ * Freshness, the leverage tiers, amounts, exchange filters, leverage, the one-way rule, reduce-only,
+ * the maximum notional at the leverage, the book within the price band, and the funds, in that
+ * order. Stops at the first problem; later fields stay null. Reads state, never writes it.
  */
 export function planMarket(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): MarketPlan {
   const symbol = req.symbol;
   const tiers = bracketsOrNull(symbol, ctx);
   const plan: MarketPlan = {
-    fields: { qty: null, quoteQty: null },
+    fields: noPerpFields(),
     reduceOnly: req.reduceOnly === true,
     leverage: tiers ? leverageFor(s, symbol, tiers) : (s.settings[symbol]?.leverage ?? DEFAULT_LEVERAGE),
     maxLeverage: tiers ? maxLeverage(tiers) : 0,
@@ -150,8 +194,8 @@ export function planMarket(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): M
 
   const stale = liveDataReason(symbol, ctx);
   if (stale) return fail(stale);
+  if (!tiers) return fail(TIERS_NOT_LOADED);
   const rules = ctx.market.rules(symbol);
-  const brackets = ctx.market.brackets(symbol);
 
   const read = readPerpAmount(req);
   plan.fields = read.fields;
@@ -180,33 +224,9 @@ export function planMarket(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): M
   );
   if (invalid) return fail(invalid);
 
-  // A reduce-only order adds no margin, so a leverage setting the tiers no longer allow never blocks a close.
-  const leverageOk = Number.isInteger(plan.leverage) && plan.leverage >= 1 && plan.leverage <= plan.maxLeverage;
-  if (!plan.reduceOnly && !leverageOk) {
-    return fail(`Leverage must be a whole number from 1 to ${plan.maxLeverage}`);
-  }
-
-  const side = positionSideOf(req.side);
-  const held = s.positions[symbol];
-  if (!plan.reduceOnly) {
-    if (held && held.side !== side) {
-      return fail(`One-way mode: you hold a ${held.side} position on ${symbol}; use reduce-only to reduce it`);
-    }
-    const against = live.find((o) => !o.reduceOnly && o.side !== req.side);
-    if (against) return fail(`One-way mode: you have open orders to go ${positionSideOf(against.side)} on ${symbol}`);
-  }
-
-  if (plan.reduceOnly) {
-    plan.position = opposite(s, symbol, req.side);
-    if (!plan.position) return fail(`Reduce-only order would not reduce a position on ${symbol}`);
-  } else {
-    const opening = live.filter((o) => !o.reduceOnly).reduce((sum, o) => sum.plus(remainingQty(o)), D(0));
-    const max = maxNotionalAt(brackets, plan.leverage);
-    if (mark.mul((held?.qty ?? D(0)).plus(opening).plus(qty)).gt(max)) {
-      const at = `the maximum at ${plan.leverage}x on ${symbol}`;
-      return fail(`Position would exceed ${max} USDT, ${at}; lower the leverage`);
-    }
-  }
+  const checked = positionChecks(s, { symbol, side: req.side, qty, reduceOnly: plan.reduceOnly }, plan, tiers, mark);
+  if (checked.reason !== null) return fail(checked.reason);
+  plan.position = checked.position;
 
   const book = ctx.market.book(symbol);
   const best = bestPrice(book, req.side);
@@ -261,30 +281,34 @@ export function previewMarket(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx)
   preview.estSlippagePct = w.bestPrice ? w.slippageUsd.div(w.bestPrice.mul(w.qty)).mul(100) : null;
   preview.notional = w.quote;
   preview.fee = perpFee(w.quote, ctx.fees.taker);
-  preview.estLiquidationPrice = plan.brackets ? estLiquidation(s, req, plan, w, plan.brackets, ctx) : null;
+  const fill = { qty: w.qty, quote: w.quote, fee: preview.fee };
+  preview.estLiquidationPrice = plan.brackets ? estLiquidation(s, req, plan, fill, plan.brackets) : null;
   return preview;
 }
 
-/** Liquidation price of the position the walked fill would leave; null if it leaves none. */
-function estLiquidation(
+/**
+ * Liquidation price of the position a fill of f.qty for f.quote, paying f.fee, would leave: the
+ * reduced position for a reduce-only order (plan.position), otherwise the position it opens or adds
+ * to. Null if it leaves none.
+ */
+export function estLiquidation(
   s: PerpState,
-  req: PerpOrderRequest,
-  plan: MarketPlan,
-  w: WalkResult,
+  req: { symbol: string; side: Side },
+  plan: { position: Position | null; leverage: number },
+  f: { qty: Decimal; quote: Decimal; fee: Decimal },
   brackets: Bracket[],
-  ctx: PerpCtx,
 ): Decimal | null {
   if (plan.position) {
     const p = plan.position;
-    const left = p.qty.minus(w.qty);
-    if (left.isZero()) return null;
-    const { marginLeft } = reduceOutcome(p, w.qty, w.quote, ctx.fees.taker);
+    const left = p.qty.minus(f.qty);
+    if (left.lte(0)) return null;
+    const { marginLeft } = reduceOutcome(p, f.qty, f.quote, f.fee);
     return liquidationPrice(brackets, p.side, left, p.entryPrice, marginLeft);
   }
   const held = s.positions[req.symbol];
-  const marginIn = marginInOf(w.quote, plan.leverage).minus(perpFee(w.quote, ctx.fees.taker));
-  const qty = (held?.qty ?? D(0)).plus(w.qty);
-  const entry = held ? held.qty.mul(held.entryPrice).plus(w.quote).div(qty) : w.quote.div(w.qty);
+  const marginIn = marginInOf(f.quote, plan.leverage).minus(f.fee);
+  const qty = (held?.qty ?? D(0)).plus(f.qty);
+  const entry = held ? held.qty.mul(held.entryPrice).plus(f.quote).div(qty) : f.quote.div(f.qty);
   const margin = (held?.margin ?? D(0)).plus(marginIn);
   return liquidationPrice(brackets, positionSideOf(req.side), qty, entry, margin);
 }

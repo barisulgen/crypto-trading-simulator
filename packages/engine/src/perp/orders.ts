@@ -13,23 +13,32 @@ import type { PerpCtx, PerpEvent, PerpOrder, PerpOrderRequest } from './types.ts
 export interface PerpFields {
   qty: Decimal | null;
   quoteQty: Decimal | null;
+  price: Decimal | null;
 }
 
 export function noPerpFields(): PerpFields {
-  return { qty: null, quoteQty: null };
+  return { qty: null, quoteQty: null, price: null };
 }
 
 /**
- * Parse the typed amount: exactly one of qty (coin) and quoteQty (USDT notional). Stops at the
- * first problem (reason set); fields parsed so far are kept for the record.
+ * Parse the typed amount: exactly one of qty (coin) and quoteQty (USDT notional), then the limit
+ * price when asked for. Stops at the first problem (reason set); fields parsed so far are kept for
+ * the record.
  */
-export function readPerpAmount(req: PerpOrderRequest): { fields: PerpFields; reason: string | null } {
+export function readPerpAmount(
+  req: PerpOrderRequest,
+  withPrice = false,
+): { fields: PerpFields; reason: string | null } {
   const fields = noPerpFields();
   const hasQty = present(req.qty);
   if (hasQty === present(req.quoteQty)) return { fields, reason: 'Enter either a coin amount or a dollar amount' };
   try {
     if (hasQty) fields.qty = parseAmount(req.qty!);
     else fields.quoteQty = parseAmount(req.quoteQty!);
+    if (withPrice) {
+      if (!present(req.price)) return { fields, reason: 'Enter a limit price' };
+      fields.price = parseAmount(req.price!);
+    }
   } catch (e) {
     if (e instanceof InputError) return { fields, reason: e.message };
     throw e;
@@ -45,7 +54,7 @@ export function newPerpOrder(req: PerpOrderRequest, fields: PerpFields, leverage
     type: req.type,
     qty: fields.qty,
     quoteQty: fields.quoteQty,
-    price: null,
+    price: fields.price,
     triggerPrice: null,
     reduceOnly: req.reduceOnly === true,
     closePosition: false,

@@ -110,6 +110,10 @@ export class FakePerpMarket implements PerpMarketView {
   setBrackets(symbol: string, brackets: Bracket[]): void {
     this.tiers.set(symbol, brackets);
   }
+  /** As before the leverage tiers have loaded: brackets() throws for the symbol. */
+  clearBrackets(symbol: string): void {
+    this.tiers.delete(symbol);
+  }
 
   isFresh(symbol: string): boolean {
     return this.freshness.get(symbol) ?? false;

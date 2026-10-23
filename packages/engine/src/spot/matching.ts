@@ -1,5 +1,15 @@
 import type { Decimal } from '../decimal.ts';
-import type { AggTrade, SpotOrder } from '../types.ts';
+import type { AggTrade, Side } from '../types.ts';
+
+/** What trade-through matching reads of a resting limit order, spot or perp. */
+export interface Matchable {
+  id: string;
+  side: Side;
+  price: Decimal | null;
+  qty: Decimal | null;
+  filledQty: Decimal;
+  createdAt: number;
+}
 
 /**
  * Share one real trade's volume among resting limit orders it trades through.
@@ -12,7 +22,7 @@ import type { AggTrade, SpotOrder } from '../types.ts';
  *
  * The caller passes only orders that may match (same symbol, resting, arrived).
  */
-export function allocateTradeThrough(orders: SpotOrder[], trade: AggTrade): { orderId: string; qty: Decimal }[] {
+export function allocateTradeThrough(orders: Matchable[], trade: AggTrade): { orderId: string; qty: Decimal }[] {
   const eligible = orders.filter((o) => {
     if (!o.price || !o.qty) return false;
     return trade.sellerInitiated
