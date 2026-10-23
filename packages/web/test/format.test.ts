@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { fmtAvgPrice, fmtBalance, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
+import { fmtAvgPrice, fmtBalance, fmtCost, fmtProceeds, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
 
 describe('tickDecimals', () => {
   it('counts the significant decimals of a tick or step size', () => {
@@ -143,5 +143,18 @@ describe('fmtDrift', () => {
     expect(fmtDrift('0')).toBe('$0.00');
     expect(fmtDrift('-0.004')).toBe('$0.00');
     expect(fmtDrift('1234.5')).toBe('cost $1,234.50');
+  });
+});
+
+describe('fmtCost and fmtProceeds', () => {
+  it('a cost rounds up to the cent, proceeds round down', () => {
+    expect(fmtCost('0.0149')).toBe('$0.02');
+    expect(fmtCost('0.01')).toBe('$0.01');
+    expect(fmtCost('0')).toBe('$0.00');
+    expect(fmtCost('1234.5601')).toBe('$1,234.57');
+    expect(fmtCost(null)).toBe('-');
+    expect(fmtProceeds('97.479')).toBe('$97.47');
+    expect(fmtProceeds('0.009')).toBe('$0.00');
+    expect(fmtProceeds(undefined)).toBe('-');
   });
 });

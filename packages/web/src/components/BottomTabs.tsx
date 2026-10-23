@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import type { WireFill, WireOrder } from '../lib/api.ts';
-import { ORDER_TYPE_LABEL, fmtBalance, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
+import { ORDER_TYPE_LABEL, fmtBalance, fmtCost, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { avgFill, holdingRows, valueTitle } from '../lib/holdings.ts';
 import type { HoldingRow } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
@@ -424,7 +424,7 @@ function FillLine({ f }: { f: WireFill }) {
       </Cell>
       <Cell width={w} label="Slippage" right>
         {/* An unsigned cost (always >= 0), as in the preview and the fill notices. */}
-        <span className={signOf(f.slippageUsd, 2) > 0 ? '' : 'text-muted'}>{fmtUsd(f.slippageUsd)}</span>
+        <span className={signOf(f.slippageUsd) > 0 ? '' : 'text-muted'}>{fmtCost(f.slippageUsd)}</span>
       </Cell>
       <Cell width={w} label="Delay drift" right>
         {drift(f.driftUsd)}

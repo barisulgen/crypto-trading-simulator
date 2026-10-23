@@ -103,9 +103,10 @@ function walkBidsWithQty(bids: WireLevel[], qty: string): string | null {
   return addDec(value, mulDec(remaining, last.price));
 }
 
-/** Dollars floored to the cent, with two decimals; '0' when nothing is left. */
-function cents(value: string): { amount: string; zero: boolean } {
-  const floored = floorToStep(value, CENT);
+/** Dollars floored (or, with `up`, rounded up) to the cent, with two decimals; '0' when nothing is left. */
+function cents(value: string, up = false): { amount: string; zero: boolean } {
+  let floored = floorToStep(value, CENT);
+  if (up && cmpDec(floored, value) < 0) floored = addDec(floored, CENT);
   if (isZero(floored)) return { amount: '0', zero: true };
   return { amount: fmtNum(floored, 2, { group: false }), zero: false };
 }
@@ -121,7 +122,8 @@ function cents(value: string): { amount: string; zero: boolean } {
  *   best ask. Floored to the step.
  * - Sell in coins: pct of the free coins, floored to the step (a 100 % sell leaves the dust).
  * - Sell in dollars: those coins valued as they would sell: walked over the bids for a market
- *   order, times the limit or trigger price, else times the best bid. Floored to the cent.
+ *   order, times the limit or trigger price, else times the best bid. Floored to the cent, except 100 %,
+ *   which is rounded up so the engine still sells every whole step of the free coins.
  */
 export function quickAmount(i: QuickInput): QuickResult | null {
   const share = (free: string) => mulDec(free, FRACTION[i.pct]);
@@ -152,7 +154,8 @@ export function quickAmount(i: QuickInput): QuickResult | null {
     value = price === null ? null : mulDec(qty, price);
   }
   if (value === null) return null;
-  const c = cents(value);
+  // 100 %: round up so the whole-step quantity the engine derives from the dollars is not a step short.
+  const c = cents(value, i.pct === 100);
   return { amount: c.amount, belowStep: false, belowCent: c.zero };
 }
 

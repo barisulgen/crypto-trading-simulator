@@ -360,12 +360,20 @@ describe('history rows', () => {
       'Qty: 0.00122 BTC',
       'Price: 81,382.0123',
       'Best at the time: 81,382.01',
-      'Slippage: $0.07',
+      'Slippage: $0.08',
       'Delay drift: cost $0.07',
       'Role: Taker',
       'Fee: 0.00000122 BTC ~$0.10',
     ]);
     expect(tone(v, 'Delay drift')).toBe('down');
+  });
+
+  it('a fill row rounds its slippage and fee value up to the cent', () => {
+    const v = describeEvent(
+      row('fill', { type: 'fill', time: T, fill: fill({ slippageUsd: '0.0149', feeUsd: '0.0101' }), order: order({ type: 'market', status: 'filled' }) }),
+    );
+    expect(lines(v)).toContain('Slippage: $0.02');
+    expect(lines(v)).toContain('Fee: 0.00000122 BTC ~$0.02');
   });
 
   it('fill (sell from a stop): realised P&L signed, drift as a gain, the trigger price, fee in USDT', () => {

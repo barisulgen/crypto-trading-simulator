@@ -4,7 +4,7 @@ import type { FormEvent, ReactNode } from 'react';
 import type { OrderType, Side } from '@sim/engine';
 import { api, ApiError } from '../lib/api.ts';
 import type { WirePreview } from '../lib/api.ts';
-import { fmtNum, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
+import { fmtCost, fmtNum, fmtPrice, fmtProceeds, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
 import {
   ORDER_TYPES,
@@ -123,22 +123,22 @@ function Estimate({
         <Row label="Est. slippage">
           {p.estSlippageUsd === null
             ? '-'
-            : `${tiny(p.estSlippageUsd, 2, '$', '')} (${p.estSlippagePct === null ? '-' : tiny(p.estSlippagePct, 2, '', '%')})`}
+            : `${fmtCost(p.estSlippageUsd)} (${p.estSlippagePct === null ? '-' : tiny(p.estSlippagePct, 2, '', '%')})`}
         </Row>
         <Row label="Fee">
           {p.fee.amount === null ? '-' : `${p.fee.amount} ${p.fee.asset ?? ''}`}
-          {p.fee.usd !== null && p.fee.asset !== 'USDT' && <span className="text-muted"> ~{fmtUsd(p.fee.usd)}</span>}
+          {p.fee.usd !== null && p.fee.asset !== 'USDT' && <span className="text-muted"> ~{fmtCost(p.fee.usd)}</span>}
         </Row>
         {side === 'buy' ? (
           <>
             <Row label="Total cost" strong>
-              {fmtUsd(p.total)}
+              {fmtCost(p.total)}
             </Row>
             <Row label="You receive">{p.receive === null ? '-' : `${fmtQty(symbol, p.receive)} ${base}`}</Row>
           </>
         ) : (
           <Row label="You receive" strong>
-            {fmtUsd(p.receive)}
+            {fmtProceeds(p.receive)}
           </Row>
         )}
       </dl>

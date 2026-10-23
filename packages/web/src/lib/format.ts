@@ -163,6 +163,27 @@ export function fmtUsdFloor(value: Value): string {
 }
 
 /**
+ * A cost to the owner in dollars, rounded up to the cent: '$0.02' for 0.0149. A negative value
+ * (a gain) is cut toward zero instead, so the figure never flatters.
+ */
+export function fmtCost(value: Value): string {
+  if (value === null || value === undefined) return DASH;
+  const p = parse(value);
+  if (!p) return value;
+  const frac = p.frac.padEnd(2, '0');
+  let digits = p.int + frac.slice(0, 2);
+  if (!p.negative && /[1-9]/.test(frac.slice(2))) digits = increment(digits);
+  const int = digits.slice(0, -2).replace(/^0+(?=\d)/, '') || '0';
+  const cents = digits.slice(-2);
+  return `${p.negative && /[1-9]/.test(int + cents) ? '-' : ''}$${group(int)}.${cents}`;
+}
+
+/** What a sell pays out in dollars, rounded down to the cent: '$97.47' for 97.479. */
+export function fmtProceeds(value: Value): string {
+  return fmtUsdFloor(value);
+}
+
+/**
  * Delay drift of a fill in words: the engine stores a cost to the owner as positive, so
  * 'cost $0.07' or 'gain $0.03'; '$0.00' when it shows as zero.
  */

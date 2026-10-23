@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountSnapshot, WireLevel } from '../src/lib/api.ts';
 import { setRules } from '../src/lib/format.ts';
-import { floorDivToStep, mulDec, subDec } from '../src/lib/market.ts';
+import { floorDivToStep, floorToStep, mulDec, subDec } from '../src/lib/market.ts';
 import {
   NO_QUICK,
   amountStep,
@@ -359,5 +359,16 @@ describe('below-one-step hint', () => {
   it('nothing to say otherwise', () => {
     expect(quickHint({ pct: 25, belowStep: false, belowCent: false }, '0.00001000', 'BTC')).toBeNull();
     expect(quickHint(NO_QUICK, '0.00001000', 'BTC')).toBeNull();
+  });
+});
+
+describe('quick amount: 100% sell in dollars', () => {
+  it('rounds the dollars up so the engine sells the whole steps (0.0012, not 0.00119)', () => {
+    const bids = [lv('81229', '5')];
+    const r = quickAmount(input({ unit: 'usd', pct: 100, freeBase: '0.00120879', bids }))!;
+    expect(r.amount).toBe('97.48');
+    expect(floorToStep(floorDivToStep(r.amount, '81229', '0.00000001'), STEP)).toBe('0.0012');
+    const limit = quickAmount(input({ unit: 'usd', pct: 100, type: 'limit', freeBase: '0.00120879', price: '81229', bids }))!;
+    expect(limit.amount).toBe('97.48');
   });
 });
