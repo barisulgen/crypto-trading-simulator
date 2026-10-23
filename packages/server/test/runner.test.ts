@@ -622,6 +622,38 @@ describe('feed gaps', () => {
     expect(t.notices()).toEqual([`Live data interrupted for BTCUSDT: ${PAUSED}`, 'Live data restored for BTCUSDT']);
   });
 
+  it('a submit rejected on stale data that no poll or trade saw records the gap', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    t.clock.advance(1500); // the poll at T0 + 1 s finds the data fresh
+    t.market.setFresh('BTCUSDT', false);
+    const order = submittedOrder(t.runner.submit(marketBuy('1')));
+    expect(order.rejectReason).toBe('Live data interrupted for BTCUSDT');
+    expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0 + 1000, reason: 'Disconnected' }]);
+    t.market.setFresh('BTCUSDT', true);
+    t.clock.advance(500); // the next poll finds it fresh again
+    expect(t.gaps()).toEqual([{ startedAt: T0 + 1000, endedAt: T0 + 2000, reason: 'Disconnected' }]);
+    expect(t.notices()).toContain('Live data interrupted for BTCUSDT: Disconnected');
+  });
+
+  it('a linked pair rejected on stale data that no poll or trade saw records the gap', () => {
+    const t = setup();
+    t.runner.start();
+    withBtc(t);
+    t.clock.advance(1200); // the poll at T0 + 1 s finds the data fresh
+    t.market.setFresh('BTCUSDT', false);
+    const events = t.runner.attachOco({ symbol: 'BTCUSDT', qty: '0.5', stopLoss: '95', takeProfit: '110' });
+    expect(events.map((e) => (e.type === 'order_rejected' ? e.reason : e.type))).toEqual([
+      'Live data interrupted for BTCUSDT',
+      'Live data interrupted for BTCUSDT',
+    ]);
+    expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0 + 1000, reason: 'Disconnected' }]);
+    t.market.setFresh('BTCUSDT', true);
+    t.clock.advance(500);
+    expect(t.gaps()).toEqual([{ startedAt: T0 + 1000, endedAt: T0 + 2000, reason: 'Disconnected' }]);
+  });
+
   it('a silent connection: the gap starts at the last frame received, not at the poll that detects the silence', async () => {
     const s = await liveStack(T0);
     const T = s.clock.now; // the last frame: the depth update that synced the book

@@ -196,6 +196,7 @@ export class EngineRunner {
 
   submit(req: SpotOrderRequest): EngineEvent[] {
     this.refuseTrading();
+    this.noteStale(req.symbol);
     return this.apply((ctx) => this.d.engine.submit(req, ctx));
   }
 
@@ -210,6 +211,7 @@ export class EngineRunner {
 
   attachOco(req: OcoRequest): EngineEvent[] {
     this.refuseTrading();
+    this.noteStale(req.symbol);
     return this.apply((ctx) => this.d.engine.attachOco(req, ctx));
   }
 
@@ -373,11 +375,9 @@ export class EngineRunner {
       const left = at - this.d.now();
       if (left > 0) return this.timer(fire, left);
       this.background(() => {
-        this.checkStall(this.d.now());
         const symbol = this.d.engine.state.orders.get(orderId)?.symbol;
-        if (symbol !== undefined && !this.d.market.isFresh(symbol) && this.startGap(symbol, this.staleReason(symbol))) {
-          this.broadcastHealth();
-        }
+        if (symbol !== undefined) this.noteStale(symbol);
+        else this.checkStall(this.d.now());
         this.apply(call);
       });
     };
@@ -542,6 +542,16 @@ export class EngineRunner {
     }
     this.broadcastHealth();
     return true;
+  }
+
+  /**
+   * Before an engine call on `symbol` that is not a poll or a trade (an arrival, a cancel, an order
+   * from the owner): a pause is handled first; then stale data, which the engine acts on (a deferred
+   * or rejected order), opens a gap, so a stale stretch no poll or trade saw is still recorded.
+   */
+  private noteStale(symbol: string): void {
+    this.checkStall(this.d.now());
+    if (!this.d.market.isFresh(symbol) && this.startGap(symbol, this.staleReason(symbol))) this.broadcastHealth();
   }
 
   /** A health poll found the symbol fresh. Returns whether its gap closed. */
