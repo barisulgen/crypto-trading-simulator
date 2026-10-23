@@ -25,6 +25,11 @@ import { isStopType } from './triggers.ts';
 /** Statuses of orders that still count against MAX_NUM_ORDERS (in flight included). */
 const LIVE_STATUSES: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled', 'triggered']);
 
+/**
+ * Order and algo-order slots in use on `symbol`. A live buy with an attached pair also holds the
+ * two slots of each kind its pair takes once the buy finishes (the pair is placed only then), so
+ * nothing accepted meanwhile can leave the pair without room and the bought coins unprotected.
+ */
 export function openCounts(s: SpotState, symbol: string): { openOrders: number; openAlgoOrders: number } {
   let openOrders = 0;
   let openAlgoOrders = 0;
@@ -32,6 +37,10 @@ export function openCounts(s: SpotState, symbol: string): { openOrders: number; 
     if (o.symbol !== symbol || !LIVE_STATUSES.has(o.status)) continue;
     openOrders += 1;
     if (o.type === 'stop_loss' || o.type === 'take_profit') openAlgoOrders += 1;
+    if (o.attach) {
+      openOrders += 2;
+      openAlgoOrders += 2;
+    }
   }
   return { openOrders, openAlgoOrders };
 }

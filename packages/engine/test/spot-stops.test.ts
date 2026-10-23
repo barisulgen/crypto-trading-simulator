@@ -1048,6 +1048,48 @@ describe('pair attached to a buy is validated up front', () => {
     placed(engine3.submit(marketBuy('1'), ctx3));
   });
 
+  it('a live buy reserves the slots of its pair: the third attached buy is rejected up front', () => {
+    const { ctx, engine, bal } = setup();
+    const first = placed(engine.submit(limitBuy('99.50', '1'), ctx));
+    const second = placed(engine.submit(limitBuy('99.40', '1'), ctx));
+    const third = engine.submit(limitBuy('99.30', '1'), ctx);
+    expect(rejectReason(third)).toBe(
+      'MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but 4 of 5 are in use on BTCUSDT',
+    );
+    expect(rejectReason(engine.submit(marketBuy('1'), ctx))).toBe(
+      'MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but 4 of 5 are in use on BTCUSDT',
+    );
+    expect(engine.preview(limitBuy('99.30', '1'), ctx).rejectReason).toBe(
+      'MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but 4 of 5 are in use on BTCUSDT',
+    );
+    expect(s(bal('USDT').locked)).toBe('198.9');
+    // Both accepted buys fill and both pairs are placed: none is left unprotected.
+    arriveNow(engine, first, ctx);
+    arriveNow(engine, second, ctx);
+    const events = engine.onTrade('BTCUSDT', trade('99.00', '5'), ctx);
+    expect(reasons(events)).toEqual([]);
+    expect(placedOrders(events).map((o) => o.type)).toEqual(['stop_loss', 'take_profit', 'stop_loss', 'take_profit']);
+  });
+
+  it('a plain stop, a linked pair and a plain order count against the slots resting attached buys reserve', () => {
+    const { market, ctx, engine } = setup();
+    placed(engine.submit(limitBuy('99.50', '1'), ctx));
+    placed(engine.submit(limitBuy('99.40', '1'), ctx));
+    // 4 of 5 algo slots are reserved for the two pairs.
+    const oco = engine.attachOco({ symbol: 'BTCUSDT', qty: '0.5', stopLoss: '95', takeProfit: '110' }, ctx);
+    const full = 'MAX_NUM_ALGO_ORDERS: a stop-loss/take-profit pair needs 2 slots but 4 of 5 are in use on BTCUSDT';
+    expect(reasons(oco)).toEqual([full, full]);
+    placed(engine.submit(sellStop('98', '0.1'), ctx));
+    expect(rejectReason(engine.submit(sellStop('97', '0.1'), ctx))).toBe(
+      'MAX_NUM_ALGO_ORDERS: already 5 open stop/take-profit orders on BTCUSDT (maximum 5)',
+    );
+    // Order slots: 2 buys + 4 reserved legs + 1 stop = 7.
+    market.setRules('BTCUSDT', { ...btcRules, maxNumOrders: 7 });
+    expect(rejectReason(engine.submit(limitBuy('99', '1', {}), ctx))).toBe(
+      'MAX_NUM_ORDERS: already 7 open orders on BTCUSDT (maximum 7)',
+    );
+  });
+
   it('NOTIONAL of each leg is checked on the expected net quantity', () => {
     const { ctx, engine, bal } = setup();
     // 0.05 BTC is 5.00 at the average price and passes alone; net of the 0.1 % fee: 0.04995.
