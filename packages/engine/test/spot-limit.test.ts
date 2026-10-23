@@ -284,7 +284,15 @@ describe('marketable limit', () => {
     const { ctx, engine, bal, stored } = setup();
     const order = placed(engine.submit(limitBuy('100.10', '2'), ctx));
     expect(s(order.lockAmount)).toBe('200.2');
-    const { fill, order: after } = onlyFill(arriveNow(engine, order, ctx));
+    const arrived = arriveNow(engine, order, ctx);
+    const { fill, order: after } = onlyFill(arrived);
+    // The taker part carries the levels it took, for the market's own-liquidity overlay.
+    const takerEvent = arrived[0]!;
+    if (takerEvent.type !== 'fill') throw new Error('expected fill');
+    expect(takerEvent.consumed!.map((l) => [s(l.price), s(l.qty)])).toEqual([
+      ['100', '0.5'],
+      ['100.1', '1'],
+    ]);
     expect(fill.liquidity).toBe('taker');
     expect(s(fill.qty)).toBe('1.5');
     expect(s(fill.quote)).toBe('150.1');
@@ -301,8 +309,11 @@ describe('marketable limit', () => {
     expect(s(bal('USDT').free)).toBe('799.85');
     expect(s(bal('BTC').free)).toBe('3.4985');
 
-    const rest2 = onlyFill(engine.onTrade('BTCUSDT', trade('100.00', '1', true), ctx));
+    const makerEvents = engine.onTrade('BTCUSDT', trade('100.00', '1', true), ctx);
+    const rest2 = onlyFill(makerEvents);
     expect(rest2.fill.liquidity).toBe('maker');
+    // A maker fill takes nothing from the book.
+    expect(makerEvents[0]).not.toHaveProperty('consumed');
     expect(s(rest2.fill.qty)).toBe('0.5');
     expect(s(rest2.fill.price)).toBe('100.1');
     expect(rest2.order.status).toBe('filled');

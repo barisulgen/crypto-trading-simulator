@@ -1,6 +1,17 @@
 import { D } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
-import type { Basis, EngineCtx, EngineEvent, Fill, RoundTrip, Side, SpotOrder, SpotRules } from '../types.ts';
+import type {
+  Basis,
+  EngineCtx,
+  EngineEvent,
+  Fill,
+  PriceLevel,
+  RoundTrip,
+  Side,
+  SpotOrder,
+  SpotRules,
+} from '../types.ts';
+import { LIVE_STATUSES } from './state.ts';
 import type { SpotState } from './state.ts';
 
 /**
@@ -36,8 +47,10 @@ export function applyBuyToBasis(
 
 /**
  * A sell realises net proceeds − average cost × qty sold. The open round trip closes when what
- * remains is worth less than the minimum order value at the sell price (dust, 0 included); the
- * dust keeps its cost and carries into the next trip. A sell with no open trip closes nothing.
+ * remains is worth less than the minimum order value at the sell price (dust, 0 included) and no
+ * sell order of the coin is still live (`sellLive`: one still covers coins, so the trip waits for
+ * it); the dust keeps its cost and carries into the next trip. A sell with no open trip closes
+ * nothing.
  */
 export function applySellToBasis(
   b: Basis,
@@ -47,6 +60,7 @@ export function applySellToBasis(
   minNotional: Decimal,
   now: number,
   symbol: string,
+  sellLive = false,
 ): { basis: Basis; realized: Decimal; closed: RoundTrip | null } {
   // Coins only arrive through buys, so the basis always covers the holding being sold.
   if (qty.gt(b.qty)) throw new Error(`${symbol}: cannot sell ${qty} against a cost basis of ${b.qty}`);
@@ -56,16 +70,66 @@ export function applySellToBasis(
   const left = { qty: b.qty.minus(qty), cost: b.cost.minus(costOut) };
 
   if (b.roundTripId === null) return { basis: { ...b, ...left }, realized, closed: null };
-  const tripRealized = b.tripRealized.plus(realized);
-  if (remainingValueAtPrice.gte(minNotional)) {
-    return { basis: { ...b, ...left, tripRealized }, realized, closed: null };
+  const after: Basis = { ...b, ...left, tripRealized: b.tripRealized.plus(realized) };
+  if (sellLive || remainingValueAtPrice.gte(minNotional)) return { basis: after, realized, closed: null };
+  return { ...closeTrip(after, symbol, now), realized };
+}
+
+/** Close the basis's open round trip with the P&L realised so far; the holding and its cost stay. */
+function closeTrip(b: Basis, symbol: string, now: number): { basis: Basis; closed: RoundTrip } {
+  const closed: RoundTrip = { id: b.roundTripId!, symbol, openedAt: b.openedAt!, closedAt: now, pnl: b.tripRealized };
+  return { basis: { ...b, roundTripId: null, openedAt: null, tripRealized: D(0) }, closed };
+}
+
+/**
+ * Whether a live sell order of `symbol` (in flight, resting, armed or executing) still covers
+ * coins. `current` is the order being filled, as it is after the fill; the state may still hold
+ * it as it was before.
+ */
+function liveSellCovers(s: SpotState, symbol: string, current: SpotOrder | null): boolean {
+  if (current && current.side === 'sell' && LIVE_STATUSES.has(current.status)) return true;
+  for (const o of s.orders.values()) {
+    if (o.id === current?.id) continue;
+    if (o.symbol === symbol && o.side === 'sell' && LIVE_STATUSES.has(o.status)) return true;
   }
-  const closed: RoundTrip = { id: b.roundTripId, symbol, openedAt: b.openedAt!, closedAt: now, pnl: tripRealized };
-  return {
-    basis: { ...left, roundTripId: null, openedAt: null, tripRealized: D(0) },
-    realized,
-    closed,
-  };
+  return false;
+}
+
+/**
+ * Round trips that a sell order's end lets close: for each coin whose sell order these events
+ * cancelled or rejected, the open trip closes when no sell of the coin is live any more and what
+ * is held is dust at the best bid (else the last trade price). The events come back with each
+ * `round_trip_closed` after them. Without exchange rules or any price a trip stays open.
+ */
+export function closeTripsAfterSellEnds(s: SpotState, events: EngineEvent[], ctx: EngineCtx): EngineEvent[] {
+  const symbols = new Set<string>();
+  for (const e of events) {
+    if ((e.type === 'order_cancelled' || e.type === 'order_rejected') && e.order.side === 'sell') {
+      symbols.add(e.order.symbol);
+    }
+  }
+  const out = [...events];
+  for (const symbol of symbols) {
+    const closed = closeIfDust(s, symbol, ctx);
+    if (closed) out.push({ type: 'round_trip_closed', time: ctx.now, roundTrip: closed });
+  }
+  return out;
+}
+
+function closeIfDust(s: SpotState, symbol: string, ctx: EngineCtx): RoundTrip | null {
+  let rules: SpotRules;
+  try {
+    rules = ctx.market.rules(symbol);
+  } catch {
+    return null;
+  }
+  const b = s.basis[rules.base];
+  if (!b || b.roundTripId === null || liveSellCovers(s, symbol, null)) return null;
+  const price = ctx.market.best(symbol, 'sell') ?? ctx.market.lastPrice(symbol);
+  if (price === null || b.qty.mul(price).gte(rules.minNotional)) return null;
+  const r = closeTrip(b, symbol, ctx.now);
+  s.basis[rules.base] = r.basis;
+  return r.closed;
 }
 
 /**
@@ -82,7 +146,10 @@ export function assertBasisCovers(s: SpotState, rules: SpotRules, side: Side, qt
  * The one accounting hook: every fill (market, limit, stop, pair leg; maker or taker) goes
  * through here to become its `fill` event. Updates the coin's basis, stamps the fill with its
  * realised P&L (sells; null for buys) and round-trip id (for a closing sell, the trip it closed),
- * and adds `round_trip_closed` after the fill when the sell left only dust.
+ * and adds `round_trip_closed` after the fill when the sell left only dust and no sell of the
+ * coin is live any more. A trip never closes while a sell order is live, so every fill of a sell
+ * carries the trip that was open when the order was placed. `consumed` (taker fills) is what
+ * the fill took from each book level; the event carries it.
  */
 export function recordFill(
   s: SpotState,
@@ -90,6 +157,7 @@ export function recordFill(
   order: SpotOrder,
   rules: SpotRules,
   ctx: EngineCtx,
+  consumed?: PriceLevel[],
 ): EngineEvent[] {
   const asset = rules.base;
   const b = s.basis[asset] ?? emptyBasis();
@@ -111,12 +179,15 @@ export function recordFill(
       rules.minNotional,
       ctx.now,
       fill.symbol,
+      liveSellCovers(s, fill.symbol, order),
     );
     s.basis[asset] = r.basis;
     accounted = { ...fill, realizedPnl: r.realized, roundTripId: b.roundTripId };
     closed = r.closed;
   }
-  const events: EngineEvent[] = [{ type: 'fill', time: ctx.now, fill: accounted, order }];
+  const events: EngineEvent[] = [
+    { type: 'fill', time: ctx.now, fill: accounted, order, ...(consumed ? { consumed } : {}) },
+  ];
   if (closed) events.push({ type: 'round_trip_closed', time: ctx.now, roundTrip: closed });
   return events;
 }

@@ -1,11 +1,10 @@
 import { D, Decimal, floorToStep } from '../decimal.ts';
-import { bestPrice, walkBook } from '../book.ts';
+import { walkBook } from '../book.ts';
 import type { WalkResult } from '../book.ts';
 import { InputError, parseAmount } from '../input.ts';
 import { priceFilter, validateSpotOrder } from '../rules.ts';
 import type {
   AggTrade,
-  BookSnapshot,
   CancelReason,
   EngineCtx,
   EngineEvent,
@@ -18,6 +17,7 @@ import type {
   SpotRules,
 } from '../types.ts';
 import {
+  afterOwnFills,
   arrivalDelay,
   fillOrThin,
   marketStep,
@@ -163,21 +163,16 @@ function armReason(legs: SpotOrder[], ctx: EngineCtx): string | null {
 
 // ---- trigger and execution ----
 
-/**
- * Trigger the armed stops of `symbol` that this trade's price reached. Paused while stale. The
- * book is copied only when a stop triggers, once for all the stops this trade reaches.
- */
+/** Trigger the armed stops of `symbol` that this trade's price reached. Paused while stale. */
 export function triggerStops(s: SpotState, symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
   if (!ctx.market.isFresh(symbol)) return [];
-  let book: BookSnapshot | null = null;
   const events: EngineEvent[] = [];
   for (const { id } of [...s.orders.values()]) {
     // Re-read: an earlier trigger in this loop may have cancelled this order as a pair partner.
     const o = s.orders.get(id)!;
     if (o.symbol !== symbol || o.status !== 'open' || !isStopType(o.type)) continue;
     if (!isTriggered(o.type, o.side, o.triggerPrice!, trade.price)) continue;
-    book ??= ctx.market.book(symbol);
-    events.push(...trigger(s, o, trade.price, book, ctx));
+    events.push(...trigger(s, o, trade.price, ctx));
   }
   return events;
 }
@@ -187,7 +182,7 @@ export function triggerStops(s: SpotState, symbol: string, trade: AggTrade, ctx:
  * recorded so the fill's drift measures trigger → execution. A pair partner is cancelled now
  * (a triggered order is certain to execute) and the pair's lock moves to the triggered leg.
  */
-function trigger(s: SpotState, order: SpotOrder, last: Decimal, book: BookSnapshot, ctx: EngineCtx): EngineEvent[] {
+function trigger(s: SpotState, order: SpotOrder, last: Decimal, ctx: EngineCtx): EngineEvent[] {
   const partners = untriggeredPartners(s, order);
   const lockAmount = partners.reduce((sum, p) => sum.plus(p.lockAmount), order.lockAmount);
   const triggered: SpotOrder = {
@@ -195,7 +190,7 @@ function trigger(s: SpotState, order: SpotOrder, last: Decimal, book: BookSnapsh
     status: 'triggered',
     triggeredAt: ctx.now,
     arrivesAt: ctx.now + arrivalDelay(ctx),
-    bestAtSubmit: bestPrice(book, order.side),
+    bestAtSubmit: ctx.market.best(order.symbol, order.side),
     lockAmount,
   };
   putOrder(s, triggered);
@@ -240,11 +235,16 @@ export function armWaitingPairs(s: SpotState, symbol: string, ctx: EngineCtx): E
   return events;
 }
 
-/** Execute every triggered order of `symbol` that is due, deferred ones included. */
+/**
+ * Execute every triggered order of `symbol` that is due, deferred ones included. Each walks the
+ * book less what the ones before it took.
+ */
 export function executeDue(s: SpotState, symbol: string, ctx: EngineCtx): EngineEvent[] {
   if (!ctx.market.isFresh(symbol)) return [];
   const due = [...s.orders.values()].filter((o) => o.symbol === symbol && dueTriggered(o, ctx.now));
-  return due.flatMap((o) => executeTriggered(s, o, ctx));
+  const events: EngineEvent[] = [];
+  for (const o of due) events.push(...executeTriggered(s, o, afterOwnFills(ctx, events)));
+  return events;
 }
 
 function executeTriggered(s: SpotState, order: SpotOrder, ctx: EngineCtx): EngineEvent[] {

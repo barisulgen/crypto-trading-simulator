@@ -140,6 +140,27 @@ describe('EngineRunner', () => {
     expect(t.notices()).toContain('Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC');
   });
 
+  it("hands each persisted taker fill's levels to the market's own-liquidity overlay; maker fills take nothing", () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    const fillsInDb: unknown[] = [];
+    t.market.onConsume = () => fillsInDb.push(t.db.prepare('SELECT count(*) AS n FROM fills').get());
+    t.runner.submit(marketBuy('1.2'));
+    t.clock.advance(100);
+    expect(t.market.consumed.map((c) => [c.symbol, c.side, c.levels.map((l) => [`${l.price}`, `${l.qty}`])])).toEqual([
+      ['BTCUSDT', 'buy', [['100', '0.5'], ['100.1', '0.7']]],
+    ]);
+    // Called after the fill was committed.
+    expect(fillsInDb).toEqual([{ n: 1 }]);
+
+    t.runner.submit(limitBuy('99.50', '1'));
+    t.clock.advance(100);
+    t.market.trade('BTCUSDT', trade('99.40'));
+    expect(t.db.prepare('SELECT count(*) AS n FROM fills').get()).toEqual({ n: 2 });
+    expect(t.market.consumed).toHaveLength(1);
+  });
+
   it('schedules arrive() at the arrivesAt of a triggered stop and fills it', () => {
     const t = setup();
     t.runner.start();

@@ -6,11 +6,14 @@ import { LocalBook } from '../src/market/localBook.ts';
 import { MarketData } from '../src/market/marketData.ts';
 import { SpotFeed } from '../src/market/spotFeed.ts';
 import { CandleService } from '../src/market/candles.ts';
-import { FakeClock, fakeTimers, FakeWs, tick } from './helpers.ts';
+import { FakeClock, fakeTimers, FakeWs, liveStack, tick } from './helpers.ts';
 import { parseSpotRules } from '../src/binance/parseRules.ts';
 import exchangeInfo from './fixtures/btcusdt-exchangeinfo.json' with { type: 'json' };
 
 const cfg = { silentMs: 15000, lagMs: 5000, noUpdateMs: 120000 };
+const T0 = 1_700_000_000_000;
+const show = (levels: { price: { toString(): string }; qty: { toString(): string } }[]) =>
+  levels.map((l) => `${l.price}x${l.qty}`);
 const silent = { info() {}, warn() {}, error() {} };
 
 describe('MarketData', () => {
@@ -53,6 +56,52 @@ describe('MarketData', () => {
     books.get('BTCUSDT')!.applySnapshot({ lastUpdateId: 1, bids: [['100', '1'], ['99', '2']], asks: [['101', '3']] });
     expect(md.best('BTCUSDT', 'buy')!.toString()).toBe('101');
     expect(md.best('BTCUSDT', 'sell')!.toString()).toBe('100');
+  });
+
+  it("book() and best() take out the owner's own taker fills until a depth update touches the level; bookTop shows the real book", () => {
+    const { books, feed, md } = setup();
+    books.get('BTCUSDT')!.applySnapshot({
+      lastUpdateId: 1,
+      bids: [['99.90', '0.4'], ['99.80', '1.0']],
+      asks: [['100.00', '0.5'], ['100.10', '1.0'], ['100.50', '2.0']],
+    });
+    md.consume('BTCUSDT', 'buy', [{ price: D('100.00'), qty: D('0.5') }, { price: D('100.10'), qty: D('0.2') }]);
+    expect(show(md.book('BTCUSDT').asks)).toEqual(['100.1x0.8', '100.5x2']);
+    expect(show(md.book('BTCUSDT').bids)).toEqual(['99.9x0.4', '99.8x1']);
+    expect(md.best('BTCUSDT', 'buy')!.toString()).toBe('100.1');
+    expect(md.best('BTCUSDT', 'sell')!.toString()).toBe('99.9');
+    expect(show(md.bookTop('BTCUSDT').asks)).toEqual(['100x0.5', '100.1x1', '100.5x2']);
+
+    // SpotFeed passes the levels of each applied depth update: one at 100.00 ends the claim there.
+    feed.emit('book', 'BTCUSDT', { b: [], a: [['100.00', '0.5']] });
+    expect(show(md.book('BTCUSDT').asks)).toEqual(['100x0.5', '100.1x0.8', '100.5x2']);
+    expect(md.best('BTCUSDT', 'buy')!.toString()).toBe('100');
+  });
+
+  it('a sell takes from the bids, and bestBid follows; a replaced book (snapshot or resync) ends every claim', () => {
+    const { books, feed, md } = setup();
+    books.get('BTCUSDT')!.applySnapshot({
+      lastUpdateId: 1,
+      bids: [['99.90', '0.4'], ['99.80', '1.0']],
+      asks: [['100.00', '0.5']],
+    });
+    md.consume('BTCUSDT', 'sell', [{ price: D('99.90'), qty: D('0.4') }, { price: D('99.80'), qty: D('0.3') }]);
+    expect(show(md.book('BTCUSDT').bids)).toEqual(['99.8x0.7']);
+    expect(md.best('BTCUSDT', 'sell')!.toString()).toBe('99.8');
+    expect(md.bestBid('BTCUSDT')!.price.toString()).toBe('99.8');
+    expect(show(md.book('BTCUSDT').asks)).toEqual(['100x0.5']);
+
+    feed.emit('snapshot', 'BTCUSDT');
+    expect(show(md.book('BTCUSDT').bids)).toEqual(['99.9x0.4', '99.8x1']);
+    expect(md.best('BTCUSDT', 'sell')!.toString()).toBe('99.9');
+  });
+
+  it('a side the owner took entirely: best() is null', () => {
+    const { books, md } = setup();
+    books.get('BTCUSDT')!.applySnapshot({ lastUpdateId: 1, bids: [], asks: [['100.00', '0.5'], ['100.10', '1']] });
+    md.consume('BTCUSDT', 'buy', [{ price: D('100.00'), qty: D('0.5') }, { price: D('100.10'), qty: D('1') }]);
+    expect(md.best('BTCUSDT', 'buy')).toBeNull();
+    expect(md.book('BTCUSDT').asks).toEqual([]);
   });
 
   it('isFresh needs loaded rules and fresh health', async () => {
@@ -204,6 +253,34 @@ describe('MarketData', () => {
     });
     await md.refreshClockOffset();
     expect(spy).toHaveBeenCalledWith(450); // 1500 - (1000+1100)/2
+  });
+});
+
+describe('own liquidity on the live stack', () => {
+  it('two back-to-back market buys of 0.5 BTC: the second fills at 100.10, its slippage measured from the overlaid best 100.10', async () => {
+    const s = await liveStack(T0);
+    s.runner.deposit('spot', D('1000'));
+    s.runner.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.5' });
+    s.clock.advance(300);
+    s.runner.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.5' });
+    s.clock.advance(300);
+    const rows = s.db
+      .prepare(
+        'SELECT price, slippage_usd AS slippage, best_at_arrival AS bestAtArrival, best_at_submit AS bestAtSubmit FROM fills ORDER BY time, rowid',
+      )
+      .all();
+    expect(rows).toEqual([
+      { price: '100', slippage: '0', bestAtArrival: '100', bestAtSubmit: '100' },
+      { price: '100.1', slippage: '0', bestAtArrival: '100.1', bestAtSubmit: '100.1' },
+    ]);
+    // What the UI shows is still the real book.
+    expect(show(s.market.bookTop('BTCUSDT').asks)).toEqual(['100x0.5', '100.1x1', '100.5x2']);
+    expect(show(s.market.book('BTCUSDT').asks)).toEqual(['100.1x0.5', '100.5x2']);
+
+    // A depth update at 100.00 ends the claim there.
+    s.depth(102, [], [['100.00', '0.3']]);
+    expect(show(s.market.book('BTCUSDT').asks)).toEqual(['100x0.3', '100.1x0.5', '100.5x2']);
+    expect(s.market.best('BTCUSDT', 'buy')!.toString()).toBe('100');
   });
 });
 
@@ -470,6 +547,28 @@ describe('SpotFeed', () => {
     const tk = events.find((e) => e[0] === 'ticker')!;
     expect(tk[2].change24hPct.toString()).toBe('10');
     expect(events.some((e) => e[0] === 'book')).toBe(true);
+  });
+
+  it("'book' carries the levels of the applied depth update; 'snapshot' marks every book replaced or emptied", async () => {
+    const { feed, sockets, timers, snaps } = setup();
+    snaps.BTCUSDT = [snap(100)];
+    const events: unknown[] = [];
+    feed.on('book', (s, levels) => events.push(['book', s, levels]));
+    feed.on('snapshot', (s) => events.push(['snapshot', s]));
+    feed.start();
+    const ws = sockets[0]!;
+    ws.open(); // the resync empties the book
+    expect(events).toEqual([['snapshot', 'BTCUSDT']]);
+    timers.fire();
+    await tick(); // the snapshot
+    ws.msg(diff('BTCUSDT', 99, 101, [['100', '2']], [['101', '0']]));
+    expect(events).toEqual([
+      ['snapshot', 'BTCUSDT'],
+      ['snapshot', 'BTCUSDT'],
+      ['book', 'BTCUSDT', { b: [['100', '2']], a: [['101', '0']] }],
+    ]);
+    ws.drop(); // a disconnect empties the book
+    expect(events.at(-1)).toEqual(['snapshot', 'BTCUSDT']);
   });
 
   it('trade and ticker event times count toward lag; a malformed one counts as lagging', async () => {

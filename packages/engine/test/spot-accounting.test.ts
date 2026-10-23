@@ -6,7 +6,7 @@ import { SpotEngine } from '../src/spot/engine.ts';
 import { emptyLedger, deposit, transfer } from '../src/account/ledger.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import type { AggTrade, Basis, EngineCtx, EngineEvent, Fill, MarketView, SpotOrder } from '../src/types.ts';
-import { FakeMarket, testCtx } from './fixtures.ts';
+import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
 
 const NOW = 1_000_000;
 const MIN_NOTIONAL = D('5');
@@ -273,6 +273,125 @@ describe('accounting on engine fills: dust and invariant', () => {
     const beforeMaker = JSON.stringify([engine.state.ledger.balances, [...engine.state.orders.values()]]);
     expect(() => engine.onTrade('BTCUSDT', trade('101.01', '1', false), ctx)).toThrow('cannot sell 0.5');
     expect(JSON.stringify([engine.state.ledger.balances, [...engine.state.orders.values()]])).toBe(beforeMaker);
+  });
+});
+
+describe('round trips wait for live sells', () => {
+  /**
+   * 1 BTC held in trip rt0 at a cost of 100, with MIN_NOTIONAL 1 (so 0.01 BTC at 101, worth 1.01,
+   * is not dust while 0.00004 BTC is), and a sell limit for all of it at 101 resting.
+   */
+  function withRestingSell() {
+    const market = new FakeMarket();
+    market.setRules('BTCUSDT', { ...btcRules, minNotional: D('1') });
+    const ctx = testCtx(market, { now: NOW });
+    const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
+    seedCoins(engine.state, 'BTC', D('1'));
+    const lim = placedOrder(
+      engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '101', qty: '1' }, ctx),
+    );
+    expect(arriveNow(engine, lim, ctx)).toEqual([]);
+    return { market, ctx, engine, lim };
+  }
+  /** A buyer-initiated trade through 101: fills the resting sell as a maker. */
+  const through = (qty: string) => trade('101.01', qty, false);
+
+  it('orphaned fills: the trip stays open while the sell limit holding its coins is live; its last fill closes it', () => {
+    const { ctx, engine, lim } = withRestingSell();
+
+    // A trade-through fills 0.99 BTC; the 0.01 left is worth 1.01 at 101, more than NOTIONAL.
+    const first = engine.onTrade('BTCUSDT', through('0.99'), ctx);
+    expect(first.map((e) => e.type)).toEqual(['fill']);
+    expect(engine.state.basis.BTC!.roundTripId).toBe('rt0');
+
+    // 0.00996 more: the holding is dust (0.00004 BTC, worth 0.00404) but the limit still has
+    // 0.00004 open, so the trip stays open.
+    const second = engine.onTrade('BTCUSDT', through('0.00996'), ctx);
+    expect(second.map((e) => e.type)).toEqual(['fill']);
+    expect(s(engine.state.basis.BTC!.qty)).toBe('0.00004');
+    const part = engine.state.orders.get(lim.id)!;
+    expect(part.status).toBe('partially_filled');
+    expect(s(part.qty!.minus(part.filledQty))).toBe('0.00004');
+    expect(engine.state.basis.BTC!.roundTripId).toBe('rt0');
+
+    // The last fill closes it.
+    const last = engine.onTrade('BTCUSDT', through('1'), ctx);
+    expect(last.map((e) => e.type)).toEqual(['fill', 'round_trip_closed']);
+    const all = fills([...first, ...second, ...last]);
+    expect(all.map((f) => f.roundTripId)).toEqual(['rt0', 'rt0', 'rt0']);
+    expect(all.every((f) => f.roundTripId !== null)).toBe(true);
+
+    const closed = last[1]!;
+    if (closed.type !== 'round_trip_closed') throw new Error('expected round_trip_closed');
+    expect(closed.roundTrip.id).toBe('rt0');
+    // 101 × 1 less the 0.1 % maker fee, less the cost of 100.
+    expect(s(closed.roundTrip.pnl)).toBe('0.899');
+    expect(s(closed.roundTrip.pnl)).toBe(s(all.reduce((sum, f) => sum.plus(f.realizedPnl!), D(0))));
+    const basis = engine.state.basis.BTC!;
+    expect(basis.roundTripId).toBeNull();
+    expect(s(basis.qty)).toBe('0');
+  });
+
+  it('a cancel after which only dust is held and no sell is live closes the trip', () => {
+    const { ctx, engine, lim } = withRestingSell();
+    const [f] = fills(engine.onTrade('BTCUSDT', through('0.99996'), ctx)) as [Fill];
+    expect(f.roundTripId).toBe('rt0');
+    expect(engine.state.basis.BTC!.roundTripId).toBe('rt0');
+
+    const r = engine.cancel(lim.id, ctx);
+    expect(r.ok).toBe(true);
+    ctx.now = engine.state.orders.get(lim.id)!.cancelArrivesAt!;
+    const events = engine.arriveCancel(lim.id, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_cancelled', 'round_trip_closed']);
+    const closed = events[1]!;
+    if (closed.type !== 'round_trip_closed') throw new Error('expected round_trip_closed');
+    expect(closed.roundTrip.id).toBe('rt0');
+    expect(closed.roundTrip.closedAt).toBe(ctx.now);
+    expect(s(closed.roundTrip.pnl)).toBe(s(f.realizedPnl));
+    expect(engine.state.basis.BTC!.roundTripId).toBeNull();
+    expect(s(engine.state.basis.BTC!.qty)).toBe('0.00004');
+  });
+
+  it('a market sell cut short by a thin book closes the trip after its thin-book cancel, not at its fill', () => {
+    const market = new FakeMarket();
+    const ctx = testCtx(market, { now: NOW });
+    const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
+    seedCoins(engine.state, 'BTC', D('1'));
+    market.setBook('BTCUSDT', {
+      bids: [{ price: D('99.90'), qty: D('0.99996') }],
+      asks: [{ price: D('100.00'), qty: D('1') }],
+    });
+    const sell = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '1' }, ctx));
+    const events = arriveNow(engine, sell, ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill', 'order_cancelled', 'round_trip_closed']);
+    expect(fills(events)[0]!.roundTripId).toBe('rt0');
+    expect(engine.state.basis.BTC!.roundTripId).toBeNull();
+  });
+
+  it('a market sell that leaves dust does not close the trip while a part-filled sell limit still covers coins', () => {
+    const market = new FakeMarket();
+    const ctx = testCtx(market, { now: NOW });
+    const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
+    seedCoins(engine.state, 'BTC', D('1'));
+    const lim = placedOrder(
+      engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '101', qty: '0.5' }, ctx),
+    );
+    expect(arriveNow(engine, lim, ctx)).toEqual([]);
+    // The limit fills but for 0.00004.
+    expect(engine.onTrade('BTCUSDT', trade('101.01', '0.49996', false), ctx).map((e) => e.type)).toEqual(['fill']);
+
+    // A market sell of the other 0.5 leaves 0.00004 BTC: dust, but still covered by the limit.
+    const sell = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.5' }, ctx));
+    expect(arriveNow(engine, sell, ctx).map((e) => e.type)).toEqual(['fill']);
+    expect(s(engine.state.basis.BTC!.qty)).toBe('0.00004');
+    expect(engine.state.basis.BTC!.roundTripId).toBe('rt0');
+
+    // The limit's last fill closes it.
+    const closing = engine.onTrade('BTCUSDT', trade('101.01', '1', false), ctx);
+    expect(closing.map((e) => e.type)).toEqual(['fill', 'round_trip_closed']);
+    const [last] = fills(closing) as [Fill];
+    expect(last.orderId).toBe(lim.id);
+    expect(last.roundTripId).toBe('rt0');
   });
 });
 

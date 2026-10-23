@@ -12,6 +12,8 @@ import type {
   OcoRequest,
   Ledger,
   OrderPreview,
+  PriceLevel,
+  Side,
   SimEngine,
   SpotOrder,
   SpotOrderRequest,
@@ -86,6 +88,8 @@ export type RunnerMessage =
 export interface RunnerMarket extends MarketView {
   /** While stale: the last real bid received, with `at` saying when; null only before any bid. */
   bestBid(symbol: string): { price: Decimal; fresh: boolean; at?: number } | null;
+  /** A saved taker fill of a `side` order took `levels`: later walks see them reduced. */
+  consume(symbol: string, side: Side, levels: PriceLevel[]): void;
   healthSnapshot(): HealthMap;
   on(event: 'trade', cb: (symbol: string, trade: AggTrade) => void): unknown;
   off(event: 'trade', cb: (symbol: string, trade: AggTrade) => void): unknown;
@@ -308,6 +312,7 @@ export class EngineRunner {
       throw e;
     }
     for (const e of events) {
+      if (e.type === 'fill' && e.consumed) this.d.market.consume(e.fill.symbol, e.fill.side, e.consumed);
       if ((e.type === 'order_placed' || e.type === 'order_triggered') && e.order.arrivesAt !== null) {
         this.scheduleArrival(e.order.id, e.order.arrivesAt);
       }

@@ -6,7 +6,8 @@ import type { BinanceRest } from '../binance/rest.ts';
 import { parseSpotRules, parseSymbolStatus } from '../binance/parseRules.ts';
 import type { FeedHealth } from './feedHealth.ts';
 import type { LocalBook } from './localBook.ts';
-import type { Ticker } from './spotFeed.ts';
+import { OwnLiquidity } from './ownLiquidity.ts';
+import type { DepthLevels, Ticker } from './spotFeed.ts';
 import { defaultSetTimer } from './ws.ts';
 import type { SetTimer } from './ws.ts';
 
@@ -21,7 +22,7 @@ const STARTUP_RETRY_MAX_MS = 60_000;
 
 export interface MarketDataDeps {
   symbols: string[];
-  /** The SpotFeed (or a stand-in): emits trade / ticker / book. */
+  /** The SpotFeed (or a stand-in): emits trade / ticker / book / snapshot. */
   feed: EventEmitter;
   books: Map<string, LocalBook>;
   health: FeedHealth;
@@ -31,7 +32,11 @@ export interface MarketDataDeps {
   setTimer?: SetTimer;
 }
 
-/** What the engine and API may know about the market. Never invents a price. */
+/**
+ * What the engine and API may know about the market. Never invents a price. The engine's view of
+ * a book (book, best, bestBid) holds back what the owner's own taker fills took (OwnLiquidity);
+ * bookTop, shown to the owner, is the real book.
+ */
 export class MarketData extends EventEmitter implements MarketView {
   private readonly symbols: string[];
   private readonly books: Map<string, LocalBook>;
@@ -49,6 +54,7 @@ export class MarketData extends EventEmitter implements MarketView {
   private readonly lastBid = new Map<string, { price: Decimal; at: number }>();
   private readonly tick = new Map<string, Ticker>();
   private readonly trades = new Map<string, AggTrade[]>();
+  private readonly own = new Map<string, OwnLiquidity>();
   private cancels = new Set<() => void>();
   private stopped = false;
   private started = false;
@@ -74,11 +80,17 @@ export class MarketData extends EventEmitter implements MarketView {
       this.tick.set(symbol, t);
       this.emit('ticker', symbol, t);
     });
-    d.feed.on('book', (symbol: string) => {
-      const bid = this.books.get(symbol)?.bestBid();
-      if (bid) this.lastBid.set(symbol, { price: bid.price, at: this.now() });
+    d.feed.on('book', (symbol: string, levels?: DepthLevels) => {
+      const own = this.own.get(symbol);
+      if (own && levels) {
+        for (const [p] of levels.b) own.onLevelUpdate('bids', D(p));
+        for (const [p] of levels.a) own.onLevelUpdate('asks', D(p));
+      }
+      this.noteBid(symbol);
       this.emit('book', symbol);
     });
+    d.feed.on('snapshot', (symbol: string) => this.own.get(symbol)?.clear());
+    for (const s of d.symbols) this.own.set(s, new OwnLiquidity());
   }
 
   /** Loads rules, measures the clock offset and starts the pollers. Idempotent; stop() then start() restarts. */
@@ -186,12 +198,28 @@ export class MarketData extends EventEmitter implements MarketView {
   }
 
   book(symbol: string): BookSnapshot {
-    return this.bookOf(symbol).snapshot();
+    return this.ownView(symbol, this.bookOf(symbol).snapshot());
   }
 
   best(symbol: string, side: Side): Decimal | null {
+    const bookSide = side === 'buy' ? 'asks' : 'bids';
+    const own = this.own.get(symbol);
     const b = this.bookOf(symbol);
-    return (side === 'buy' ? b.bestAsk() : b.bestBid())?.price ?? null;
+    if (!own || own.count(bookSide) === 0) return (side === 'buy' ? b.bestAsk() : b.bestBid())?.price ?? null;
+    // Each claim can remove at most one level, so the best left is within the first claims + 1.
+    const top = b.snapshot(own.count(bookSide) + 1)[bookSide];
+    return own.apply(bookSide, top)[0]?.price ?? null;
+  }
+
+  /**
+   * The owner's own taker fill took `levels` from the side a `side` order takes (asks for a buy,
+   * bids for a sell): later walks see those levels reduced until a depth update touches them.
+   */
+  consume(symbol: string, side: Side, levels: PriceLevel[]): void {
+    const own = this.own.get(symbol);
+    if (!own) throw new Error(`Unknown symbol ${symbol}`);
+    own.consume(side === 'buy' ? 'asks' : 'bids', levels);
+    this.noteBid(symbol);
   }
 
   avgPrice(symbol: string): Decimal | null {
@@ -211,17 +239,32 @@ export class MarketData extends EventEmitter implements MarketView {
 
   // Extras for the API and UI
   /**
-   * The best bid and when it was received. While the symbol is stale (its book may be emptied
-   * until the next snapshot) it is the last real bid of the synced book, never an invented one;
-   * null only when there has been no bid since start.
+   * The best bid and when it was received, less what the owner's own sells took (the price the
+   * coins could still be sold at, so holdings are never valued above it). While the symbol is
+   * stale (its book may be emptied until the next snapshot) it is the last real bid of the synced
+   * book, never an invented one; null only when there has been no bid since start.
    */
   bestBid(symbol: string): { price: Decimal; fresh: boolean; at: number } | null {
-    const lvl: PriceLevel | null = this.bookOf(symbol).bestBid();
-    if (lvl && this.isFresh(symbol)) return { price: lvl.price, fresh: true, at: this.now() };
+    const bid = this.best(symbol, 'sell');
+    if (bid && this.isFresh(symbol)) return { price: bid, fresh: true, at: this.now() };
     const last = this.lastBid.get(symbol);
     if (last) return { price: last.price, fresh: false, at: last.at };
     // A snapshot not yet bridged by a diff: real bids, just fetched.
-    return lvl ? { price: lvl.price, fresh: false, at: this.now() } : null;
+    return bid ? { price: bid, fresh: false, at: this.now() } : null;
+  }
+
+  /** Remember the best bid (less the owner's own fills) and when it was seen, for while the book is emptied. */
+  private noteBid(symbol: string): void {
+    if (!this.books.has(symbol)) return;
+    const bid = this.best(symbol, 'sell');
+    if (bid) this.lastBid.set(symbol, { price: bid, at: this.now() });
+  }
+
+  /** The book less what the owner's own taker fills took. */
+  private ownView(symbol: string, book: BookSnapshot): BookSnapshot {
+    const own = this.own.get(symbol);
+    if (!own || own.count('bids') + own.count('asks') === 0) return book;
+    return { bids: own.apply('bids', book.bids), asks: own.apply('asks', book.asks) };
   }
 
   tickers(): Record<string, Ticker> {

@@ -30,6 +30,13 @@ export interface SpotFeedDeps {
 }
 
 type Levels = [string, string][];
+
+/** The levels a depth update set, as [price, quantity] (0 removes the level). */
+export interface DepthLevels {
+  b: Levels;
+  a: Levels;
+}
+
 interface Diff {
   U: number;
   u: number;
@@ -101,7 +108,12 @@ interface SymState {
   cancelTimer: (() => void) | null;
 }
 
-/** One combined Binance spot stream for all symbols, with per-symbol order-book sync. */
+/**
+ * One combined Binance spot stream for all symbols, with per-symbol order-book sync. Emits
+ * 'trade' (symbol, AggTrade), 'ticker' (symbol, Ticker), 'book' (symbol, DepthLevels) after each
+ * depth update applied to a book, and 'snapshot' (symbol) whenever a book is replaced: emptied
+ * for a resync or disconnect, or loaded from a snapshot.
+ */
 export class SpotFeed extends EventEmitter {
   private readonly symbols: string[];
   private readonly rest: Pick<BinanceRest, 'depth'>;
@@ -350,7 +362,7 @@ export class SpotFeed extends EventEmitter {
         this.syncedSinceConnect.add(symbol);
         if (this.syncedSinceConnect.size === this.symbols.length) this.backoff = BACKOFF_START_MS;
       }
-      this.emit('book', symbol);
+      this.emit('book', symbol, { b: diff.b, a: diff.a } satisfies DepthLevels);
     }
     return true;
   }
@@ -358,6 +370,7 @@ export class SpotFeed extends EventEmitter {
   /** An invalid book serves nothing: drop its contents until the next snapshot. */
   private emptyBook(symbol: string): void {
     this.books.get(symbol)?.applySnapshot({ lastUpdateId: 0, bids: [], asks: [] });
+    this.emit('snapshot', symbol);
   }
 
   private nextDelay(s: SymState): number {
@@ -415,6 +428,7 @@ export class SpotFeed extends EventEmitter {
         return;
       }
       this.books.get(symbol)!.applySnapshot({ lastUpdateId: snap.lastUpdateId, bids, asks });
+      this.emit('snapshot', symbol);
       s.snapshotApplied = true;
       const buffered = s.buffer;
       s.buffer = [];

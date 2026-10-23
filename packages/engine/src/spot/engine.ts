@@ -14,8 +14,10 @@ import type {
   SpotOrderRequest,
   SpotRules,
 } from '../types.ts';
+import { closeTripsAfterSellEnds } from './accounting.ts';
 import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import {
+  afterOwnFills,
   amountTooSmall,
   arrivalDelay,
   emptyPreview,
@@ -114,11 +116,19 @@ export class SpotEngine {
   arrive(orderId: string, ctx: EngineCtx): EngineEvent[] {
     const order = this.s.orders.get(orderId);
     if (!order) return [];
-    if (order.status === 'triggered') return arriveTriggered(this.s, order, ctx);
-    return activateAttachedPairs(this.s, this.arrivePending(order, ctx), ctx);
+    if (order.status === 'triggered') return closeTripsAfterSellEnds(this.s, arriveTriggered(this.s, order, ctx), ctx);
+    return this.finish(this.arrivePending(order, ctx), ctx);
   }
 
-  /** A submitted order reaches the exchange, without activating attached pairs; a no-op unless pending and due. */
+  /**
+   * What follows every action that can end orders: the attached pairs of buys it finished are
+   * activated, then round trips that a sell's cancel or rejection lets close are closed.
+   */
+  private finish(events: EngineEvent[], ctx: EngineCtx): EngineEvent[] {
+    return closeTripsAfterSellEnds(this.s, activateAttachedPairs(this.s, events, ctx), ctx);
+  }
+
+  /** A submitted order reaches the exchange, without its finish; a no-op unless pending and due. */
   private arrivePending(order: SpotOrder, ctx: EngineCtx): EngineEvent[] {
     if (order.status !== 'pending') return [];
     if (order.arrivesAt !== null && ctx.now < order.arrivesAt) return [];
@@ -141,19 +151,21 @@ export class SpotEngine {
    * fills the resting limit and post-only orders it went through. A trade id at or below the last
    * one processed for the symbol is a replay and is ignored, so no trade is ever counted twice. A
    * trade that arrives while the symbol is stale is skipped without moving that cursor, so a later
-   * replay of it is processed.
+   * replay of it is processed. Steps after a taker fill see the book less what it took.
    */
   onTrade(symbol: string, trade: AggTrade, ctx: EngineCtx): EngineEvent[] {
     const lastId = this.s.lastTradeId[symbol];
     if (lastId !== undefined && trade.id <= lastId) return [];
     if (!ctx.market.isFresh(symbol)) return [];
+    const fresh = this.freshWork(symbol, ctx);
+    const after = afterOwnFills(ctx, fresh);
     const events = [
-      ...this.freshWork(symbol, ctx),
-      ...triggerStops(this.s, symbol, trade, ctx),
-      ...matchTrade(this.s, symbol, trade, ctx),
+      ...fresh,
+      ...triggerStops(this.s, symbol, trade, after),
+      ...matchTrade(this.s, symbol, trade, after),
     ];
     this.s.lastTradeId[symbol] = trade.id;
-    return activateAttachedPairs(this.s, events, ctx);
+    return this.finish(events, ctx);
   }
 
   /**
@@ -163,7 +175,7 @@ export class SpotEngine {
    * against it. A no-op while the symbol is stale.
    */
   onFresh(symbol: string, ctx: EngineCtx): EngineEvent[] {
-    return activateAttachedPairs(this.s, this.freshWork(symbol, ctx), ctx);
+    return this.finish(this.freshWork(symbol, ctx), ctx);
   }
 
   /**
@@ -180,15 +192,18 @@ export class SpotEngine {
     return false;
   }
 
-  /** onFresh without activating attached pairs: the caller activates them once for all its events. */
+  /**
+   * onFresh without its finish: the caller finishes once for all its events. Each step walks the
+   * book less what the taker fills of the steps before it took.
+   */
   private freshWork(symbol: string, ctx: EngineCtx): EngineEvent[] {
     if (!ctx.market.isFresh(symbol)) return [];
     const dueCancels = [...this.s.orders.values()].filter((o) => o.symbol === symbol && cancelDue(o, ctx.now));
-    return [
-      ...dueCancels.flatMap((o) => this.deliverCancel(o.id, ctx, true)),
-      ...armWaitingPairs(this.s, symbol, ctx),
-      ...executeDue(this.s, symbol, ctx),
-    ];
+    const events: EngineEvent[] = [];
+    for (const o of dueCancels) events.push(...this.deliverCancel(o.id, afterOwnFills(ctx, events), true));
+    events.push(...armWaitingPairs(this.s, symbol, ctx));
+    events.push(...executeDue(this.s, symbol, afterOwnFills(ctx, events)));
+    return events;
   }
 
   /** Attach a linked stop-loss / take-profit pair (both sells) to coins already held. */
@@ -229,7 +244,7 @@ export class SpotEngine {
    * arrival is due no later than the cancel's arrives first, here, whichever timer runs first.
    */
   arriveCancel(orderId: string, ctx: EngineCtx): EngineEvent[] {
-    return activateAttachedPairs(this.s, this.deliverCancel(orderId, ctx, true), ctx);
+    return this.finish(this.deliverCancel(orderId, ctx, true), ctx);
   }
 
   /**
@@ -238,10 +253,10 @@ export class SpotEngine {
    * whatever that old arrival time was. The same as arriveCancel for any other order.
    */
   arriveCancelBeforeResend(orderId: string, ctx: EngineCtx): EngineEvent[] {
-    return activateAttachedPairs(this.s, this.deliverCancel(orderId, ctx, false), ctx);
+    return this.finish(this.deliverCancel(orderId, ctx, false), ctx);
   }
 
-  /** arriveCancel without activating attached pairs; `arrivalFirst` runs a due earlier arrival first. */
+  /** arriveCancel without its finish; `arrivalFirst` runs a due earlier arrival first. */
   private deliverCancel(orderId: string, ctx: EngineCtx, arrivalFirst: boolean): EngineEvent[] {
     const order = this.s.orders.get(orderId);
     if (!order || order.cancelArrivesAt === null || ctx.now < order.cancelArrivesAt) return [];
@@ -272,7 +287,7 @@ export class SpotEngine {
   rejectRestartedMarket(orderId: string, ctx: EngineCtx): EngineEvent[] {
     const order = this.s.orders.get(orderId);
     if (!order || order.type !== 'market' || order.status !== 'pending') return [];
-    return rejectPending(this.s, order, RESTART_REASON, ctx);
+    return closeTripsAfterSellEnds(this.s, rejectPending(this.s, order, RESTART_REASON, ctx), ctx);
   }
 
   /** What submit would do right now, without changing state. */

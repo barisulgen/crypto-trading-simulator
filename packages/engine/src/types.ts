@@ -191,7 +191,11 @@ export type EngineEvent =
   /** The owner's cancel arrived after the order had filled, triggered, been rejected or been cancelled. */
   | { type: 'cancel_rejected'; time: number; order: SpotOrder; reason: string }
   | { type: 'order_triggered'; time: number; order: SpotOrder; lastPrice: Decimal }
-  | { type: 'fill'; time: number; fill: Fill; order: SpotOrder }
+  /**
+   * `consumed`: for a taker fill, the quantity it took at each book level (walk order), so the
+   * market can hold those levels back from later walks; absent for a maker fill.
+   */
+  | { type: 'fill'; time: number; fill: Fill; order: SpotOrder; consumed?: PriceLevel[] }
   | { type: 'round_trip_closed'; time: number; roundTrip: RoundTrip };
 
 export type ActionResult = { ok: true; events: EngineEvent[] } | { ok: false; reason: string };

@@ -317,6 +317,32 @@ describe('trigger and execution', () => {
     expect(engine.arrive(triggered.id, ctx)).toEqual([]);
   });
 
+  it('taker fills carry the levels they took; two deferred stops executed in one call: the second walks what the first left', () => {
+    const { market, ctx, engine } = setup();
+    const a = arm(engine, sellStop('99.00', '0.4'), ctx);
+    const b = arm(engine, sellStop('99.00', '0.4'), ctx);
+    const triggered = engine.onTrade('BTCUSDT', trade('99.00'), ctx);
+    expect(triggered.map((e) => e.type)).toEqual(['order_triggered', 'order_triggered']);
+    market.setFresh('BTCUSDT', false);
+    ctx.now += 1_000;
+    expect(engine.arrive(a, ctx)).toEqual([]);
+    expect(engine.arrive(b, ctx)).toEqual([]);
+
+    market.setFresh('BTCUSDT', true);
+    const events = engine.onFresh('BTCUSDT', ctx);
+    expect(events.map((e) => e.type)).toEqual(['fill', 'fill']);
+    const [first, second] = events as Extract<EngineEvent, { type: 'fill' }>[];
+    const levels = (e: Extract<EngineEvent, { type: 'fill' }>) =>
+      e.consumed!.map((l) => [l.price.toString(), l.qty.toString()]);
+    // The first takes the 0.4 at 99.90; the second, in the same call, starts at 99.80.
+    expect(s(first!.fill.price)).toBe('99.9');
+    expect(levels(first!)).toEqual([['99.9', '0.4']]);
+    expect(s(second!.fill.price)).toBe('99.8');
+    expect(s(second!.fill.bestAtArrival)).toBe('99.8');
+    expect(s(second!.fill.slippageUsd)).toBe('0');
+    expect(levels(second!)).toEqual([['99.8', '0.4']]);
+  });
+
   it('onFresh leaves a triggered order alone until its arrival time', () => {
     const { ctx, engine, stored } = setup();
     const triggered = armAndTrigger(engine, sellStop('99.00', '1'), '99.00', ctx);
@@ -1312,24 +1338,22 @@ describe('hasDeferredWork', () => {
 });
 
 describe('book reads on a trade', () => {
-  it('triggerStops copies the book only when a stop is reached, and once for every stop one trade reaches', () => {
+  it('triggerStops never copies the book: the triggered order records the best price only', () => {
     const { market, ctx, engine } = setup();
     const a = arm(engine, sellStop('99', '0.5'), ctx);
     const b = arm(engine, sellStop('98', '0.5'), ctx);
     market.bookCalls = 0;
     expect(triggerStops(engine.state, 'BTCUSDT', trade('99.50'), ctx)).toEqual([]);
-    expect(market.bookCalls).toBe(0);
 
     const first = only(triggerStops(engine.state, 'BTCUSDT', trade('99.00'), ctx), 'order_triggered');
     expect(first.order.id).toBe(a);
     expect(s(first.order.bestAtSubmit)).toBe('99.9');
-    expect(market.bookCalls).toBe(1);
 
     const c = arm(engine, sellStop('97', '0.5'), ctx);
     market.bookCalls = 0;
     const both = triggerStops(engine.state, 'BTCUSDT', trade('96.00'), ctx);
     expect(both.map((e) => (e.type === 'order_triggered' ? e.order.id : e.type))).toEqual([b, c]);
-    expect(market.bookCalls).toBe(1);
+    expect(market.bookCalls).toBe(0);
   });
 
   it('a trade with nothing to trigger, fill or execute never copies the book', () => {

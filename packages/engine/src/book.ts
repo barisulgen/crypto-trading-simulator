@@ -1,6 +1,6 @@
 import { D, floorToStep } from './decimal.ts';
 import type { Decimal } from './decimal.ts';
-import type { BookSnapshot, Side } from './types.ts';
+import type { BookSnapshot, PriceLevel, Side } from './types.ts';
 
 export interface WalkResult {
   qty: Decimal;
@@ -10,6 +10,8 @@ export interface WalkResult {
   slippageUsd: Decimal;
   levelsUsed: number;
   exhausted: boolean;
+  /** The quantity taken at each level, in walk order (best price first). */
+  taken: PriceLevel[];
 }
 
 /** Best price a taker would hit: the best ask for a buy, the best bid for a sell. */
@@ -36,6 +38,7 @@ export function walkBook(
   let qty = D(0);
   let quote = D(0);
   let levelsUsed = 0;
+  const taken: PriceLevel[] = [];
   let remaining = byQty ? target.qty : target.quote;
   // Price of the level that would be taken next if we ran out of book/limit.
   let blockedPrice: Decimal | null = null;
@@ -61,6 +64,7 @@ export function walkBook(
     quote = quote.plus(cost);
     remaining = byQty ? remaining.minus(take) : remaining.minus(cost);
     levelsUsed += 1;
+    taken.push({ price: level.price, qty: take });
     if (byQty && remaining.lte(0)) {
       stoppedByTarget = true;
       break;
@@ -82,7 +86,22 @@ export function walkBook(
   const slippageUsd =
     best === null ? D(0) : side === 'buy' ? quote.minus(best.mul(qty)) : best.mul(qty).minus(quote);
 
-  return { qty, quote, avgPrice, bestPrice: best, slippageUsd, levelsUsed, exhausted };
+  return { qty, quote, avgPrice, bestPrice: best, slippageUsd, levelsUsed, exhausted, taken };
+}
+
+/**
+ * The levels left once `taken` is subtracted, matched by price; a level taken in full is dropped.
+ * Never changes `levels`.
+ */
+export function withoutTaken(levels: PriceLevel[], taken: PriceLevel[]): PriceLevel[] {
+  if (taken.length === 0) return levels;
+  const out: PriceLevel[] = [];
+  for (const level of levels) {
+    const took = taken.reduce((sum, t) => (t.price.eq(level.price) ? sum.plus(t.qty) : sum), D(0));
+    const left = level.qty.minus(took);
+    if (left.gt(0)) out.push({ price: level.price, qty: left });
+  }
+  return out;
 }
 
 function minD(a: Decimal, b: Decimal): Decimal {

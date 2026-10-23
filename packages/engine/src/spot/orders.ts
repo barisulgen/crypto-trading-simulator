@@ -1,5 +1,6 @@
 import { D, floorToStep } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
+import { bestPrice, withoutTaken } from '../book.ts';
 import type { WalkResult } from '../book.ts';
 import { spotFee } from '../fees.ts';
 import { InputError, parseAmount } from '../input.ts';
@@ -8,6 +9,7 @@ import type {
   EngineCtx,
   EngineEvent,
   Fill,
+  MarketView,
   OrderPreview,
   OrderStatus,
   Side,
@@ -16,19 +18,17 @@ import type {
   SpotRules,
 } from '../types.ts';
 import { assertBasisCovers, recordFill } from './accounting.ts';
-import { credit, lockFunds, putOrder, releaseFunds, spendFunds } from './state.ts';
+import { LIVE_STATUSES, credit, lockFunds, putOrder, releaseFunds, spendFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import { isStopType } from './triggers.ts';
 
 /** Order lifecycle helpers shared by market, limit and stop orders. */
 
-/** Statuses of orders that still count against MAX_NUM_ORDERS (in flight included). */
-const LIVE_STATUSES: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled', 'triggered']);
-
 /**
- * Order and algo-order slots in use on `symbol`. A live buy with an attached pair also holds the
- * two slots of each kind its pair takes once the buy finishes (the pair is placed only then), so
- * nothing accepted meanwhile can leave the pair without room and the bought coins unprotected.
+ * Order and algo-order slots in use on `symbol`: every live order counts, in flight included. A
+ * live buy with an attached pair also holds the two slots of each kind its pair takes once the buy
+ * finishes (the pair is placed only then), so nothing accepted meanwhile can leave the pair
+ * without room and the bought coins unprotected.
  */
 export function openCounts(s: SpotState, symbol: string): { openOrders: number; openAlgoOrders: number } {
   let openOrders = 0;
@@ -333,7 +333,7 @@ export function fillOrThin(
   if (walk.qty.gt(0)) {
     const settled = settleTaker(s, order, walk, rules, thin ? 'partially_filled' : 'filled', ctx);
     current = settled.order;
-    events.push(...recordFill(s, settled.fill, current, rules, ctx));
+    events.push(...recordFill(s, settled.fill, current, rules, ctx, walk.taken));
   } else {
     releaseFunds(s, order.lockAsset, order.lockAmount);
     current = { ...order, lockAmount: D(0) };
@@ -346,6 +346,32 @@ export function fillOrThin(
   }
   putOrder(s, current);
   return events;
+}
+
+/**
+ * `ctx` with a market whose book and best prices hold back what the taker fills in `events` took,
+ * for the later steps of the same engine call: the market itself is told of those fills only once
+ * the call's changes are saved. `ctx` itself when no taker fill took anything.
+ */
+export function afterOwnFills(ctx: EngineCtx, events: EngineEvent[]): EngineCtx {
+  const fills = events.flatMap((e) => (e.type === 'fill' && e.consumed ? [{ fill: e.fill, levels: e.consumed }] : []));
+  if (fills.length === 0) return ctx;
+  const m = ctx.market;
+  const takenOn = (symbol: string, side: Side) =>
+    fills.flatMap((f) => (f.fill.symbol === symbol && f.fill.side === side ? f.levels : []));
+  const book = (symbol: string): BookSnapshot => {
+    const b = m.book(symbol);
+    return { bids: withoutTaken(b.bids, takenOn(symbol, 'sell')), asks: withoutTaken(b.asks, takenOn(symbol, 'buy')) };
+  };
+  const market: MarketView = {
+    isFresh: (symbol) => m.isFresh(symbol),
+    book,
+    best: (symbol, side) => (takenOn(symbol, side).length === 0 ? m.best(symbol, side) : bestPrice(book(symbol), side)),
+    avgPrice: (symbol) => m.avgPrice(symbol),
+    lastPrice: (symbol) => m.lastPrice(symbol),
+    rules: (symbol) => m.rules(symbol),
+  };
+  return { ...ctx, market };
 }
 
 /**

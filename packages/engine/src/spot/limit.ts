@@ -129,7 +129,7 @@ export function arriveLimit(s: SpotState, order: SpotOrder, ctx: EngineCtx): Eng
   const status: OrderStatus = remaining.isZero() ? 'filled' : 'partially_filled';
   const settled = settleTaker(s, order, walk, rules, status, ctx, retain);
   putOrder(s, settled.order);
-  return recordFill(s, settled.fill, settled.order, rules, ctx);
+  return recordFill(s, settled.fill, settled.order, rules, ctx, walk.taken);
 }
 
 /**

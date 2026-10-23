@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { D, SimEngine, SpotEngine } from '@sim/engine';
-import type { AggTrade, BookSnapshot, Decimal } from '@sim/engine';
+import type { AggTrade, BookSnapshot, Decimal, PriceLevel, Side } from '@sim/engine';
 import { FakeMarket } from '../../engine/test/fixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import { loadLedger, loadSpotState } from '../src/db/store.ts';
@@ -106,12 +106,16 @@ export class FakeClock {
 }
 
 /**
- * The engine's FakeMarket plus what the runner and client hub read from MarketData:
- * bestBid, health snapshot, tickers, book top, recent trades and the 'trade' / 'book' events.
+ * The engine's FakeMarket plus what the runner and client hub use of MarketData: bestBid,
+ * consume, health snapshot, tickers, book top, recent trades and the 'trade' / 'book' events.
  */
 export class TestMarket extends FakeMarket {
   private readonly emitter = new EventEmitter();
   staleReason = 'Disconnected';
+  /** What consume() was given, in order; the book itself is left as it is. */
+  readonly consumed: { symbol: string; side: Side; levels: PriceLevel[] }[] = [];
+  /** Runs inside each consume() call, e.g. to look at the DB at that moment. */
+  onConsume: (() => void) | null = null;
   constructor(private readonly symbols: string[] = ['BTCUSDT']) {
     super();
   }
@@ -127,6 +131,10 @@ export class TestMarket extends FakeMarket {
   trade(symbol: string, t: AggTrade): void {
     this.setLastPrice(symbol, t.price);
     this.emitter.emit('trade', symbol, t);
+  }
+  consume(symbol: string, side: Side, levels: PriceLevel[]): void {
+    this.consumed.push({ symbol, side, levels });
+    this.onConsume?.();
   }
   bestBid(symbol: string): { price: Decimal; fresh: boolean } | null {
     const b = this.book(symbol).bids[0];

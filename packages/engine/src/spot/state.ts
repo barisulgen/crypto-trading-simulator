@@ -27,6 +27,9 @@ export function emptySpotState(l: Ledger): SpotState {
 
 const TERMINAL: ReadonlySet<OrderStatus> = new Set(['filled', 'cancelled', 'rejected']);
 
+/** Statuses of orders that are live: on their way to the exchange, resting, armed or executing. */
+export const LIVE_STATUSES: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled', 'triggered']);
+
 /** Store the order and mark it changed. Every engine change to an order goes through here. */
 export function putOrder(state: SpotState, order: SpotOrder): void {
   state.orders.set(order.id, order);

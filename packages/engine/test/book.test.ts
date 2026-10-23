@@ -16,6 +16,25 @@ describe('walkBook', () => {
     expect(r.levelsUsed).toBe(2);
     expect(r.exhausted).toBe(false);
   });
+  it('market buy 1.2 records what it took at each level, in walk order: 100.00 x 0.5, 100.10 x 0.7', () => {
+    const r = walkBook(sampleBook, 'buy', { qty: D('1.2') }, step);
+    expect(r.taken.map((l) => [l.price.toString(), l.qty.toString()])).toEqual([
+      ['100', '0.5'],
+      ['100.1', '0.7'],
+    ]);
+  });
+  it('taken sums to the walked quantity: by dollars, and a limit-capped sell', () => {
+    const byDollars = walkBook(sampleBook, 'buy', { quote: D('100.10') }, step);
+    expect(byDollars.taken.map((l) => [l.price.toString(), l.qty.toString()])).toEqual([
+      ['100', '0.5'],
+      ['100.1', '0.50049'],
+    ]);
+    const capped = walkBook(sampleBook, 'sell', { qty: D('1.5') }, step, D('99.80'));
+    expect(capped.taken.map((l) => [l.price.toString(), l.qty.toString()])).toEqual([
+      ['99.9', '0.4'],
+      ['99.8', '1'],
+    ]);
+  });
   it('market sell 1.5', () => {
     const r = walkBook(sampleBook, 'sell', { qty: D('1.5') }, step);
     expect(r.quote.toString()).toBe('149.66');
@@ -55,6 +74,7 @@ describe('walkBook', () => {
     expect(r.bestPrice).toBeNull();
     expect(r.slippageUsd.toString()).toBe('0');
     expect(r.levelsUsed).toBe(0);
+    expect(r.taken).toEqual([]);
     expect(r.exhausted).toBe(true);
   });
 });
