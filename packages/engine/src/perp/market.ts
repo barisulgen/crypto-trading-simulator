@@ -26,7 +26,7 @@ import {
 } from './position.ts';
 import type { PerpFillTerms } from './position.ts';
 import { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './rules.ts';
-import { DEFAULT_LEVERAGE, freeUsdt, leverageFor } from './state.ts';
+import { freeUsdt, leverageFor } from './state.ts';
 import type { PerpState } from './state.ts';
 import { maxLeverage, maxNotionalAt } from './tiers.ts';
 import type {
@@ -183,7 +183,7 @@ export function planMarket(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): M
   const plan: MarketPlan = {
     fields: noPerpFields(),
     reduceOnly: req.reduceOnly === true,
-    leverage: tiers ? leverageFor(s, symbol, tiers) : (s.settings[symbol]?.leverage ?? DEFAULT_LEVERAGE),
+    leverage: leverageFor(s, symbol, tiers),
     maxLeverage: tiers ? maxLeverage(tiers) : 0,
     brackets: tiers,
     mark: null,

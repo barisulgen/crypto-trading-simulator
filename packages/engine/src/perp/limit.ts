@@ -30,7 +30,7 @@ import type { PerpFields } from './orders.ts';
 import { applyOpeningFill, applyReducingFill, positionClosed } from './position.ts';
 import type { PerpFillTerms } from './position.ts';
 import { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './rules.ts';
-import { DEFAULT_LEVERAGE, freeUsdt, leverageFor, putOrder } from './state.ts';
+import { freeUsdt, leverageFor, putOrder } from './state.ts';
 import type { PerpState } from './state.ts';
 import { maxLeverage } from './tiers.ts';
 import type { Bracket, PerpCtx, PerpEvent, PerpOrder, PerpOrderRequest, PerpPreview, Position } from './types.ts';
@@ -68,7 +68,7 @@ function planLimit(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): LimitPlan
   const plan: LimitPlan = {
     fields: noPerpFields(),
     reduceOnly: req.reduceOnly === true,
-    leverage: tiers ? leverageFor(s, symbol, tiers) : (s.settings[symbol]?.leverage ?? DEFAULT_LEVERAGE),
+    leverage: leverageFor(s, symbol, tiers),
     maxLeverage: tiers ? maxLeverage(tiers) : 0,
     brackets: tiers,
     position: null,

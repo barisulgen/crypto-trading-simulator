@@ -490,6 +490,20 @@ describe('leverage', () => {
     expect(order.leverage).toBe(10);
   });
 
+  it('the capped default holds on every path: limits, previews and a rejected unknown type', () => {
+    const { market, ctx, engine } = setup();
+    market.setBrackets('BTCUSDT', brackets([['0', '1000000', '0.01', '0', 10]]));
+    const limit = long({ type: 'limit', price: '79000', qty: '0.01' });
+    expect(placed(engine.submit(limit, ctx)).leverage).toBe(10);
+    expect(engine.preview(limit, ctx).leverage).toBe(10);
+    expect(engine.preview(long({ qty: '0.01' }), ctx).leverage).toBe(10);
+    const unknown = { ...long({ qty: '0.1' }), type: 'iceberg' } as unknown as PerpOrderRequest;
+    expect(engine.preview(unknown, ctx).leverage).toBe(10);
+    const [rejected] = engine.submit(unknown, ctx);
+    if (rejected?.type !== 'order_rejected') throw new Error('expected order_rejected');
+    expect(rejected.order.leverage).toBe(10);
+  });
+
   it('uses the symbol’s setting', () => {
     const { ctx, engine } = setup('1000', { leverage: 10 });
     const order = placed(engine.submit(long({ qty: '0.1' }), ctx));

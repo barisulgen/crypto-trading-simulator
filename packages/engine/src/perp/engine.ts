@@ -1,3 +1,4 @@
+import type { Decimal } from '../decimal.ts';
 import { arrivalDelay } from '../spot/orders.ts';
 import {
   ALREADY_EXECUTING,
@@ -10,12 +11,15 @@ import {
 } from '../spot/engine.ts';
 import type { ActionResult, AggTrade } from '../types.ts';
 import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
+import { checkMark, isolatedModel } from './liquidation.ts';
+import type { LiquidationModel } from './liquidation.ts';
 import { addMargin, removeMargin, setLeverage, setMarginMode } from './margin.ts';
-import { arriveMarket, liveDataReason, previewMarket, submitMarket } from './market.ts';
+import { arriveMarket, bracketsOrNull, liveDataReason, previewMarket, submitMarket } from './market.ts';
 import { cancelOrder, newPerpOrder, noPerpFields, rejectOrder, remainingQty } from './orders.ts';
-import { DEFAULT_LEVERAGE, putOrder } from './state.ts';
+import { leverageFor, putOrder } from './state.ts';
 import type { PerpState } from './state.ts';
 import type {
+  MarginWarning,
   PerpActionResult,
   PerpCtx,
   PerpEvent,
@@ -30,9 +34,12 @@ import type {
  */
 export class PerpEngine {
   private readonly s: PerpState;
+  private readonly model: LiquidationModel;
 
-  constructor(state: PerpState) {
+  /** `model` judges liquidation and margin ratio; isolated margin unless another is given. */
+  constructor(state: PerpState, model: LiquidationModel = isolatedModel) {
     this.s = state;
+    this.model = model;
   }
 
   get state(): PerpState {
@@ -48,7 +55,7 @@ export class PerpEngine {
         return submitLimit(this.s, req, ctx);
       default: {
         // A type this engine does not take (e.g. from the API) is recorded as rejected.
-        const leverage = this.s.settings[req.symbol]?.leverage ?? DEFAULT_LEVERAGE;
+        const leverage = leverageFor(this.s, req.symbol, bracketsOrNull(req.symbol, ctx));
         return rejectOrder(this.s, newPerpOrder(req, noPerpFields(), leverage, ctx), UNKNOWN_ORDER_TYPE, ctx);
       }
     }
@@ -88,6 +95,18 @@ export class PerpEngine {
     const events = [...this.onFresh(symbol, ctx), ...matchTrade(this.s, symbol, trade, ctx)];
     this.s.lastTradeId[symbol] = trade.id;
     return events;
+  }
+
+  /**
+   * A mark price update for `symbol`. Liquidation is judged on the mark only, never on the last
+   * trade price: the position is liquidated when its margin balance is at or below its maintenance
+   * margin, otherwise a margin-ratio warning is returned when the ratio reaches a new level. Needs a
+   * fresh mark and nothing else (a stale book does not hold a liquidation back); with a stale mark
+   * it does nothing.
+   */
+  onMark(symbol: string, mark: Decimal, ctx: PerpCtx): { events: PerpEvent[]; warnings: MarginWarning[] } {
+    if (!ctx.market.isMarkFresh(symbol)) return { events: [], warnings: [] };
+    return checkMark(this.s, symbol, mark, this.model, ctx);
   }
 
   /**
@@ -200,7 +219,7 @@ export class PerpEngine {
       fee: null,
       marginRequired: null,
       estLiquidationPrice: null,
-      leverage: this.s.settings[req.symbol]?.leverage ?? DEFAULT_LEVERAGE,
+      leverage: leverageFor(this.s, req.symbol, bracketsOrNull(req.symbol, ctx)),
       maxLeverage: 0,
       exhausted: false,
       bandLimited: false,

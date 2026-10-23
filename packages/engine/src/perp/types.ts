@@ -86,8 +86,8 @@ export interface Position {
   fees: Decimal;
   /** Net funding: positive when received, negative when paid. */
   funding: Decimal;
-  /** The highest margin-ratio warning already given. */
-  warnLevel: 0 | 0.5 | 0.8 | 0.9;
+  /** The highest margin-ratio warning already given and not re-armed since; 0 for none. */
+  warnLevel: 0 | WarnLevel;
 }
 
 export type PerpOrderType = 'market' | 'limit' | 'post_only' | 'stop_loss' | 'take_profit';
@@ -184,6 +184,21 @@ export interface PerpPreview {
 
 export type PositionCloseReason = 'closed' | 'stop_loss' | 'take_profit' | 'liquidated';
 
+/** Margin-ratio levels at which the owner is warned that a position nears liquidation. */
+export type WarnLevel = 0.5 | 0.8 | 0.9;
+
+/** The position's margin ratio has reached a warning level it had not reached before (or since it re-armed). */
+export interface MarginWarning {
+  symbol: string;
+  positionId: string;
+  level: WarnLevel;
+  /** Maintenance margin ÷ margin balance at the mark. */
+  ratio: Decimal;
+  markPrice: Decimal;
+  /** Null when the position can no longer be liquidated by a price fall (a long with enough margin). */
+  liquidationPrice: Decimal | null;
+}
+
 export type PerpEvent =
   | { type: 'leverage_set'; market: 'perp'; time: number; symbol: string; leverage: number }
   | {
@@ -212,6 +227,26 @@ export type PerpEvent =
   /** `consumed`: for a taker fill, the quantity it took at each book level (walk order); absent for a maker fill. */
   | { type: 'fill'; market: 'perp'; time: number; fill: PerpFill; order: PerpOrder; consumed?: PriceLevel[] }
   | { type: 'position_opened'; market: 'perp'; time: number; position: Position }
+  /**
+   * An isolated position was liquidated at the mark: the whole margin is lost (marginLost), split
+   * into the trading loss at the mark, the liquidation fee, and any remainder, also lost. The
+   * leverage wallet outside the margin is not touched.
+   */
+  | {
+      type: 'liquidation';
+      market: 'perp';
+      time: number;
+      symbol: string;
+      /** The position as it was when liquidated. */
+      position: Position;
+      markPrice: Decimal;
+      marginLost: Decimal;
+      tradingLoss: Decimal;
+      liquidationFee: Decimal;
+      remainder: Decimal;
+      /** The live orders on the symbol that the liquidation cancelled. */
+      cancelledOrderIds: string[];
+    }
   | {
       type: 'position_closed';
       market: 'perp';

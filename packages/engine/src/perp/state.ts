@@ -93,9 +93,14 @@ export function evictTerminal(state: PerpState): void {
   }
 }
 
-/** The symbol's leverage setting, or the default capped at the symbol's maximum. */
-export function leverageFor(state: PerpState, symbol: string, brackets: Bracket[]): number {
-  return state.settings[symbol]?.leverage ?? Math.min(DEFAULT_LEVERAGE, maxLeverage(brackets));
+/**
+ * The symbol's leverage setting, or the default capped at the symbol's maximum. Before the leverage
+ * tiers have loaded (brackets null) the maximum is unknown and the default is returned as it is.
+ */
+export function leverageFor(state: PerpState, symbol: string, brackets: Bracket[] | null): number {
+  const setting = state.settings[symbol]?.leverage;
+  if (setting !== undefined) return setting;
+  return brackets ? Math.min(DEFAULT_LEVERAGE, maxLeverage(brackets)) : DEFAULT_LEVERAGE;
 }
 
 // ---- leverage wallet (USDT) ----

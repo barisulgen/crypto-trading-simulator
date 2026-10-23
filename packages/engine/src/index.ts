@@ -17,6 +17,7 @@ export { applyBuyToBasis, applySellToBasis, emptyBasis, valueAccount } from './s
 export type { AccountValue, CoinValue } from './spot/accounting.ts';
 export type {
   Bracket,
+  MarginWarning,
   PerpCtx,
   PerpEvent,
   PerpFill,
@@ -31,8 +32,11 @@ export type {
   PositionSide,
   TierSet,
   TierSource,
+  WarnLevel,
 } from './perp/types.ts';
 export { PerpEngine } from './perp/engine.ts';
+export { isolatedModel } from './perp/liquidation.ts';
+export type { LiquidationModel } from './perp/liquidation.ts';
 export { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './perp/rules.ts';
 export type { NormalizedPerpRequest } from './perp/rules.ts';
 export {
