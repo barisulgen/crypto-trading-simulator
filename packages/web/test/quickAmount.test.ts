@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { D, SpotEngine, emptySpotState } from '@sim/engine';
+import type { BookSnapshot, EngineCtx, MarketView, SpotRules } from '@sim/engine';
 import type { AccountSnapshot, WireLevel } from '../src/lib/api.ts';
+import { buildOrderRequest } from '../src/lib/orderForm.ts';
 import { setRules } from '../src/lib/format.ts';
 import { floorDivToStep, floorToStep, mulDec, subDec } from '../src/lib/market.ts';
 import {
@@ -363,12 +366,128 @@ describe('below-one-step hint', () => {
 });
 
 describe('quick amount: 100% sell in dollars', () => {
-  it('rounds the dollars up so the engine sells the whole steps (0.0012, not 0.00119)', () => {
-    const bids = [lv('81229', '5')];
-    const r = quickAmount(input({ unit: 'usd', pct: 100, freeBase: '0.00120879', bids }))!;
-    expect(r.amount).toBe('97.48');
-    expect(floorToStep(floorDivToStep(r.amount, '81229', '0.00000001'), STEP)).toBe('0.0012');
-    const limit = quickAmount(input({ unit: 'usd', pct: 100, type: 'limit', freeBase: '0.00120879', price: '81229', bids }))!;
-    expect(limit.amount).toBe('97.48');
+  const bids = [lv('81229', '5')];
+
+  it('sends every whole step of the free coins as a coin quantity, for every sell type', () => {
+    for (const type of ['market', 'limit', 'post_only', 'stop_loss', 'take_profit'] as const) {
+      const r = quickAmount(
+        input({ unit: 'usd', pct: 100, type, freeBase: '0.00120879', bids, price: '81229', trigger: '81229' }),
+      )!;
+      expect(r.sellAll).toBe('0.0012');
+      // The dollars shown are what those coins fetch now, floored to the cent.
+      expect(r.amount).toBe('97.47');
+    }
+  });
+
+  it('other percentages, coin amounts and buys send what the field shows', () => {
+    expect(quickAmount(input({ unit: 'usd', pct: 75, freeBase: '0.00120879', bids }))!.sellAll).toBeUndefined();
+    expect(quickAmount(input({ unit: 'coin', pct: 100, freeBase: '0.00120879', bids }))!.sellAll).toBeUndefined();
+    expect(quickAmount(input({ side: 'buy', unit: 'usd', pct: 100, freeQuote: '100' }))!.sellAll).toBeUndefined();
+  });
+
+  it('a pick keeps the coin quantity in the state; a typed amount drops it', () => {
+    const compute = () => quickAmount(input({ unit: 'usd', pct: 100, freeBase: '1', bids }));
+    const picked = quickStep(NO_QUICK, { type: 'pick', pct: 100 }, compute);
+    expect(picked.state.sellAll).toBe('1');
+    expect(quickStep(picked.state, { type: 'edit' }, compute).state.sellAll).toBeUndefined();
+  });
+
+  it('says what is sent', () => {
+    expect(quickHint({ pct: 100, belowStep: false, belowCent: false, sellAll: '1' }, STEP, 'BTC')).toBe(
+      'Sells all 1 BTC (every whole step of the free balance)',
+    );
+  });
+
+  describe('the book moves between the quick fill and the submit', () => {
+    const rules: SpotRules = {
+      symbol: 'BTCUSDT',
+      base: 'BTC',
+      quote: 'USDT',
+      tickSize: D('0.01'),
+      minPrice: D('0.01'),
+      maxPrice: D('1000000'),
+      stepSize: D('0.00001'),
+      minQty: D('0.00001'),
+      maxQty: D('9000'),
+      marketMinQty: D('0'),
+      marketMaxQty: D('114'),
+      marketStepSize: D('0'),
+      minNotional: D('5'),
+      maxNotional: D('9000000'),
+      applyMinToMarket: true,
+      applyMaxToMarket: false,
+      bidMultiplierUp: D('5'),
+      bidMultiplierDown: D('0.2'),
+      askMultiplierUp: D('5'),
+      askMultiplierDown: D('0.2'),
+      maxNumOrders: 200,
+      maxNumAlgoOrders: 5,
+    };
+
+    /** Holding 1 BTC, 100 % in dollars is picked at bid 81229; the bids then move to `newBid` before submit and arrival. */
+    function sellAllAfterMove(newBid: string) {
+      let book: BookSnapshot = { bids: [{ price: D('81229'), qty: D('5') }], asks: [{ price: D('81230'), qty: D('5') }] };
+      const market: MarketView = {
+        isFresh: () => true,
+        book: () => book,
+        avgPrice: () => D('81229'),
+        lastPrice: () => D('81229'),
+        rules: () => rules,
+      };
+      let n = 0;
+      const ctx: EngineCtx = {
+        now: 1_000_000,
+        rng: () => 0,
+        newId: (prefix) => `${prefix}${++n}`,
+        market,
+        fees: { maker: D('0.001'), taker: D('0.001') },
+      };
+      const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
+      engine.state.balances.spot.BTC = { free: D('1'), locked: D(0) };
+      engine.state.basis.BTC = { qty: D('1'), cost: D('80000'), roundTripId: 'rt0', openedAt: 0, tripRealized: D(0) };
+
+      const quick = quickAmount(input({ unit: 'usd', pct: 100, freeBase: '1', bids: [lv('81229', '5')] }))!;
+      const req = buildOrderRequest({
+        symbol: 'BTCUSDT',
+        side: 'sell',
+        type: 'market',
+        amountIn: 'usd',
+        amount: quick.amount,
+        price: '',
+        trigger: '',
+        attach: false,
+        stopLoss: '',
+        takeProfit: '',
+        sellAll: quick.sellAll,
+      });
+      book = { bids: [{ price: D(newBid), qty: D('5') }], asks: [{ price: D('81300'), qty: D('5') }] };
+      const placed = engine.submit(req, ctx);
+      const first = placed[0]!;
+      if (first.type !== 'order_placed') throw new Error(`expected order_placed, got ${JSON.stringify(placed)}`);
+      ctx.now = first.order.arrivesAt!;
+      const events = engine.arrive(first.order.id, ctx);
+      return { req, events, btc: engine.state.balances.spot.BTC! };
+    }
+
+    const filledQty = (events: { type: string }[]) => {
+      const fill = events.find((e) => e.type === 'fill') as { fill: { qty: { toString(): string } } } | undefined;
+      return fill?.fill.qty.toString();
+    };
+
+    it('a one-cent uptick still sells the whole coin', () => {
+      const { req, events, btc } = sellAllAfterMove('81229.01');
+      expect(req.qty).toBe('1');
+      expect(req.quoteQty).toBeUndefined();
+      expect(filledQty(events)).toBe('1');
+      expect(btc.free.toString()).toBe('0');
+      expect(btc.locked.toString()).toBe('0');
+    });
+
+    it('a one-dollar drop still sells the whole coin instead of asking for a step more than is held', () => {
+      const { events, btc } = sellAllAfterMove('81228');
+      expect(events.some((e) => e.type === 'order_rejected')).toBe(false);
+      expect(filledQty(events)).toBe('1');
+      expect(btc.free.toString()).toBe('0');
+    });
   });
 });

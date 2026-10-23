@@ -188,7 +188,19 @@ export function OrderForm() {
   const [error, setError] = useState('');
   const [quick, setQuick] = useState<QuickState>(NO_QUICK);
 
-  const fields: OrderFormFields = { symbol, side, type, amountIn, amount, price, trigger, attach, stopLoss, takeProfit };
+  const fields: OrderFormFields = {
+    symbol,
+    side,
+    type,
+    amountIn,
+    amount,
+    price,
+    trigger,
+    attach,
+    stopLoss,
+    takeProfit,
+    sellAll: quick.sellAll,
+  };
   const missing = missingInput(fields);
   const key = missing === null ? JSON.stringify(buildOrderRequest(fields)) : null;
   const answer = usePreview(key);

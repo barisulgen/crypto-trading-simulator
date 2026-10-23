@@ -19,6 +19,11 @@ export interface OrderFormFields {
   attach: boolean;
   stopLoss: string;
   takeProfit: string;
+  /**
+   * Set by the 100 % button on a sell in dollars: the coins to send as qty in place of the dollars,
+   * so the order sells every whole step of the free coins whatever the book does meanwhile.
+   */
+  sellAll?: string;
 }
 
 export const ORDER_TYPES: { value: OrderType; label: string }[] = [
@@ -44,11 +49,13 @@ export function canAttach(f: Pick<OrderFormFields, 'side' | 'type'>): boolean {
 
 /**
  * The request for POST /api/orders and /api/orders/preview. Every value goes out exactly as the
- * owner typed it (the server parses '1,5'); only the fields the order type uses are sent.
+ * owner typed it (the server parses '1,5'); only the fields the order type uses are sent. A 100 %
+ * sell picked in dollars sends its coins (sellAll) instead.
  */
 export function buildOrderRequest(f: OrderFormFields): SpotOrderRequest {
   const req: SpotOrderRequest = { symbol: f.symbol, side: f.side, type: f.type };
   if (f.amountIn === 'coin') req.qty = f.amount;
+  else if (f.side === 'sell' && f.sellAll !== undefined) req.qty = f.sellAll;
   else req.quoteQty = f.amount;
   if (hasPrice(f.type)) req.price = f.price;
   if (hasTrigger(f.type)) req.triggerPrice = f.trigger;

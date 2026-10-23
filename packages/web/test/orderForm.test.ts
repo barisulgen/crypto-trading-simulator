@@ -36,6 +36,14 @@ describe('order request builder', () => {
     });
   });
 
+  it('a 100 % sell picked in dollars sends the coin quantity instead of the dollars, for every type', () => {
+    for (const type of ['market', 'limit', 'post_only', 'stop_loss', 'take_profit'] as const) {
+      const req = buildOrderRequest(form({ side: 'sell', type, amountIn: 'usd', amount: '81229.00', sellAll: '1' }));
+      expect(req.qty).toBe('1');
+      expect(req.quoteQty).toBeUndefined();
+    }
+  });
+
   it('limit and post-only send the price, never the trigger', () => {
     expect(buildOrderRequest(form({ type: 'limit', price: '80000,5' }))).toEqual({
       symbol: 'BTCUSDT',

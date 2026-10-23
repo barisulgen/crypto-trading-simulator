@@ -40,6 +40,12 @@ export interface QuickResult {
   belowStep: boolean;
   /** A buy in dollars: the share is less than one cent (the amount is '0'). */
   belowCent: boolean;
+  /**
+   * A 100 % sell in dollars: the coins the order sends instead of the dollars (every whole step of
+   * the free coins). Dollars would be turned back into coins at the prices when the order arrives,
+   * which can come to a step less, or a step more than is held, once the book has moved.
+   */
+  sellAll?: string;
 }
 
 const isZero = (v: string) => cmpDec(v, '0') === 0;
@@ -103,10 +109,9 @@ function walkBidsWithQty(bids: WireLevel[], qty: string): string | null {
   return addDec(value, mulDec(remaining, last.price));
 }
 
-/** Dollars floored (or, with `up`, rounded up) to the cent, with two decimals; '0' when nothing is left. */
-function cents(value: string, up = false): { amount: string; zero: boolean } {
-  let floored = floorToStep(value, CENT);
-  if (up && cmpDec(floored, value) < 0) floored = addDec(floored, CENT);
+/** Dollars floored to the cent, with two decimals; '0' when nothing is left. */
+function cents(value: string): { amount: string; zero: boolean } {
+  const floored = floorToStep(value, CENT);
   if (isZero(floored)) return { amount: '0', zero: true };
   return { amount: fmtNum(floored, 2, { group: false }), zero: false };
 }
@@ -122,8 +127,9 @@ function cents(value: string, up = false): { amount: string; zero: boolean } {
  *   best ask. Floored to the step.
  * - Sell in coins: pct of the free coins, floored to the step (a 100 % sell leaves the dust).
  * - Sell in dollars: those coins valued as they would sell: walked over the bids for a market
- *   order, times the limit or trigger price, else times the best bid. Floored to the cent, except 100 %,
- *   which is rounded up so the engine still sells every whole step of the free coins.
+ *   order, times the limit or trigger price, else times the best bid, floored to the cent. At 100 %
+ *   the order sends the coins themselves (sellAll), so it sells every whole step whatever the book
+ *   does before it arrives.
  */
 export function quickAmount(i: QuickInput): QuickResult | null {
   const share = (free: string) => mulDec(free, FRACTION[i.pct]);
@@ -154,9 +160,8 @@ export function quickAmount(i: QuickInput): QuickResult | null {
     value = price === null ? null : mulDec(qty, price);
   }
   if (value === null) return null;
-  // 100 %: round up so the whole-step quantity the engine derives from the dollars is not a step short.
-  const c = cents(value, i.pct === 100);
-  return { amount: c.amount, belowStep: false, belowCent: c.zero };
+  const c = cents(value);
+  return { amount: c.amount, belowStep: false, belowCent: c.zero, ...(i.pct === 100 ? { sellAll: qty } : {}) };
 }
 
 export interface AvailableInput {
@@ -209,6 +214,8 @@ export interface QuickState {
   /** The last fill was less than one step / one cent (shown as a hint under the amount). */
   belowStep: boolean;
   belowCent: boolean;
+  /** The coins a 100 % sell in dollars sends (see QuickResult.sellAll). */
+  sellAll?: string;
 }
 
 export const NO_QUICK: QuickState = { pct: null, belowStep: false, belowCent: false };
@@ -240,13 +247,19 @@ export function quickStep(
   // A pick that cannot be priced changes nothing. A reprice that cannot be priced clears the
   // field too: the old amount would now read in the wrong unit or for the wrong price.
   if (r === null) return event.type === 'pick' ? { state } : { state: NO_QUICK, amount: '' };
-  return { state: { pct, belowStep: r.belowStep, belowCent: r.belowCent }, amount: r.amount };
+  const next: QuickState = { pct, belowStep: r.belowStep, belowCent: r.belowCent };
+  if (r.sellAll !== undefined) next.sellAll = r.sellAll;
+  return { state: next, amount: r.amount };
 }
 
-/** The hint under the amount when the active percentage came to nothing; null otherwise. */
+/**
+ * The hint under the amount: when the active percentage came to nothing, or the coins a 100 % sell
+ * in dollars sends; null otherwise.
+ */
 export function quickHint(state: QuickState, step: string, base: string): string | null {
   if (state.pct === null) return null;
   if (state.belowCent) return 'Less than $0.01 available';
   if (state.belowStep) return `Less than one step (${fmtNum(step, tickDecimals(step))} ${base}) available`;
+  if (state.sellAll !== undefined) return `Sells all ${state.sellAll} ${base} (every whole step of the free balance)`;
   return null;
 }
