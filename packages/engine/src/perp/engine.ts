@@ -10,11 +10,19 @@ import {
 } from '../spot/engine.ts';
 import type { ActionResult, AggTrade } from '../types.ts';
 import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
+import { addMargin, removeMargin, setLeverage, setMarginMode } from './margin.ts';
 import { arriveMarket, liveDataReason, previewMarket, submitMarket } from './market.ts';
 import { cancelOrder, newPerpOrder, noPerpFields, rejectOrder, remainingQty } from './orders.ts';
 import { DEFAULT_LEVERAGE, putOrder } from './state.ts';
 import type { PerpState } from './state.ts';
-import type { PerpCtx, PerpEvent, PerpOrder, PerpOrderRequest, PerpPreview } from './types.ts';
+import type {
+  PerpActionResult,
+  PerpCtx,
+  PerpEvent,
+  PerpOrder,
+  PerpOrderRequest,
+  PerpPreview,
+} from './types.ts';
 
 /**
  * USDⓈ-M perpetuals with isolated margin in one-way mode: an order never flips a position, and an
@@ -158,6 +166,26 @@ export class PerpEngine {
       return [{ type: 'cancel_rejected', market: 'perp', time: ctx.now, order: answered, reason }];
     }
     return cancelOrder(this.s, answered, 'user', remainingQty(order), ctx);
+  }
+
+  /** Set the symbol's leverage; refused while a position or an opening order is live on it. */
+  setLeverage(symbol: string, leverage: number, ctx: PerpCtx): PerpActionResult {
+    return setLeverage(this.s, symbol, leverage, ctx);
+  }
+
+  /** Only isolated margin exists; asking for it again changes nothing. */
+  setMarginMode(_symbol: string, mode: 'isolated' | 'cross', _ctx: PerpCtx): PerpActionResult {
+    return setMarginMode(mode);
+  }
+
+  /** Move free leverage USDT into the symbol's position. Needs no live data. */
+  addMargin(symbol: string, amount: string, ctx: PerpCtx): PerpActionResult {
+    return addMargin(this.s, symbol, amount, ctx);
+  }
+
+  /** Move margin out of the symbol's position, at most what stays safe at a fresh mark price. */
+  removeMargin(symbol: string, amount: string, ctx: PerpCtx): PerpActionResult {
+    return removeMargin(this.s, symbol, amount, ctx);
   }
 
   /** What submit would do right now, without changing state. */

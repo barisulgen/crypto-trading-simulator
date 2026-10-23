@@ -185,6 +185,18 @@ export interface PerpPreview {
 export type PositionCloseReason = 'closed' | 'stop_loss' | 'take_profit' | 'liquidated';
 
 export type PerpEvent =
+  | { type: 'leverage_set'; market: 'perp'; time: number; symbol: string; leverage: number }
+  | {
+      type: 'margin_changed';
+      market: 'perp';
+      time: number;
+      symbol: string;
+      action: 'add' | 'remove';
+      amount: Decimal;
+      marginAfter: Decimal;
+      /** Null when the position can no longer be liquidated by a price fall (a long with enough margin). */
+      liquidationPriceAfter: Decimal | null;
+    }
   | { type: 'order_placed'; market: 'perp'; time: number; order: PerpOrder }
   | { type: 'order_rejected'; market: 'perp'; time: number; order: PerpOrder; reason: string; afterTrigger?: boolean }
   | {
@@ -213,3 +225,6 @@ export type PerpEvent =
       holdMs: number;
       reason: PositionCloseReason;
     };
+
+/** The outcome of an owner action on the perp account: its events, or why it was refused. */
+export type PerpActionResult = { ok: true; events: PerpEvent[] } | { ok: false; reason: string };
