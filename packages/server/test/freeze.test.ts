@@ -119,13 +119,11 @@ describe('after a freeze', () => {
     expect(t.market.isFresh('BTCUSDT')).toBe(false);
     expect(t.status()).toBe('triggered');
 
-    // The book moved during the freeze. A current depth event ends the wait for depth, but the
-    // late trade's own lag stays until a later trade shows trades are current again.
+    // The book moved during the freeze: a current depth event shows the connection caught up,
+    // which also ends the late trade's lag, with no further trade needed.
     t.depth(102, [['99.90', '0'], ['99.80', '0'], ['99.00', '0'], ['95.00', '5']]);
-    expect(t.market.healthSnapshot().BTCUSDT).toEqual({ fresh: false, reason: 'Feed lagging by 20.0s' });
-    t.clock.advance(1000);
-    expect(t.status()).toBe('triggered');
-    t.trade(4, '95.10');
+    expect(t.market.isFresh('BTCUSDT')).toBe(true);
+    t.clock.advance(1000); // the next health poll sees fresh data
     expect(t.status()).toBe('filled');
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([
       expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /),

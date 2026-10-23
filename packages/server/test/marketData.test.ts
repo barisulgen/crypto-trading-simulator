@@ -527,6 +527,22 @@ describe('SpotFeed', () => {
     ws.msg(diff('BTCUSDT', 103, 103, [], [], clock.t));
     expect(health.isFresh('BTCUSDT', clock.t)).toBe(true);
   });
+
+  it('a current depth event ends the lag of a late trade or ticker without another trade', async () => {
+    const { feed, sockets, timers, snaps, health, clock } = setup();
+    snaps.BTCUSDT = [snap(100)];
+    feed.start();
+    const ws = sockets[0]!;
+    ws.open();
+    timers.fire();
+    await tick();
+    ws.msg(diff('BTCUSDT', 99, 101));
+    ws.msg({ stream: 'btcusdt@aggTrade', data: { e: 'aggTrade', E: clock.t - 6000, a: 7, p: '100', q: '1', T: 1, m: false } });
+    ws.msg({ stream: 'btcusdt@miniTicker', data: { e: '24hrMiniTicker', E: clock.t - 7000, c: '100', o: '99' } });
+    expect(health.reason('BTCUSDT', clock.t)).toBe('Feed lagging by 7.0s');
+    ws.msg(diff('BTCUSDT', 102, 102, [], [], clock.t));
+    expect(health.isFresh('BTCUSDT', clock.t)).toBe(true);
+  });
 });
 
 describe('CandleService', () => {

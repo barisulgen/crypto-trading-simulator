@@ -70,28 +70,53 @@ describe('FeedHealth', () => {
     h.onTicker('BTCUSDT', 1300, 1300);
     expect(h.isFresh('BTCUSDT', 1300)).toBe(true);
   });
-  it('lag is tracked per stream: a current event clears only its own stream', () => {
+  it('depth lag is cleared only by a later depth event, never by a current trade or ticker', () => {
     const h = mk();
     h.onDepth('BTCUSDT', 10000, 4000); // depth 6 s late
     h.onTrade('BTCUSDT', 10100, 10100);
     h.onTicker('BTCUSDT', 10100, 10100);
     expect(h.reason('BTCUSDT', 10100)).toBe('Feed lagging by 6.0s'); // current trades and tickers do not vouch for the book
-    h.onDepth('BTCUSDT', 10200, 10200);
-    expect(h.isFresh('BTCUSDT', 10200)).toBe(true);
-
+    h.onDepth('BTCUSDT', 10200, 4000); // another late one
+    expect(h.reason('BTCUSDT', 10200)).toBe('Feed lagging by 6.2s');
+    h.onDepth('BTCUSDT', 10300, 10300);
+    expect(h.isFresh('BTCUSDT', 10300)).toBe(true);
+  });
+  it('trade and ticker lag is cleared by a current event of the same stream, not of the other', () => {
+    const h = mk();
     h.onTrade('BTCUSDT', 11000, 5000); // trade 6 s late
-    h.onDepth('BTCUSDT', 11100, 11100);
     h.onTicker('BTCUSDT', 11100, 11100);
     expect(h.reason('BTCUSDT', 11100)).toBe('Feed lagging by 6.0s');
     h.onTrade('BTCUSDT', 11200, 11200);
     expect(h.isFresh('BTCUSDT', 11200)).toBe(true);
 
     h.onTicker('BTCUSDT', 12000, 6000); // ticker 6 s late
-    h.onDepth('BTCUSDT', 12100, 12100);
     h.onTrade('BTCUSDT', 12100, 12100);
     expect(h.reason('BTCUSDT', 12100)).toBe('Feed lagging by 6.0s');
     h.onTicker('BTCUSDT', 12200, 12200);
     expect(h.isFresh('BTCUSDT', 12200)).toBe(true);
+  });
+  it('a current depth event also clears a late trade or ticker, so a thin symbol is not held stale', () => {
+    const h = mk();
+    h.onTrade('BTCUSDT', 11000, 5000); // the only trade for a while, 6 s late
+    expect(h.isFresh('BTCUSDT', 11000)).toBe(false);
+    h.onDepth('BTCUSDT', 11100, 11100); // the connection has caught up
+    expect(h.isFresh('BTCUSDT', 11100)).toBe(true);
+
+    h.onTicker('BTCUSDT', 12000, 6000);
+    h.onTrade('BTCUSDT', 12000, 6000);
+    expect(h.isFresh('BTCUSDT', 12000)).toBe(false);
+    h.onDepth('BTCUSDT', 12100, 12100);
+    expect(h.isFresh('BTCUSDT', 12100)).toBe(true);
+  });
+  it('a depth event that is itself late clears nothing', () => {
+    const h = mk();
+    h.onTrade('BTCUSDT', 11000, 3000); // 8 s late
+    h.onDepth('BTCUSDT', 11100, 5100); // 6 s late
+    expect(h.reason('BTCUSDT', 11100)).toBe('Feed lagging by 8.0s');
+    h.onTrade('BTCUSDT', 11200, 11200);
+    expect(h.reason('BTCUSDT', 11200)).toBe('Feed lagging by 6.0s');
+    h.onDepth('BTCUSDT', 11300, 11300);
+    expect(h.isFresh('BTCUSDT', 11300)).toBe(true);
   });
   it('reports the largest lag when several streams are lagging; an invalid event time outranks any lag', () => {
     const h = mk();

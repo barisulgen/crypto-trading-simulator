@@ -83,7 +83,7 @@ export class FeedHealth {
   /**
    * Records how late the latest event of `stream`, stamped by the exchange at `eventTime`, is when
    * seen locally at `now`. Each stream keeps its own verdict: a current trade or ticker says
-   * nothing about a late order book, so only a later event of the same stream clears a lag.
+   * nothing about a late order book, so only a later depth event clears a depth lag.
    */
   private measure(symbol: string, stream: Stream, now: number, eventTime: number): SymState {
     const s = this.st(symbol);
@@ -96,8 +96,13 @@ export class FeedHealth {
   onDepth(symbol: string, now: number, eventTime: number): void {
     const s = this.measure(symbol, 'depth', now, eventTime);
     s.lastDepth = now;
+    if (this.late(s.lag.depth)) return;
     // Only a current depth event shows the book is no older than the silence that preceded it.
-    if (!this.late(s.lag.depth)) s.needsDepth = false;
+    s.needsDepth = false;
+    // It also shows the connection has caught up, which is all a late trade or ticker signals; a
+    // quiet symbol would otherwise stay stale until its next trade.
+    s.lag.trade = 0;
+    s.lag.ticker = 0;
   }
 
   onTrade(symbol: string, now: number, eventTime: number): void {
