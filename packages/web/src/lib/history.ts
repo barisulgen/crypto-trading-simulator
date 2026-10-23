@@ -2,7 +2,7 @@
 // display row per recorded event. Decimals stay strings.
 import type { CancelReason, EngineEvent, OrderType, Wallet } from '@sim/engine';
 import type { HistoryQuery, HistoryRow, Wire, WireFill, WireOrder } from './api.ts';
-import { ORDER_TYPE_LABEL, fmtAvgPrice, fmtCost, fmtDrift, fmtPrice, fmtQty, fmtUsd, signOf } from './format.ts';
+import { ORDER_TYPE_LABEL, driftSign, fmtAvgPrice, fmtCost, fmtDrift, fmtPrice, fmtQty, fmtUsd, signOf } from './format.ts';
 import { fmtDateTime } from './market.ts';
 
 export const PAGE_SIZE = 50;
@@ -211,7 +211,7 @@ function orderFields(o: WireOrder): Field[] {
 
 function fillFields(f: WireFill, o: WireOrder): Field[] {
   const fee = f.feeAsset === 'USDT' ? `${f.fee} USDT` : `${f.fee} ${f.feeAsset} ~${fmtCost(f.feeUsd)}`;
-  const driftSign = signOf(f.driftUsd, 2);
+  const drift = driftSign(f.driftUsd);
   const fields: Field[] = [
     sideField(f.side),
     { label: 'Type', value: typeLabel(o.type) },
@@ -221,7 +221,7 @@ function fillFields(f: WireFill, o: WireOrder): Field[] {
     // An unsigned cost (always >= 0), as in the preview and the fill notices.
     { label: 'Slippage', value: fmtCost(f.slippageUsd), tone: signOf(f.slippageUsd) === 0 ? 'muted' : undefined },
     // The engine stores a drift that costs the owner as positive.
-    { label: 'Delay drift', value: fmtDrift(f.driftUsd), tone: driftSign > 0 ? 'down' : driftSign < 0 ? 'up' : 'muted' },
+    { label: 'Delay drift', value: fmtDrift(f.driftUsd), tone: drift > 0 ? 'down' : drift < 0 ? 'up' : 'muted' },
     { label: 'Role', value: f.liquidity === 'maker' ? 'Maker' : 'Taker' },
     { label: 'Fee', value: fee },
   ];

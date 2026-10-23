@@ -185,14 +185,21 @@ export function fmtProceeds(value: Value): string {
 
 /**
  * Delay drift of a fill in words: the engine stores a cost to the owner as positive, so
- * 'cost $0.07' or 'gain $0.03'; '$0.00' when it shows as zero.
+ * 'cost $0.08' or 'gain $0.02'; '$0.00' when it shows as zero. As with fmtCost, a cost is
+ * rounded up to the cent and a gain cut toward zero, so the figure never flatters.
  */
 export function fmtDrift(value: Value): string {
   if (value === null || value === undefined) return DASH;
-  const s = signOf(value, 2);
-  if (s === 0) return '$0.00';
-  const abs = value.trim().replace(/^[+-]/, '');
-  return `${s > 0 ? 'cost' : 'gain'} ${fmtUsd(abs)}`;
+  if (!parse(value)) return value;
+  const shown = fmtCost(value);
+  if (shown === '$0.00') return shown;
+  return shown.startsWith('-') ? `gain ${shown.slice(1)}` : `cost ${shown}`;
+}
+
+/** The sign of a delay drift as fmtDrift shows it: 1 a cost, -1 a gain, 0 when it shows as $0.00. */
+export function driftSign(value: Value): -1 | 0 | 1 {
+  const shown = fmtDrift(value);
+  return shown.startsWith('cost') ? 1 : shown.startsWith('gain') ? -1 : 0;
 }
 
 /** Order types as the owner reads them. */

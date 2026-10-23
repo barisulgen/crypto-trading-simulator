@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import type { WireFill, WireOrder } from '../lib/api.ts';
-import { ORDER_TYPE_LABEL, fmtBalance, fmtCost, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
+import { ORDER_TYPE_LABEL, driftSign, fmtBalance, fmtCost, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { avgFill, holdingRows, valueTitle } from '../lib/holdings.ts';
 import type { HoldingRow } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
@@ -393,9 +393,9 @@ const FILL_COLS: Col[] = [
 const FILL_TEMPLATE =
   '4.5rem minmax(2.5rem,0.6fr) 2.5rem minmax(4.5rem,1fr) minmax(5.5rem,1.2fr) minmax(5rem,1fr) minmax(3.5rem,0.8fr) minmax(4.5rem,0.9fr) 3rem minmax(6rem,1.3fr)';
 
-/** Delay drift in words ('cost $0.07' / 'gain $0.03'), coloured as its effect on the owner. */
+/** Delay drift in words ('cost $0.08' / 'gain $0.02'), coloured as its effect on the owner. */
 function drift(driftUsd: string): ReactNode {
-  const s = signOf(driftUsd, 2);
+  const s = driftSign(driftUsd);
   return <span className={s > 0 ? 'text-down' : s < 0 ? 'text-up' : 'text-muted'}>{fmtDrift(driftUsd)}</span>;
 }
 

@@ -361,7 +361,7 @@ describe('history rows', () => {
       'Price: 81,382.0123',
       'Best at the time: 81,382.01',
       'Slippage: $0.08',
-      'Delay drift: cost $0.07',
+      'Delay drift: cost $0.08',
       'Role: Taker',
       'Fee: 0.00000122 BTC ~$0.10',
     ]);
@@ -402,7 +402,7 @@ describe('history rows', () => {
       'Price: 81,382.0123',
       'Best at the time: 81,382.01',
       'Slippage: $0.00',
-      'Delay drift: gain $0.03',
+      'Delay drift: gain $0.02',
       'Role: Maker',
       'Fee: 0.0984867 USDT',
       'Realised P&L: -$1.23',
@@ -415,7 +415,9 @@ describe('history rows', () => {
       row('fill', { type: 'fill', time: T, fill: fill({ side: 'sell', realizedPnl: '2.5', driftUsd: '0.001' }), order: order() }),
     );
     expect(lines(gain)).toContain('Realised P&L: +$2.50');
-    expect(lines(gain)).toContain('Delay drift: $0.00');
+    // A cost under a cent still shows, rounded up; it is coloured as a cost.
+    expect(lines(gain)).toContain('Delay drift: cost $0.01');
+    expect(tone(gain, 'Delay drift')).toBe('down');
     expect(tone(gain, 'Realised P&L')).toBe('up');
   });
 

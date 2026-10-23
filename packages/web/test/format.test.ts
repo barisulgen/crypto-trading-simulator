@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { fmtAvgPrice, fmtBalance, fmtCost, fmtProceeds, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
+import { driftSign, fmtAvgPrice, fmtBalance, fmtCost, fmtProceeds, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
 
 describe('tickDecimals', () => {
   it('counts the significant decimals of a tick or step size', () => {
@@ -138,11 +138,25 @@ describe('fmtFloor', () => {
 
 describe('fmtDrift', () => {
   it('says cost or gain in words (the engine stores a cost as positive), $0.00 when it shows as zero', () => {
-    expect(fmtDrift('0.0712')).toBe('cost $0.07');
-    expect(fmtDrift('-0.026')).toBe('gain $0.03');
     expect(fmtDrift('0')).toBe('$0.00');
-    expect(fmtDrift('-0.004')).toBe('$0.00');
     expect(fmtDrift('1234.5')).toBe('cost $1,234.50');
+  });
+
+  it('a cost rounds up to the cent, a gain toward zero, so the figure never flatters', () => {
+    expect(fmtDrift('0.0749')).toBe('cost $0.08');
+    expect(fmtDrift('0.0712')).toBe('cost $0.08');
+    expect(fmtDrift('0.07')).toBe('cost $0.07');
+    expect(fmtDrift('0.001')).toBe('cost $0.01');
+    expect(fmtDrift('-0.026')).toBe('gain $0.02');
+    expect(fmtDrift('-0.004')).toBe('$0.00');
+  });
+
+  it('driftSign is the sign as shown', () => {
+    expect(driftSign('0.001')).toBe(1);
+    expect(driftSign('-0.026')).toBe(-1);
+    expect(driftSign('-0.004')).toBe(0);
+    expect(driftSign('0')).toBe(0);
+    expect(driftSign(null)).toBe(0);
   });
 });
 
