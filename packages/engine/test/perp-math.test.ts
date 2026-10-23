@@ -14,7 +14,7 @@ import {
   unrealizedPnl,
 } from '../src/perp/math.ts';
 import { bracketFor, maxLeverage, maxNotionalAt } from '../src/perp/tiers.ts';
-import { btcBrackets, btcPerpRules, solBrackets } from './perpFixtures.ts';
+import { brackets, btcBrackets, btcPerpRules, solBrackets } from './perpFixtures.ts';
 
 describe('tiers', () => {
   it('finds the bracket with floor inclusive and cap exclusive', () => {
@@ -50,9 +50,18 @@ describe('liquidation price', () => {
     // Tier 1 at entry, tier 2 at the result; tier 1 would give 81075.69721116.
     expect(liquidationPrice(btcBrackets, 'short', D('4'), D('74000'), D('29600'))?.toFixed(8)).toBe('81069.65174129');
   });
-  it('a result exactly on a bracket edge belongs to the upper bracket', () => {
-    // Both brackets give 75000 here: maintenance margin is 1200 either side of notional 300 000.
+  it('a result exactly on an edge is the same from both brackets', () => {
+    // Maintenance margin is 1200 either side of notional 300 000, so both brackets give 75000.
     expect(liquidationPrice(btcBrackets, 'long', D('4'), D('76000'), D('5200'))?.toString()).toBe('75000');
+  });
+  it('with no self-consistent bracket, takes the result nearest to its own bracket', () => {
+    // A table whose maintenance margin drops at the edge (100 below notional 1000, 50 above), so neither bracket holds its own result.
+    const gapped = brackets([
+      ['0', '1000', '0.1', '0', 10],
+      ['1000', '1000000', '0.1', '50', 10],
+    ]);
+    // First bracket: 920 / 0.9 = 1022.2… (22.2 past its cap); second: 870 / 0.9 = 966.6… (33.3 short of its floor).
+    expect(liquidationPrice(gapped, 'long', D('1'), D('2000'), D('1080'))?.toFixed(8)).toBe('1022.22222222');
   });
   it('short on another table', () => {
     expect(liquidationPrice(solBrackets, 'short', D('50'), D('100'), D('500'))?.toFixed(8)).toBe('109.45273632');
@@ -121,6 +130,21 @@ describe('order cost', () => {
     expect(c.openLoss.toString()).toBe('10');
     expect(c.fee.toString()).toBe('4.00850375');
     expect(c.total.toString()).toBe('414.85887875');
+  });
+  it('rounds the margin and open loss up to 8 decimals', () => {
+    const c = orderCost({
+      side: 'buy',
+      qty: D('0.001'),
+      imPrice: D('80000'),
+      olPrice: D('80000'),
+      mark: D('80000'),
+      leverage: 3,
+      takerRate: D('0.0005'),
+    });
+    expect(c.initialMargin.toString()).toBe('26.66666667');
+    expect(c.openLoss.toString()).toBe('0');
+    expect(c.fee.toString()).toBe('0.04');
+    expect(c.total.toString()).toBe('26.70666667');
   });
   it('assumed prices for the other order kinds', () => {
     const base = { mark: D('80100'), last: D('80000') };

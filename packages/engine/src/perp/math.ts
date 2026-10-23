@@ -77,8 +77,8 @@ export function liquidationPrice(
 }
 
 /**
- * The price an order's margin is reserved at. A limit buy uses its price; every other order is assumed
- * to fill no better for the owner than the mark (sells) and the last price plus 0.15 %.
+ * The price an order's margin is reserved at. A limit buy uses its price; every other order reserves
+ * margin at no less than the mark (sells) and the last price plus 0.15 %.
  */
 export function assumedPrice(p: {
   type: 'market' | 'limit';
@@ -102,7 +102,7 @@ export function perpFee(notional: Decimal, rate: Decimal): Decimal {
 
 /**
  * What opening an order costs: initial margin at imPrice, the loss already standing against the mark
- * at olPrice, and the taker fee at imPrice.
+ * at olPrice, and the taker fee at imPrice, each rounded up to 8 decimals.
  */
 export function orderCost(p: {
   side: Side;
@@ -114,8 +114,8 @@ export function orderCost(p: {
   takerRate: Decimal;
 }): { initialMargin: Decimal; openLoss: Decimal; fee: Decimal; total: Decimal } {
   const notional = p.qty.mul(p.imPrice);
-  const initialMargin = notional.div(p.leverage);
-  const openLoss = p.qty.mul(Decimal.max(0, p.olPrice.minus(p.mark).mul(dir(p.side))));
+  const initialMargin = roundUp8(notional.div(p.leverage));
+  const openLoss = roundUp8(p.qty.mul(Decimal.max(0, p.olPrice.minus(p.mark).mul(dir(p.side)))));
   const fee = perpFee(notional, p.takerRate);
   return { initialMargin, openLoss, fee, total: initialMargin.plus(openLoss).plus(fee) };
 }

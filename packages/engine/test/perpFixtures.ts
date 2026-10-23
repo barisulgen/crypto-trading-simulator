@@ -2,9 +2,10 @@ import { D } from '../src/decimal.ts';
 import type { Bracket, PerpRules } from '../src/perp/types.ts';
 import type { BookSnapshot } from '../src/types.ts';
 
-type Row = [floor: string, cap: string, mmr: string, cum: string, maxLeverage: number];
+export type BracketRow = [floor: string, cap: string, mmr: string, cum: string, maxLeverage: number];
 
-function brackets(rows: Row[]): Bracket[] {
+/** Brackets from [floor, cap, mmr, cum, maxLeverage] rows. */
+export function brackets(rows: BracketRow[]): Bracket[] {
   return rows.map(([floor, cap, mmr, cum, maxLeverage]) => ({
     floor: D(floor),
     cap: D(cap),

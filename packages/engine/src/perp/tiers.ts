@@ -4,7 +4,7 @@ import type { Bracket } from './types.ts';
 
 /**
  * The bracket whose [floor, cap) holds the notional. Above the last cap the last bracket applies;
- * below the first floor, the first.
+ * below the first floor, the first. Relies on the brackets being ascending and contiguous from 0.
  */
 export function bracketFor(brackets: Bracket[], notional: Decimal): Bracket {
   const first = brackets[0];
