@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
+import { emptyLedger, deposit } from '../src/account/ledger.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import { isTriggered } from '../src/spot/triggers.ts';
 import type { AggTrade, EngineCtx, EngineEvent, Fill, SpotOrder, SpotOrderRequest } from '../src/types.ts';
@@ -15,11 +16,11 @@ const ESTIMATE = 'Estimate if triggered now';
 function setup(opts: { usdt?: string; btc?: string } = {}) {
   const market = new FakeMarket();
   const ctx = testCtx(market, { now: NOW });
-  const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
+  const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
   const usdt = D(opts.usdt ?? '1000');
-  if (usdt.gt(0)) engine.deposit('spot', usdt, ctx);
+  if (usdt.gt(0)) deposit(engine.state.ledger, 'spot', usdt, ctx);
   seedCoins(engine.state, 'BTC', D(opts.btc ?? '2'));
-  const bal = (asset: string) => engine.state.balances.spot[asset]!;
+  const bal = (asset: string) => engine.state.ledger.balances.spot[asset]!;
   const stored = (id: string) => engine.state.orders.get(id)!;
   return { market, ctx, engine, bal, stored };
 }
@@ -571,11 +572,11 @@ describe('cancel', () => {
     const sellStopId = arm(engine, sellStop('99', '0.5'), ctx);
 
     market.clearRules('BTCUSDT');
-    const before = JSON.stringify([...engine.state.orders.values(), engine.state.balances]);
+    const before = JSON.stringify([...engine.state.orders.values(), engine.state.ledger.balances]);
     const refused = { ok: false, reason: 'Exchange rules not loaded yet; try again in a moment' };
     expect(engine.cancel(buyStopId, ctx)).toEqual(refused);
     expect(engine.cancel(parent.id, ctx)).toEqual(refused);
-    expect(JSON.stringify([...engine.state.orders.values(), engine.state.balances])).toBe(before);
+    expect(JSON.stringify([...engine.state.orders.values(), engine.state.ledger.balances])).toBe(before);
     expect(s(bal('USDT').locked)).not.toBe('0');
 
     // A cancel that needs no rules still works.

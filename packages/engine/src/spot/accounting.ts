@@ -161,9 +161,9 @@ export function valueAccount(
   bestBid: (symbol: string) => { price: Decimal; fresh: boolean; at?: number } | null,
   symbols: string[],
 ): AccountValue {
-  const spot = state.balances.spot;
+  const spot = state.ledger.balances.spot;
   const usdt = spot.USDT ?? { free: D(0), locked: D(0) };
-  const lev = state.balances.leverage.USDT ?? { free: D(0), locked: D(0) };
+  const lev = state.ledger.balances.leverage.USDT ?? { free: D(0), locked: D(0) };
   const leverageUsdt = lev.free.plus(lev.locked);
 
   const rank = (asset: string) => {
@@ -181,16 +181,16 @@ export function valueAccount(
     });
 
   const total = coins.reduce((sum, c) => sum.plus(c.value), usdt.free.plus(usdt.locked).plus(leverageUsdt));
-  const netPnl = total.minus(state.totalDeposited);
+  const netPnl = total.minus(state.ledger.totalDeposited);
   return {
     spotUsdtFree: usdt.free,
     spotUsdtLocked: usdt.locked,
     leverageUsdt,
     coins,
     total,
-    totalDeposited: state.totalDeposited,
+    totalDeposited: state.ledger.totalDeposited,
     netPnl,
-    netPnlPct: state.totalDeposited.isZero() ? null : netPnl.div(state.totalDeposited).mul(100),
+    netPnlPct: state.ledger.totalDeposited.isZero() ? null : netPnl.div(state.ledger.totalDeposited).mul(100),
     pricesPaused: coins.filter((c) => !c.fresh).map((c) => c.asset),
   };
 }

@@ -1,10 +1,12 @@
-import { D, Decimal, emptySpotState } from '@sim/engine';
+import { D, Decimal, emptyLedger, emptySpotState } from '@sim/engine';
 import type {
   AccountValue,
   Basis,
   EngineEvent,
   Fill,
   RoundTrip,
+  Ledger,
+  SimEngine,
   SpotOrder,
   SpotState,
   Wallet,
@@ -88,15 +90,25 @@ const str = (x: Decimal | null): string | null => (x === null ? null : x.toStrin
 
 const NON_TERMINAL = ['pending', 'open', 'partially_filled', 'triggered'];
 
-export function loadSpotState(db: Db, seasonId: number, assets: string[]): SpotState {
-  const state = emptySpotState(assets);
+export function loadLedger(db: Db, seasonId: number, assets: string[]): Ledger {
+  const ledger = emptyLedger(assets);
 
   const balances = db
     .prepare('SELECT wallet, asset, free, locked FROM balances WHERE season_id = ?')
     .all(seasonId) as { wallet: Wallet; asset: string; free: string; locked: string }[];
   for (const b of balances) {
-    state.balances[b.wallet][b.asset] = { free: D(b.free), locked: D(b.locked) };
+    ledger.balances[b.wallet][b.asset] = { free: D(b.free), locked: D(b.locked) };
   }
+
+  const acct = db.prepare('SELECT total_deposited FROM account WHERE season_id = ?').get(seasonId) as
+    | { total_deposited: string }
+    | undefined;
+  if (acct) ledger.totalDeposited = D(acct.total_deposited);
+  return ledger;
+}
+
+export function loadSpotState(db: Db, seasonId: number, ledger: Ledger): SpotState {
+  const state = emptySpotState(ledger);
 
   const orders = db
     .prepare(
@@ -112,11 +124,6 @@ export function loadSpotState(db: Db, seasonId: number, assets: string[]): SpotS
     .prepare('SELECT asset, qty, cost, round_trip_id, opened_at, trip_realized FROM basis WHERE season_id = ?')
     .all(seasonId) as BasisRow[];
   for (const b of basis) state.basis[b.asset] = reviveBasis(b);
-
-  const acct = db.prepare('SELECT total_deposited FROM account WHERE season_id = ?').get(seasonId) as
-    | { total_deposited: string }
-    | undefined;
-  if (acct) state.totalDeposited = D(acct.total_deposited);
 
   const cursors = db
     .prepare('SELECT symbol, last_trade_id FROM trade_cursor WHERE season_id = ?')
@@ -151,10 +158,11 @@ function eventSymbolMarket(e: EngineEvent): { symbol: string | null; market: str
 export function persist(
   db: Db,
   seasonId: number,
-  state: SpotState,
+  sim: SimEngine,
   events: EngineEvent[],
   extra: { feedGaps?: FeedGap[] } = {},
 ): void {
+  const state = sim.spot.state;
   const insEvent = db.prepare(
     'INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, ?, ?, ?, ?)',
   );
@@ -222,14 +230,14 @@ export function persist(
     for (const { order, time } of touched.values()) writeOrder(state.orders.get(order.id) ?? order, time);
 
     for (const wallet of ['spot', 'leverage'] as const) {
-      for (const [asset, b] of Object.entries(state.balances[wallet])) {
+      for (const [asset, b] of Object.entries(sim.ledger.balances[wallet])) {
         upBalance.run(seasonId, wallet, asset, str(b.free), str(b.locked));
       }
     }
     for (const [asset, b] of Object.entries(state.basis)) {
       upBasis.run(seasonId, asset, str(b.qty), str(b.cost), b.roundTripId, b.openedAt, str(b.tripRealized));
     }
-    upAccount.run(seasonId, str(state.totalDeposited));
+    upAccount.run(seasonId, str(sim.ledger.totalDeposited));
     for (const [symbol, id] of Object.entries(state.lastTradeId)) upCursor.run(seasonId, symbol, id);
 
     for (const g of extra.feedGaps ?? []) {
@@ -307,7 +315,8 @@ export function loadOpenGaps(db: Db, seasonId: number): OpenGap[] {
 
 // ---- invariants ----
 
-export function checkInvariants(state: SpotState): string[] {
+export function checkInvariants(sim: SimEngine): string[] {
+  const state = sim.spot.state;
   const out: string[] = [];
 
   const locks = new Map<string, Decimal>();
@@ -315,7 +324,7 @@ export function checkInvariants(state: SpotState): string[] {
     if (!NON_TERMINAL.includes(o.status)) continue;
     locks.set(o.lockAsset, (locks.get(o.lockAsset) ?? D(0)).plus(o.lockAmount));
   }
-  const spot = state.balances.spot;
+  const spot = sim.ledger.balances.spot;
   for (const asset of new Set([...Object.keys(spot), ...locks.keys()])) {
     const locked = spot[asset]?.locked ?? D(0);
     const sum = locks.get(asset) ?? D(0);

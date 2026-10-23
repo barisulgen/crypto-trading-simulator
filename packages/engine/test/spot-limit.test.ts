@@ -3,6 +3,7 @@ import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
 import { allocateTradeThrough } from '../src/spot/matching.ts';
+import { emptyLedger, deposit } from '../src/account/ledger.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import type { AggTrade, EngineCtx, EngineEvent, Fill, SpotOrder, SpotOrderRequest } from '../src/types.ts';
 import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
@@ -14,10 +15,10 @@ const POST_ONLY = 'Post-only order would immediately match; rejected';
 function setup(opts: { usdt?: string; btc?: string } = {}) {
   const market = new FakeMarket();
   const ctx = testCtx(market, { now: NOW });
-  const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
-  engine.deposit('spot', D(opts.usdt ?? '1000'), ctx);
+  const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
+  deposit(engine.state.ledger, 'spot', D(opts.usdt ?? '1000'), ctx);
   seedCoins(engine.state, 'BTC', D(opts.btc ?? '2'));
-  const bal = (asset: string) => engine.state.balances.spot[asset]!;
+  const bal = (asset: string) => engine.state.ledger.balances.spot[asset]!;
   const stored = (id: string) => engine.state.orders.get(id)!;
   return { market, ctx, engine, bal, stored };
 }
@@ -478,7 +479,7 @@ describe('a cancel reaches the exchange after the arrival delay', () => {
     const { fill } = onlyFill(engine.onTrade('BTCUSDT', trade('99.00', '5', true), ctx));
     expect(s(fill.qty)).toBe('1');
     expect(s(fill.price)).toBe('99.5');
-    const balances = JSON.stringify(engine.state.balances);
+    const balances = JSON.stringify(engine.state.ledger.balances);
 
     ctx.now = t + 100;
     const e = only(engine.arriveCancel(id, ctx), 'cancel_rejected');
@@ -489,7 +490,7 @@ describe('a cancel reaches the exchange after the arrival delay', () => {
     expect(e.order.cancelArrivesAt).toBeNull();
     expect(stored(id)).toEqual(e.order);
     expect(s(stored(id).filledQty)).toBe('1');
-    expect(JSON.stringify(engine.state.balances)).toBe(balances);
+    expect(JSON.stringify(engine.state.ledger.balances)).toBe(balances);
     expect(s(bal('USDT').locked)).toBe('0');
     // Delivered once.
     expect(engine.arriveCancel(id, ctx)).toEqual([]);
@@ -834,10 +835,10 @@ describe('limit preview', () => {
   it('reports the submit rejection and does not create balance rows', () => {
     const market = new FakeMarket();
     const ctx = testCtx(market, { now: NOW });
-    const engine = new SpotEngine(emptySpotState(['USDT']));
+    const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT'])));
     const p = engine.preview(limitSell('101', '1'), ctx);
     expect(p.rejectReason).toBe('Insufficient BTC: need 1, available 0');
-    expect('BTC' in engine.state.balances.spot).toBe(false);
+    expect('BTC' in engine.state.ledger.balances.spot).toBe(false);
     market.setFresh('BTCUSDT', false);
     const stale = engine.preview(limitBuy('99.50', '1'), ctx);
     expect(stale.rejectReason).toBe('Live data interrupted for BTCUSDT');

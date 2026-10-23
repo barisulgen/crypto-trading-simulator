@@ -13,7 +13,6 @@ import type {
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
-  Wallet,
 } from '../types.ts';
 import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import {
@@ -33,7 +32,7 @@ import {
   takerPreview,
 } from './orders.ts';
 import type { RequestFields } from './orders.ts';
-import { balanceOf, freeOf, releaseFunds } from './state.ts';
+import { freeOf, releaseFunds } from './state.ts';
 import type { SpotState } from './state.ts';
 import {
   activateAttachedPairs,
@@ -84,37 +83,6 @@ export class SpotEngine {
 
   get state(): SpotState {
     return this.s;
-  }
-
-  // ---- wallets ----
-
-  deposit(wallet: Wallet, amount: Decimal, ctx: EngineCtx): ActionResult {
-    if (!amount.isFinite() || !amount.gt(0)) return { ok: false, reason: 'Deposit must be greater than 0' };
-    if (amount.decimalPlaces() > 2) return { ok: false, reason: 'Deposit has at most 2 decimals' };
-    const b = balanceOf(this.s, wallet, 'USDT');
-    b.free = b.free.plus(amount);
-    this.s.totalDeposited = this.s.totalDeposited.plus(amount);
-    return {
-      ok: true,
-      events: [{ type: 'deposit', time: ctx.now, wallet, amount, totalDeposited: this.s.totalDeposited }],
-    };
-  }
-
-  /** Moves free USDT only; locked funds never move. Not a deposit. */
-  transfer(from: Wallet, to: Wallet, amount: Decimal, ctx: EngineCtx): ActionResult {
-    if (from === to) return { ok: false, reason: 'Choose two different wallets' };
-    if (!amount.isFinite() || !amount.gt(0)) return { ok: false, reason: 'Transfer must be greater than 0' };
-    const src = balanceOf(this.s, from, 'USDT');
-    if (amount.gt(src.free)) {
-      return {
-        ok: false,
-        reason: `Insufficient free USDT in ${from} wallet: need ${amount}, available ${src.free}`,
-      };
-    }
-    const dst = balanceOf(this.s, to, 'USDT');
-    src.free = src.free.minus(amount);
-    dst.free = dst.free.plus(amount);
-    return { ok: true, events: [{ type: 'transfer', time: ctx.now, from, to, amount }] };
   }
 
   // ---- orders ----

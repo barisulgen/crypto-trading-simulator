@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { D, SpotEngine, emptySpotState } from '@sim/engine';
+import { D, SpotEngine, emptyLedger, emptySpotState } from '@sim/engine';
 import type { BookSnapshot, EngineCtx, MarketView, SpotRules } from '@sim/engine';
 import type { AccountSnapshot, WireLevel } from '../src/lib/api.ts';
 import { buildOrderRequest } from '../src/lib/orderForm.ts';
@@ -442,8 +442,8 @@ describe('quick amount: 100% sell in dollars', () => {
         market,
         fees: { maker: D('0.001'), taker: D('0.001') },
       };
-      const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
-      engine.state.balances.spot.BTC = { free: D('1'), locked: D(0) };
+      const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
+      engine.state.ledger.balances.spot.BTC = { free: D('1'), locked: D(0) };
       engine.state.basis.BTC = { qty: D('1'), cost: D('80000'), roundTripId: 'rt0', openedAt: 0, tripRealized: D(0) };
 
       const quick = quickAmount(input({ unit: 'usd', pct: 100, freeBase: '1', bids: [lv('81229', '5')] }))!;
@@ -466,7 +466,7 @@ describe('quick amount: 100% sell in dollars', () => {
       if (first.type !== 'order_placed') throw new Error(`expected order_placed, got ${JSON.stringify(placed)}`);
       ctx.now = first.order.arrivesAt!;
       const events = engine.arrive(first.order.id, ctx);
-      return { req, events, btc: engine.state.balances.spot.BTC! };
+      return { req, events, btc: engine.state.ledger.balances.spot.BTC! };
     }
 
     const filledQty = (events: { type: string }[]) => {

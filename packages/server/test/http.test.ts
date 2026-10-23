@@ -2,13 +2,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { D, SpotEngine } from '@sim/engine';
+import { D, SimEngine, SpotEngine } from '@sim/engine';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/api/http.ts';
 import { ClientHub } from '../src/api/ws.ts';
 import { COINS, loadConfig } from '../src/config.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
-import { loadSpotState } from '../src/db/store.ts';
+import { loadLedger, loadSpotState } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import type { Candle } from '../src/market/candles.ts';
 import { EngineRunner } from '../src/runner.ts';
@@ -43,12 +43,14 @@ async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
   const seasonId = currentSeasonId(db, () => clock.now);
   const market = new TestMarket(config.symbols);
   const logger = createLogger(config.secrets, (_s, line) => logs.push(line));
-  const engine = new SpotEngine(loadSpotState(db, seasonId, ['USDT', ...COINS]));
+  const ledger = loadLedger(db, seasonId, ['USDT', ...COINS]);
+  const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
+  const sim = new SimEngine(ledger, engine);
   let hub: ClientHub | null = null;
   const runner = new EngineRunner({
     db,
     seasonId,
-    engine,
+    sim,
     market,
     health: new FakeHealth(() => clock.now),
     symbols: config.symbols,
@@ -157,7 +159,7 @@ describe('auth', () => {
     expect((await t.call('GET', '/%61%70%69/account')).status).toBe(401);
     expect((await t.call('GET', '/api/%61ccount')).status).toBe(401);
     expect((await t.call('POST', '/%61pi/deposit', { wallet: 'spot', amount: '1000' })).status).toBe(401);
-    expect(t.runner.state.totalDeposited.toString()).toBe('0');
+    expect(t.runner.state.ledger.totalDeposited.toString()).toBe('0');
     expect(t.db.prepare("SELECT count(*) AS n FROM events WHERE type = 'deposit'").get()).toEqual({ n: 0 });
     await expect(t.app.injectWS('/%77s')).rejects.toThrow('Unexpected server response: 401');
     // Unknown routes are denied too (deny by default); only POST /api/login is open.

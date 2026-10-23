@@ -3,6 +3,7 @@ import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import { applyBuyToBasis, applySellToBasis, emptyBasis, valueAccount } from '../src/spot/accounting.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
+import { emptyLedger, deposit, transfer } from '../src/account/ledger.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import type { AggTrade, Basis, EngineCtx, EngineEvent, Fill, MarketView, SpotOrder } from '../src/types.ts';
 import { FakeMarket, testCtx } from './fixtures.ts';
@@ -114,8 +115,8 @@ function trade(price: string, qty = '1', sellerInitiated = true): AggTrade {
 function setup() {
   const market = new FakeMarket();
   const ctx = testCtx(market, { now: NOW });
-  const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
-  engine.deposit('spot', D('1000'), ctx);
+  const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
+  deposit(engine.state.ledger, 'spot', D('1000'), ctx);
   return { market, ctx, engine };
 }
 
@@ -134,7 +135,7 @@ const fills = (events: EngineEvent[]): Fill[] => events.flatMap((e) => (e.type =
 
 /** Spot holdings of BTC (free + locked); the basis quantity must always equal it. */
 function holdings(engine: SpotEngine): Decimal {
-  const b = engine.state.balances.spot.BTC!;
+  const b = engine.state.ledger.balances.spot.BTC!;
   return b.free.plus(b.locked);
 }
 
@@ -258,20 +259,20 @@ describe('accounting on engine fills: dust and invariant', () => {
 
   it('a sell with no cost basis behind it throws before any balance or order changes', () => {
     const { ctx, engine } = setup();
-    engine.state.balances.spot.BTC!.free = D('2'); // coins that never came through a buy
+    engine.state.ledger.balances.spot.BTC!.free = D('2'); // coins that never came through a buy
     const sell = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.5' }, ctx));
-    const before = JSON.stringify([engine.state.balances, [...engine.state.orders.values()]]);
+    const before = JSON.stringify([engine.state.ledger.balances, [...engine.state.orders.values()]]);
     expect(() => arriveNow(engine, sell, ctx)).toThrow('BTCUSDT: cannot sell 0.5 against a cost basis of 0');
-    expect(JSON.stringify([engine.state.balances, [...engine.state.orders.values()]])).toBe(before);
+    expect(JSON.stringify([engine.state.ledger.balances, [...engine.state.orders.values()]])).toBe(before);
 
     // Same for a maker fill of a resting limit sell.
     const lim = placedOrder(
       engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '101', qty: '0.5' }, ctx),
     );
     arriveNow(engine, lim, ctx);
-    const beforeMaker = JSON.stringify([engine.state.balances, [...engine.state.orders.values()]]);
+    const beforeMaker = JSON.stringify([engine.state.ledger.balances, [...engine.state.orders.values()]]);
     expect(() => engine.onTrade('BTCUSDT', trade('101.01', '1', false), ctx)).toThrow('cannot sell 0.5');
-    expect(JSON.stringify([engine.state.balances, [...engine.state.orders.values()]])).toBe(beforeMaker);
+    expect(JSON.stringify([engine.state.ledger.balances, [...engine.state.orders.values()]])).toBe(beforeMaker);
   });
 });
 
@@ -296,7 +297,7 @@ describe('valueAccount', () => {
   it('locked funds and the leverage wallet count; a transfer is not P&L', () => {
     const { market, ctx, engine } = setup();
     marketBuy12(engine, ctx);
-    engine.transfer('spot', 'leverage', D('100'), ctx);
+    transfer(engine.state.ledger, 'spot', 'leverage', D('100'), ctx);
     // A resting sell locks 0.5 BTC; a resting buy locks 90 USDT.
     engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '105', qty: '0.5' }, ctx);
     engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'limit', price: '90', qty: '1' }, ctx);
@@ -325,10 +326,10 @@ describe('valueAccount', () => {
   });
 
   it('each coin carries when its bid was received; pricesPaused lists every coin whose bid is stale or missing', () => {
-    const state = emptySpotState(['USDT', 'BTC', 'ETH', 'SOL']);
-    state.balances.spot.BTC!.free = D('1');
-    state.balances.spot.ETH!.free = D('1');
-    state.balances.spot.SOL!.free = D('1');
+    const state = emptySpotState(emptyLedger(['USDT', 'BTC', 'ETH', 'SOL']));
+    state.ledger.balances.spot.BTC!.free = D('1');
+    state.ledger.balances.spot.ETH!.free = D('1');
+    state.ledger.balances.spot.SOL!.free = D('1');
     const bids: Record<string, { price: Decimal; fresh: boolean; at: number } | null> = {
       BTCUSDT: { price: D('100'), fresh: true, at: 5000 },
       ETHUSDT: { price: D('10'), fresh: false, at: 4000 }, // the last real bid, kept through an outage
@@ -344,9 +345,9 @@ describe('valueAccount', () => {
   });
 
   it('coins with a zero balance are left out and the rest follow the symbol order', () => {
-    const state = emptySpotState(['USDT', 'BTC', 'ETH', 'SOL']);
-    state.balances.spot.SOL!.free = D('2');
-    state.balances.spot.BTC!.locked = D('0.1');
+    const state = emptySpotState(emptyLedger(['USDT', 'BTC', 'ETH', 'SOL']));
+    state.ledger.balances.spot.SOL!.free = D('2');
+    state.ledger.balances.spot.BTC!.locked = D('0.1');
     const bid = (symbol: string) => ({ price: D(symbol === 'BTCUSDT' ? '100' : '10'), fresh: true });
     const v = valueAccount(state, bid, ['SOLUSDT', 'BTCUSDT', 'ETHUSDT']);
     expect(v.coins.map((c) => [c.asset, s(c.value)])).toEqual([
@@ -356,7 +357,7 @@ describe('valueAccount', () => {
   });
 
   it('nothing deposited → net P&L % is null', () => {
-    const v = valueAccount(emptySpotState(['USDT', 'BTC']), () => null, ['BTCUSDT']);
+    const v = valueAccount(emptySpotState(emptyLedger(['USDT', 'BTC'])), () => null, ['BTCUSDT']);
     expect(s(v.total)).toBe('0');
     expect(s(v.netPnl)).toBe('0');
     expect(v.netPnlPct).toBeNull();

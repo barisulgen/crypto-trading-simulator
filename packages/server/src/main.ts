@@ -2,13 +2,13 @@
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
-import { SpotEngine } from '@sim/engine';
+import { SimEngine, SpotEngine } from '@sim/engine';
 import { buildApp } from './api/http.ts';
 import { ClientHub } from './api/ws.ts';
 import { BinanceRest } from './binance/rest.ts';
 import { loadConfig } from './config.ts';
 import { currentSeasonId, openDb } from './db/db.ts';
-import { loadSpotState } from './db/store.ts';
+import { loadLedger, loadSpotState } from './db/store.ts';
 import { createLogger } from './log.ts';
 import { CandleService } from './market/candles.ts';
 import { FeedHealth } from './market/feedHealth.ts';
@@ -25,7 +25,8 @@ const config = loadConfig();
 const logger = createLogger(config.secrets);
 const db = openDb(config.dbPath);
 const seasonId = currentSeasonId(db);
-const engine = new SpotEngine(loadSpotState(db, seasonId, ['USDT', ...config.coins]));
+const ledger = loadLedger(db, seasonId, ['USDT', ...config.coins]);
+const sim = new SimEngine(ledger, new SpotEngine(loadSpotState(db, seasonId, ledger)));
 
 const rest = new BinanceRest(fetch, Date.now, { logger });
 const health = new FeedHealth(config.symbols, config.health);
@@ -55,7 +56,7 @@ async function shutdown(code: number): Promise<void> {
 const runner = new EngineRunner({
   db,
   seasonId,
-  engine,
+  sim,
   market,
   health,
   symbols: config.symbols,

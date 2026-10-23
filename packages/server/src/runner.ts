@@ -10,8 +10,9 @@ import type {
   Fill,
   MarketView,
   OcoRequest,
+  Ledger,
   OrderPreview,
-  SpotEngine,
+  SimEngine,
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
@@ -64,7 +65,7 @@ export interface Notice {
 
 /** Account value plus the raw wallet balances and each held coin's average-cost basis. */
 export interface AccountSnapshot extends AccountValue {
-  balances: SpotState['balances'];
+  balances: Ledger['balances'];
   /** Per coin with a holding: quantity and USDT cost (fees included), for average cost and unrealised P&L. */
   basis: Record<string, { qty: Decimal; cost: Decimal }>;
 }
@@ -87,7 +88,7 @@ export interface RunnerMarket extends MarketView {
 export interface RunnerDeps {
   db: Db;
   seasonId: number;
-  engine: SpotEngine;
+  sim: SimEngine;
   market: RunnerMarket;
   /**
    * FeedHealth (or a stand-in): when the last frame of the live data connection was received,
@@ -151,7 +152,7 @@ export class EngineRunner {
     this.d = deps;
     this.newId = deps.newId ?? ((prefix) => `${prefix}-${randomUUID()}`);
 
-    this.violations = checkInvariants(deps.engine.state);
+    this.violations = checkInvariants(deps.sim);
     for (const v of this.violations) deps.logger.error(`Account state failed integrity check: ${v}`);
     this.seedGaps();
     this.settleLateCancels();
@@ -188,25 +189,25 @@ export class EngineRunner {
 
   deposit(wallet: Wallet, amount: Decimal): ActionResult {
     this.refuseTrading();
-    return this.apply((ctx) => this.d.engine.deposit(wallet, amount, ctx));
+    return this.apply((ctx) => this.d.sim.deposit(wallet, amount, ctx));
   }
 
   transfer(from: Wallet, to: Wallet, amount: Decimal): ActionResult {
     this.refuseTrading();
-    return this.apply((ctx) => this.d.engine.transfer(from, to, amount, ctx));
+    return this.apply((ctx) => this.d.sim.transfer(from, to, amount, ctx));
   }
 
   submit(req: SpotOrderRequest): EngineEvent[] {
     this.refuseTrading();
     this.noteStale(req.symbol);
-    return this.apply((ctx) => this.d.engine.submit(req, ctx));
+    return this.apply((ctx) => this.d.sim.spot.submit(req, ctx));
   }
 
   /** Requests the cancel: ok means it is on its way; arriveCancel runs at the order's cancelArrivesAt. */
   cancel(orderId: string): ActionResult {
     this.refuseTrading();
-    const result = this.apply((ctx) => this.d.engine.cancel(orderId, ctx));
-    const at = this.d.engine.state.orders.get(orderId)?.cancelArrivesAt ?? null;
+    const result = this.apply((ctx) => this.d.sim.spot.cancel(orderId, ctx));
+    const at = this.d.sim.spot.state.orders.get(orderId)?.cancelArrivesAt ?? null;
     if (result.ok && at !== null) this.scheduleCancel(orderId, at);
     return result;
   }
@@ -214,26 +215,26 @@ export class EngineRunner {
   attachOco(req: OcoRequest): EngineEvent[] {
     this.refuseTrading();
     this.noteStale(req.symbol);
-    return this.apply((ctx) => this.d.engine.attachOco(req, ctx));
+    return this.apply((ctx) => this.d.sim.spot.attachOco(req, ctx));
   }
 
   /** Read-only estimate; nothing is persisted. */
   preview(req: SpotOrderRequest): OrderPreview {
     this.refuseIfDead();
-    return this.d.engine.preview(req, this.ctx());
+    return this.d.sim.spot.preview(req, this.ctx());
   }
 
   // ---- reads ----
 
   account(): AccountSnapshot {
-    const state = this.d.engine.state;
+    const state = this.d.sim.spot.state;
     const basis: AccountSnapshot['basis'] = {};
     for (const [asset, b] of Object.entries(state.basis)) {
       if (b.qty.gt(0)) basis[asset] = { qty: b.qty, cost: b.cost };
     }
     return {
       ...valueAccount(state, (s) => this.d.market.bestBid(s), this.d.symbols),
-      balances: state.balances,
+      balances: state.ledger.balances,
       basis,
     };
   }
@@ -241,13 +242,13 @@ export class EngineRunner {
   /** Live (non-terminal) orders, newest first. */
   openOrders(): SpotOrder[] {
     const live = new Set(['pending', 'open', 'partially_filled', 'triggered']);
-    return [...this.d.engine.state.orders.values()]
+    return [...this.d.sim.spot.state.orders.values()]
       .filter((o) => live.has(o.status))
       .sort((a, b) => b.createdAt - a.createdAt);
   }
 
   get state(): SpotState {
-    return this.d.engine.state;
+    return this.d.sim.spot.state;
   }
 
   // ---- internals ----
@@ -284,7 +285,7 @@ export class EngineRunner {
 
   private commit(events: EngineEvent[], gaps: FeedGap[] = []): void {
     try {
-      persist(this.d.db, this.d.seasonId, this.d.engine.state, events, { feedGaps: gaps });
+      persist(this.d.db, this.d.seasonId, this.d.sim, events, { feedGaps: gaps });
     } catch (e) {
       this.die('persist failed', e);
       throw e;
@@ -303,7 +304,7 @@ export class EngineRunner {
     const now = this.d.now();
     const gaps = [...this.gaps.keys()].flatMap((symbol) => this.takeGap(symbol, now));
     try {
-      persist(this.d.db, this.d.seasonId, this.d.engine.state, [], { feedGaps: gaps });
+      persist(this.d.db, this.d.seasonId, this.d.sim, [], { feedGaps: gaps });
     } catch (e) {
       this.die('persist failed', e);
     }
@@ -345,7 +346,7 @@ export class EngineRunner {
 
   /** arrive() at arrivesAt; the engine ignores orders no longer waiting. */
   private scheduleArrival(orderId: string, arrivesAt: number): void {
-    this.scheduleAt(arrivesAt, orderId, (ctx) => this.d.engine.arrive(orderId, ctx));
+    this.scheduleAt(arrivesAt, orderId, (ctx) => this.d.sim.spot.arrive(orderId, ctx));
   }
 
   /**
@@ -356,8 +357,8 @@ export class EngineRunner {
   private scheduleCancel(orderId: string, cancelArrivesAt: number): void {
     this.scheduleAt(cancelArrivesAt, orderId, (ctx) =>
       this.heldBack(orderId)
-        ? this.d.engine.arriveCancelBeforeResend(orderId, ctx)
-        : this.d.engine.arriveCancel(orderId, ctx),
+        ? this.d.sim.spot.arriveCancelBeforeResend(orderId, ctx)
+        : this.d.sim.spot.arriveCancel(orderId, ctx),
     );
   }
 
@@ -377,7 +378,7 @@ export class EngineRunner {
       const left = at - this.d.now();
       if (left > 0) return this.timer(fire, left);
       this.background(() => {
-        const symbol = this.d.engine.state.orders.get(orderId)?.symbol;
+        const symbol = this.d.sim.spot.state.orders.get(orderId)?.symbol;
         if (symbol !== undefined) this.noteStale(symbol);
         else this.checkStall(this.d.now());
         this.apply(call);
@@ -389,8 +390,8 @@ export class EngineRunner {
   /** Account and orders after every engine call; skipped only when nothing changed and there were no events. */
   private publishState(changed: boolean): void {
     const orders = this.openOrders();
-    const state = this.d.engine.state;
-    const key = toJson({ b: state.balances, d: state.totalDeposited, o: orders });
+    const state = this.d.sim.spot.state;
+    const key = toJson({ b: state.ledger.balances, d: state.ledger.totalDeposited, o: orders });
     if (!changed && key === this.lastStateKey) return;
     this.lastStateKey = key;
     this.d.onBroadcast({ type: 'account', account: this.account() });
@@ -420,20 +421,20 @@ export class EngineRunner {
    * triggered orders and attached pairs waiting for data (arrivesAt null) are left to onFresh.
    */
   private recover(): void {
-    const state = this.d.engine.state;
+    const state = this.d.sim.spot.state;
     const ctx = this.ctx();
     const events: EngineEvent[] = [];
     for (const { id } of [...state.orders.values()]) {
       // Re-read: cancelling one leg of a pair settles its partner too. A pending order is sent
       // again below, so its old arrival never happened and does not come before the cancel.
       if (state.orders.get(id)!.cancelArrivesAt !== null) {
-        events.push(...this.d.engine.arriveCancelBeforeResend(id, ctx));
+        events.push(...this.d.sim.spot.arriveCancelBeforeResend(id, ctx));
       }
     }
     for (const o of [...state.orders.values()]) {
       if (o.status !== 'pending') continue;
       if (o.type === 'market') {
-        events.push(...this.d.engine.rejectRestartedMarket(o.id, ctx));
+        events.push(...this.d.sim.spot.rejectRestartedMarket(o.id, ctx));
       } else if (o.arrivesAt !== null) {
         const ids = this.awaitingFresh.get(o.symbol) ?? new Set<string>();
         ids.add(o.id);
@@ -459,7 +460,7 @@ export class EngineRunner {
    */
   private rearmWhenFresh(): void {
     if (this.awaitingFresh.size === 0) return;
-    const state = this.d.engine.state;
+    const state = this.d.sim.spot.state;
     const ctx = this.ctx();
     const delays = new Map<string, number>();
     const armed: { id: string; at: number }[] = [];
@@ -469,7 +470,7 @@ export class EngineRunner {
       this.awaitingFresh.delete(symbol);
       for (const id of ids) {
         if (state.orders.get(id)?.cancelArrivesAt != null) {
-          events.push(...this.d.engine.arriveCancelBeforeResend(id, ctx));
+          events.push(...this.d.sim.spot.arriveCancelBeforeResend(id, ctx));
         }
         const o = state.orders.get(id);
         if (!o || o.status !== 'pending') continue; // cancelled meanwhile
@@ -575,8 +576,8 @@ export class EngineRunner {
     const gaps = this.takeGap(symbol, now);
     if (this.violations.length > 0) {
       if (gaps.length > 0) this.commit([], gaps);
-    } else if (gaps.length > 0 || this.d.engine.hasDeferredWork(symbol, this.ctx())) {
-      this.apply((ctx) => this.d.engine.onFresh(symbol, ctx), gaps);
+    } else if (gaps.length > 0 || this.d.sim.spot.hasDeferredWork(symbol, this.ctx())) {
+      this.apply((ctx) => this.d.sim.spot.onFresh(symbol, ctx), gaps);
     }
     if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${symbol}` });
     return gaps.length > 0;
@@ -594,7 +595,7 @@ export class EngineRunner {
     const fresh = this.d.market.isFresh(symbol);
     const opened = !fresh && this.startGap(symbol, this.staleReason(symbol));
     const gaps = fresh && this.gaps.get(symbol)?.pollOnly !== true ? this.takeGap(symbol, now) : [];
-    this.apply((ctx) => this.d.engine.onTrade(symbol, trade, ctx), gaps);
+    this.apply((ctx) => this.d.sim.spot.onTrade(symbol, trade, ctx), gaps);
     if (fresh) this.markFresh(symbol, now);
     if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${symbol}` });
     if (opened || gaps.length > 0) this.broadcastHealth();
@@ -643,7 +644,7 @@ export class EngineRunner {
    */
   private snapshotEquity(): void {
     if (this.checkStall(this.d.now())) return;
-    const value = valueAccount(this.d.engine.state, (s) => this.d.market.bestBid(s), this.d.symbols);
+    const value = valueAccount(this.d.sim.spot.state, (s) => this.d.market.bestBid(s), this.d.symbols);
     if (value.coins.some((c) => !c.fresh)) return;
     insertEquitySnapshot(this.d.db, this.d.seasonId, value, this.d.now());
   }

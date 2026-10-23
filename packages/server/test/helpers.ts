@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
-import { D, SpotEngine } from '@sim/engine';
+import { D, SimEngine, SpotEngine } from '@sim/engine';
 import type { AggTrade, BookSnapshot, Decimal } from '@sim/engine';
 import { FakeMarket } from '../../engine/test/fixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
-import { loadSpotState } from '../src/db/store.ts';
+import { loadLedger, loadSpotState } from '../src/db/store.ts';
 import { FeedHealth } from '../src/market/feedHealth.ts';
 import { LocalBook } from '../src/market/localBook.ts';
 import { MarketData } from '../src/market/marketData.ts';
@@ -208,13 +208,15 @@ export async function liveStack(t0: number) {
   const market = new MarketData({ ...common, feed, books, health, rest });
   const db = openDb(':memory:');
   const seasonId = currentSeasonId(db, () => clock.now);
-  const engine = new SpotEngine(loadSpotState(db, seasonId, ['USDT', 'BTC']));
+  const ledger = loadLedger(db, seasonId, ['USDT', 'BTC']);
+  const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
+  const sim = new SimEngine(ledger, engine);
   const sent: RunnerMessage[] = [];
   const runner = new EngineRunner({
     ...common,
     db,
     seasonId,
-    engine,
+    sim,
     market,
     health,
     fees: { maker: D('0.001'), taker: D('0.001') },

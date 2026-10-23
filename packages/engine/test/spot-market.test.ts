@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import { RESTART_REASON, SpotEngine } from '../src/spot/engine.ts';
+import { emptyLedger, deposit } from '../src/account/ledger.ts';
 import { emptySpotState } from '../src/spot/state.ts';
 import type { EngineCtx, EngineEvent, SpotOrder, SpotOrderRequest, SpotRules } from '../src/types.ts';
 import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
@@ -11,10 +12,10 @@ const NOW = 1_000_000;
 function setup(usdt: string, opts: { btc?: string; rngValues?: number[] } = {}) {
   const market = new FakeMarket();
   const ctx = testCtx(market, { now: NOW, rngValues: opts.rngValues });
-  const engine = new SpotEngine(emptySpotState(['USDT', 'BTC']));
-  if (D(usdt).gt(0)) engine.deposit('spot', D(usdt), ctx);
+  const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
+  if (D(usdt).gt(0)) deposit(engine.state.ledger, 'spot', D(usdt), ctx);
   if (opts.btc) seedCoins(engine.state, 'BTC', D(opts.btc));
-  const bal = (asset: string) => engine.state.balances.spot[asset]!;
+  const bal = (asset: string) => engine.state.ledger.balances.spot[asset]!;
   return { market, ctx, engine, bal };
 }
 
@@ -544,11 +545,11 @@ describe('preview', () => {
 
   it('does not create balance rows for an asset the wallet has never held', () => {
     const ctx = testCtx(new FakeMarket(), { now: NOW });
-    const engine = new SpotEngine(emptySpotState(['USDT']));
-    const before = JSON.stringify(engine.state.balances);
+    const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT'])));
+    const before = JSON.stringify(engine.state.ledger.balances);
     expect(engine.preview(sell({ qty: '1' }), ctx).rejectReason).toBe('Insufficient BTC: need 1, available 0');
-    expect(JSON.stringify(engine.state.balances)).toBe(before);
-    expect('BTC' in engine.state.balances.spot).toBe(false);
+    expect(JSON.stringify(engine.state.ledger.balances)).toBe(before);
+    expect('BTC' in engine.state.ledger.balances.spot).toBe(false);
   });
 });
 

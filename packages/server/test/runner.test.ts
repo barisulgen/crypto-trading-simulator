@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { D, SpotEngine } from '@sim/engine';
+import { D, SimEngine, SpotEngine } from '@sim/engine';
 import type { AggTrade, SpotOrderRequest } from '@sim/engine';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
-import { loadSpotState, toJson, touchAlive } from '../src/db/store.ts';
+import { loadLedger, loadSpotState, toJson, touchAlive } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import { EngineRunner, RefusedError, RESTART_REASON, submittedOrder } from '../src/runner.ts';
 import { btcRules } from '../../engine/test/fixtures.ts';
@@ -53,7 +53,9 @@ function setup(opts: { db?: Db; market?: TestMarket; clock?: FakeClock } = {}) {
   const seasonId = currentSeasonId(db, () => clock.now);
   const market = opts.market ?? new TestMarket(SYMBOLS);
   const health = new FakeHealth(() => clock.now);
-  const engine = new SpotEngine(loadSpotState(db, seasonId, ASSETS));
+  const ledger = loadLedger(db, seasonId, ASSETS);
+  const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
+  const sim = new SimEngine(ledger, engine);
   const sent: Msg[] = [];
   const fatal: unknown[] = [];
   const logs: string[] = [];
@@ -61,7 +63,7 @@ function setup(opts: { db?: Db; market?: TestMarket; clock?: FakeClock } = {}) {
   const runner = new EngineRunner({
     db,
     seasonId,
-    engine,
+    sim,
     market,
     health,
     symbols: SYMBOLS,
@@ -229,7 +231,7 @@ describe('EngineRunner', () => {
     expect(RESTART_REASON).toBe('Server restarted before execution');
     expect(b.orderRow(market.id)!.status).toBe('rejected');
     expect(b.eventsOf('order_rejected').map((e) => e.payload.reason)).toEqual(['Server restarted before execution']);
-    expect(b.engine.state.balances.spot.USDT!.locked.toString()).toBe('99.5'); // the limit's lock only
+    expect(b.engine.state.ledger.balances.spot.USDT!.locked.toString()).toBe('99.5'); // the limit's lock only
 
     expect(b.engine.state.orders.get(limit.id)!.status).toBe('pending');
     // Not sent again before the symbol's data is first fresh after startup (not started: no health poll).
@@ -392,7 +394,7 @@ describe('EngineRunner', () => {
     expect(t.orderRow(order.id)!.status).toBe('cancelled');
     expect(t.eventsOf('order_cancelled').map((e) => [e.time, e.payload.reason])).toEqual([[at, 'user']]);
     expect(t.runner.openOrders()).toEqual([]);
-    expect(t.engine.state.balances.spot.USDT!.locked.toString()).toBe('0');
+    expect(t.engine.state.ledger.balances.spot.USDT!.locked.toString()).toBe('0');
     expect(t.fatal).toEqual([]);
   });
 
@@ -440,7 +442,7 @@ describe('EngineRunner', () => {
       [limit.id, 'user', b.clock.now],
       [pending.id, 'user', b.clock.now],
     ]);
-    expect(b.engine.state.balances.spot.USDT!.locked.toString()).toBe('0');
+    expect(b.engine.state.ledger.balances.spot.USDT!.locked.toString()).toBe('0');
     b.runner.start();
     b.clock.advance(5000);
     expect(b.orderRow(pending.id)!.status).toBe('cancelled');

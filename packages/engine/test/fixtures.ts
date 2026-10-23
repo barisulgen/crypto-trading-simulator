@@ -117,6 +117,6 @@ export function testCtx(
  * and a matching average-cost basis with an open round trip, so sells have a basis to realise against.
  */
 export function seedCoins(state: SpotState, asset: string, qty: Decimal, price: Decimal = D('100')): void {
-  state.balances.spot[asset] = { free: qty, locked: D(0) };
+  state.ledger.balances.spot[asset] = { free: qty, locked: D(0) };
   state.basis[asset] = { qty, cost: qty.mul(price), roundTripId: 'rt0', openedAt: 0, tripRealized: D(0) };
 }
