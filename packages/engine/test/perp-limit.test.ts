@@ -336,17 +336,86 @@ describe('marketable limit', () => {
   });
 
   it('short 0.3 @79985: hits the 79990 bid for 0.2, 0.1 rests', () => {
-    const { ctx, engine, lev } = setup('2000');
+    const { ctx, engine, lev, position } = setup('2000');
     const order = placed(engine.submit(limit('sell', '79985', '0.3'), ctx));
     // Assumed price 80120: IM 1201.8 + open loss 0.3 × 15 = 4.5 + taker fee 12.018.
     expect(s(order.lockAmount)).toBe('1218.318');
+    expect(s(lev().free)).toBe('781.682');
     const { fill, order: after } = fillOf(arriveNow(engine, order, ctx));
     expect(s(fill.qty)).toBe('0.2');
     expect(s(fill.price)).toBe('79990');
+    expect(s(fill.quote)).toBe('15998');
     expect(fill.liquidity).toBe('taker');
+    expect(s(fill.fee)).toBe('7.999');
+    expect(s(fill.marginIn)).toBe('799.9');
     expect(after.status).toBe('partially_filled');
+    // The taker part's share: 1218.318 × 0.2 ÷ 0.3 = 812.212; 12.312 of it released.
     expect(s(after.lockAmount)).toBe('406.106');
     expect(s(lev().locked)).toBe('406.106');
+    expect(s(lev().free)).toBe('793.994');
+    expect(position()!.side).toBe('short');
+    expect(s(position()!.margin)).toBe('791.901');
+  });
+});
+
+describe('a marketable opening limit is re-priced at arrival like a market order', () => {
+  it('a sell whose bids rose during the delay: rejected, the lock released, free never below 0', () => {
+    const { market, ctx, engine, lev, position } = setup('801.61');
+    engine.state.settings.BTCUSDT = { leverage: 1, marginMode: 'isolated' };
+    const order = placed(engine.submit(limit('sell', '80000', '0.01'), ctx));
+    // Assumed price 80120: IM 801.2 + taker fee 0.4006.
+    expect(s(order.lockAmount)).toBe('801.6006');
+    expect(s(lev().free)).toBe('0.0094');
+
+    // Bid, mark and last rise 0.4 % before the order arrives.
+    market.setBook('BTCUSDT', {
+      asks: [{ price: D('80330'), qty: D('1') }],
+      bids: [{ price: D('80320'), qty: D('1') }],
+    });
+    market.setMarkPrice('BTCUSDT', D('80320'));
+    market.setLastPrice('BTCUSDT', D('80320'));
+    // The walk at 80320 costs IM at max(80320, 80320, 80320 × 1.0015 = 80440.48) = 804.4048 + fee 0.4022024.
+    expect(rejectReason(arriveNow(engine, order, ctx))).toBe(
+      'Insufficient margin at execution: price moved (need 804.8070024, available 801.61)',
+    );
+    expect(s(lev().free)).toBe('801.61');
+    expect(s(lev().locked)).toBe('0');
+    expect(position()).toBeUndefined();
+  });
+
+  it('the part that will rest keeps its share of the lock in the check', () => {
+    const { ctx, engine, lev } = setup('1213.6');
+    const order = placed(engine.submit(limit('buy', '80005', '0.3'), ctx));
+    expect(s(order.lockAmount)).toBe('1213.57575');
+    // Taker 0.2 at the market cost 809.212 (IM at 80120) + the resting 0.1's share 404.52525.
+    expect(rejectReason(arriveNow(engine, order, ctx))).toBe(
+      'Insufficient margin at execution: price moved (need 1213.73725, available 1213.6)',
+    );
+    expect(s(lev().free)).toBe('1213.6');
+    expect(s(lev().locked)).toBe('0');
+  });
+
+  it('a buy whose funds cover the market cost of its walk fills as before', () => {
+    const { ctx, engine, lev, position } = setup('410');
+    const order = placed(engine.submit(limit('buy', '80005', '0.1'), ctx));
+    expect(s(order.lockAmount)).toBe('404.52525');
+    // Market cost of the walk: IM at 80120 = 400.6 + fee 4.006 = 404.606 ≤ 410.
+    const { fill, order: after } = fillOf(arriveNow(engine, order, ctx));
+    expect(s(fill.qty)).toBe('0.1');
+    expect(s(fill.price)).toBe('80000');
+    expect(after.status).toBe('filled');
+    expect(s(position()!.margin)).toBe('396');
+    expect(s(lev().free)).toBe('10');
+    expect(s(lev().locked)).toBe('0');
+  });
+
+  it('a reduce-only marketable limit is not re-priced: it adds no margin', () => {
+    const { ctx, engine, lev } = setup();
+    const open = placed(engine.submit(marketOrder('buy', '0.1'), ctx));
+    arriveNow(engine, open, ctx);
+    lev().free = D(0);
+    const order = placed(engine.submit(limit('sell', '79980', '0.1', { reduceOnly: true }), ctx));
+    expect(fillOf(arriveNow(engine, order, ctx)).order.status).toBe('filled');
   });
 });
 

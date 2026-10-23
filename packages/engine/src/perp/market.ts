@@ -105,8 +105,11 @@ export function opposite(s: PerpState, symbol: string, side: Side): Position | n
   return p && p.side !== positionSideOf(side) ? p : null;
 }
 
-/** The order cost of an opening market fill of `walk`: the lock at submit, the check at arrival. */
-function costOf(
+/**
+ * The order cost of an opening taker fill of `walk` at the market assumed price: a market order's
+ * lock at submit and check at arrival, and a marketable limit's check at arrival.
+ */
+export function costOf(
   side: Side,
   walk: WalkResult,
   qty: Decimal,

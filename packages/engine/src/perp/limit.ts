@@ -1,10 +1,19 @@
 import { D, Decimal, floorToStep, roundUp8 } from '../decimal.ts';
 import { walkBook } from '../book.ts';
+import type { WalkResult } from '../book.ts';
 import { isLimitType, POST_ONLY_REJECT } from '../spot/limit.ts';
 import { allocateTradeThrough } from '../spot/matching.ts';
 import { drift } from '../spot/orders.ts';
 import type { AggTrade, OrderStatus, Side } from '../types.ts';
-import { bracketsOrNull, estLiquidation, liveDataReason, opposite, positionChecks, validMark } from './market.ts';
+import {
+  bracketsOrNull,
+  costOf,
+  estLiquidation,
+  liveDataReason,
+  opposite,
+  positionChecks,
+  validMark,
+} from './market.ts';
 import { assumedPrice, orderCost, perpFee } from './math.ts';
 import {
   cancelOrder,
@@ -103,6 +112,9 @@ function planLimit(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): LimitPlan
   plan.position = checked.position;
 
   if (plan.position) {
+    // Reduce-only market orders in flight are not counted: each is trimmed to the position when it
+    // arrives, a maker fill takes at most the position, and a close cancels what is left, so no
+    // combination of them can reduce more than the position holds.
     const open = live
       .filter((o) => o.reduceOnly && isLimitType(o))
       .reduce((sum, o) => sum.plus(remainingQty(o)), D(0));
@@ -176,9 +188,29 @@ function applyFill(
 }
 
 /**
+ * Why an opening limit cannot take `walk` at arrival, or null. The taker part is re-priced like a
+ * market order (its order cost at the market assumed price and the current mark), plus the share
+ * of the lock the resting part keeps; the lock plus free USDT must cover both. A sell's taker part
+ * fills at bids at or above its price, which can be above the price its lock assumed.
+ */
+function shortOfMargin(s: PerpState, order: PerpOrder, walk: WalkResult, ctx: PerpCtx): string | null {
+  const mark = validMark(order.symbol, ctx);
+  if (!mark) return MARK_UNAVAILABLE;
+  const last = ctx.market.lastPrice(order.symbol);
+  if (!last) return `Last price unavailable for ${order.symbol}`;
+  const taker = costOf(order.side, walk, walk.qty, { mark, last, leverage: order.leverage }, ctx);
+  const need = taker.plus(order.lockAmount.minus(lockShare(order, walk.qty)));
+  const available = order.lockAmount.plus(freeUsdt(s));
+  if (need.lte(available)) return null;
+  return `Insufficient margin at execution: price moved (need ${need}, available ${available})`;
+}
+
+/**
  * Arrival of a pending limit or post-only order. A marketable limit takes the book up to its price
  * as a taker (no market price band: PERCENT_PRICE already bounds the price), a reduce-only one at
- * most the position, and the remainder rests as a maker; a marketable post-only is rejected.
+ * most the position, and the remainder rests as a maker; a marketable post-only is rejected. An
+ * opening limit whose lock plus free USDT no longer covers the taker part at the market cost is
+ * rejected whole (shortOfMargin).
  */
 export function arriveLimit(s: PerpState, order: PerpOrder, ctx: PerpCtx): PerpEvent[] {
   const symbol = order.symbol;
@@ -202,6 +234,10 @@ export function arriveLimit(s: PerpState, order: PerpOrder, ctx: PerpCtx): PerpE
   if (walk.qty.isZero()) {
     putOrder(s, { ...order, status: 'open' });
     return [];
+  }
+  if (!position) {
+    const short = shortOfMargin(s, order, walk, ctx);
+    if (short) return rejectPending(s, order, short, ctx);
   }
   const terms: PerpFillTerms = {
     qty: walk.qty,
@@ -243,6 +279,8 @@ function makerFill(s: PerpState, order: PerpOrder, allocated: Decimal, ctx: Perp
     position = opposite(s, order.symbol, order.side);
     // Closing a position cancels its reduce-only orders, so this is only a safeguard.
     if (!position) return cancelOrder(s, order, 'position_closed', remainingQty(order), ctx);
+    // Trimmed to the position, the rest of this allocation's trade volume is deliberately not
+    // offered to later orders: sharing it again could only fill the owner more (conservative).
     qty = Decimal.min(allocated, position.qty);
   }
   const price = order.price!;
