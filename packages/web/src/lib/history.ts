@@ -161,6 +161,11 @@ export const CANCEL_WORDS: Record<CancelReason, string> = {
   thin_book: 'book too thin',
   oco: 'other leg of the pair triggered',
   parent_cancelled: 'parent cancelled',
+  price_band: 'outside the market price band',
+  reduce_only: 'more than the position (reduce-only)',
+  position_closed: 'position closed',
+  liquidation: 'liquidation',
+  catch_up_unavailable: 'trade history unavailable',
 };
 
 const WALLET: Record<Wallet, string> = { spot: 'Spot', leverage: 'Leverage' };

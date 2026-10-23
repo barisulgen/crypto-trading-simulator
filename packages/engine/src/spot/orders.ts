@@ -267,12 +267,12 @@ export function present(s: string | undefined): boolean {
 }
 
 /** 100–300 ms, uniform. */
-export function arrivalDelay(ctx: EngineCtx): number {
+export function arrivalDelay(ctx: { rng(): number }): number {
   return 100 + Math.floor(ctx.rng() * 201);
 }
 
 /** Signed delay drift in USD: positive means the price moved against the owner. */
-function drift(side: Side, atSubmit: Decimal | null, atArrival: Decimal | null, qty: Decimal): Decimal {
+export function drift(side: Side, atSubmit: Decimal | null, atArrival: Decimal | null, qty: Decimal): Decimal {
   if (!atSubmit || !atArrival) return D(0);
   return side === 'buy' ? atArrival.minus(atSubmit).mul(qty) : atSubmit.minus(atArrival).mul(qty);
 }

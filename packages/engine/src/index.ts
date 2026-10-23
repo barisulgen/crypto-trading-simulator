@@ -15,6 +15,33 @@ export type { OcoRequest } from './spot/stops.ts';
 export { arrivalDelay } from './spot/orders.ts';
 export { applyBuyToBasis, applySellToBasis, emptyBasis, valueAccount } from './spot/accounting.ts';
 export type { AccountValue, CoinValue } from './spot/accounting.ts';
-export type { Bracket, PerpMarketView, PerpRules, PositionSide, TierSet, TierSource } from './perp/types.ts';
+export type {
+  Bracket,
+  PerpCtx,
+  PerpEvent,
+  PerpFill,
+  PerpMarketView,
+  PerpOrder,
+  PerpOrderRequest,
+  PerpOrderType,
+  PerpPreview,
+  PerpRules,
+  Position,
+  PositionCloseReason,
+  PositionSide,
+  TierSet,
+  TierSource,
+} from './perp/types.ts';
+export { PerpEngine } from './perp/engine.ts';
+export { MARK_UNAVAILABLE, validatePerpOrder } from './perp/rules.ts';
+export type { NormalizedPerpRequest } from './perp/rules.ts';
+export {
+  DEFAULT_LEVERAGE,
+  emptyPerpState,
+  evictTerminal as evictTerminalPerp,
+  putOrder as putPerpOrder,
+  takeDirty as takePerpDirty,
+} from './perp/state.ts';
+export type { FundingSide, FundingState, FundingWindow, PerpSettings, PerpState } from './perp/state.ts';
 export * from './perp/tiers.ts';
 export * from './perp/math.ts';

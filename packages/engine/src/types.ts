@@ -182,23 +182,44 @@ export interface RoundTrip {
   pnl: Decimal;
 }
 
-export type CancelReason = 'user' | 'thin_book' | 'oco' | 'parent_cancelled';
+export type CancelReason =
+  | 'user'
+  | 'thin_book'
+  | 'oco'
+  | 'parent_cancelled'
+  /** The market price band stopped a taker fill short. */
+  | 'price_band'
+  /** A reduce-only order asked for more than the position held. */
+  | 'reduce_only'
+  /** The position the order would reduce or close is gone. */
+  | 'position_closed'
+  | 'liquidation'
+  /** The trade history needed to replay a gap is no longer available. */
+  | 'catch_up_unavailable';
 
+/** Order, fill and round-trip events carry `market` only optionally: absent means spot. */
 export type EngineEvent =
   | { type: 'deposit'; time: number; wallet: Wallet; amount: Decimal; totalDeposited: Decimal }
   | { type: 'transfer'; time: number; from: Wallet; to: Wallet; amount: Decimal }
-  | { type: 'order_placed'; time: number; order: SpotOrder }
-  | { type: 'order_rejected'; time: number; order: SpotOrder; reason: string; afterTrigger?: boolean }
-  | { type: 'order_cancelled'; time: number; order: SpotOrder; reason: CancelReason; cancelledQty: Decimal }
+  | { type: 'order_placed'; market?: 'spot'; time: number; order: SpotOrder }
+  | { type: 'order_rejected'; market?: 'spot'; time: number; order: SpotOrder; reason: string; afterTrigger?: boolean }
+  | {
+      type: 'order_cancelled';
+      market?: 'spot';
+      time: number;
+      order: SpotOrder;
+      reason: CancelReason;
+      cancelledQty: Decimal;
+    }
   /** The owner's cancel arrived after the order had filled, triggered, been rejected or been cancelled. */
-  | { type: 'cancel_rejected'; time: number; order: SpotOrder; reason: string }
-  | { type: 'order_triggered'; time: number; order: SpotOrder; lastPrice: Decimal }
+  | { type: 'cancel_rejected'; market?: 'spot'; time: number; order: SpotOrder; reason: string }
+  | { type: 'order_triggered'; market?: 'spot'; time: number; order: SpotOrder; lastPrice: Decimal }
   /**
    * `consumed`: for a taker fill, the quantity it took at each book level (walk order), so the
    * market can hold those levels back from later walks; absent for a maker fill.
    */
-  | { type: 'fill'; time: number; fill: Fill; order: SpotOrder; consumed?: PriceLevel[] }
-  | { type: 'round_trip_closed'; time: number; roundTrip: RoundTrip };
+  | { type: 'fill'; market?: 'spot'; time: number; fill: Fill; order: SpotOrder; consumed?: PriceLevel[] }
+  | { type: 'round_trip_closed'; market?: 'spot'; time: number; roundTrip: RoundTrip };
 
 export type ActionResult = { ok: true; events: EngineEvent[] } | { ok: false; reason: string };
 
