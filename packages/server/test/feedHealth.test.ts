@@ -326,6 +326,43 @@ describe('FeedHealth of a connection without depth (trades, tickers and mark pri
     expect(h.reason('BTCUSDT', T + 500)).toBe('Disconnected');
   });
 
+  it('after a reconnect the mark waits for a current mark on the new connection', () => {
+    const h = mkMarket();
+    h.onFrame(T);
+    expect(h.isMarkFresh('BTCUSDT', T)).toBe(true);
+    h.onDisconnect(T + 500);
+    h.onConnect(T + 1000);
+    h.onFrame(T + 1000);
+    expect(h.isMarkFresh('BTCUSDT', T + 1000)).toBe(false);
+    expect(h.reason('BTCUSDT', T + 1000)).toBe('Waiting for mark price after reconnect');
+    h.onTrade('BTCUSDT', T + 1100, T + 1100); // a trade does not end the wait
+    expect(h.isMarkFresh('BTCUSDT', T + 1100)).toBe(false);
+    h.onMark('BTCUSDT', T + 1200, T + 1200 - 6000); // a late mark does not either
+    expect(h.isMarkFresh('BTCUSDT', T + 1200)).toBe(false);
+    h.onMark('BTCUSDT', T + 1300, T + 1300);
+    expect(h.isMarkFresh('BTCUSDT', T + 1300)).toBe(true);
+  });
+
+  it('a mark is as old as the older of its receive time and its exchange time', () => {
+    const h = mkMarket();
+    h.onMark('BTCUSDT', T, T - 4900); // received now, stamped 4.9 s ago
+    h.onFrame(T + 5000);
+    expect(h.isMarkFresh('BTCUSDT', T + 5100)).toBe(true); // age 10 000 by the exchange clock
+    h.onFrame(T + 5101);
+    expect(h.isMarkFresh('BTCUSDT', T + 5101)).toBe(false);
+    expect(h.reason('BTCUSDT', T + 5101)).toBe('No mark price for 10s');
+  });
+
+  it('the exchange time is corrected by the clock offset', () => {
+    const h = mkMarket();
+    h.setClockOffset(-3000); // Binance's clock is 3 s behind ours
+    h.onMark('BTCUSDT', T, T - 3000 - 2000); // 2 s old on our clock
+    h.onFrame(T + 8000);
+    expect(h.isMarkFresh('BTCUSDT', T + 8000)).toBe(true);
+    h.onFrame(T + 8001);
+    expect(h.isMarkFresh('BTCUSDT', T + 8001)).toBe(false);
+  });
+
   it('a spot connection ignores the mark', () => {
     const h = mk();
     expect(h.isFresh('BTCUSDT', 1000)).toBe(true); // no mark stream, no mark needed

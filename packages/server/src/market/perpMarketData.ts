@@ -124,9 +124,10 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
   }
 
   /**
-   * True when tiers are loaded afterwards. A failed load keeps the previous tiers, and so does one
-   * that reached only the bundled snapshot while tiers fetched from Binance are held: those are
-   * newer.
+   * True when tiers fetched from Binance are held afterwards. A failed load keeps the previous
+   * tiers, and so does one that reached only the bundled snapshot while tiers fetched from Binance
+   * are held: those are newer. The bundled snapshot is installed when nothing better is held, but
+   * the result is then false, so the poller keeps looking for a live source.
    */
   async refreshTiers(): Promise<boolean> {
     try {
@@ -137,10 +138,10 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
         return true;
       }
       this.tierSet = set;
-      return true;
+      return set.source !== 'bundled';
     } catch (e) {
       this.log.warn(`Leverage tiers refresh failed${this.tierSet ? '; keeping the previous tiers' : ''}: ${(e as Error).message}`);
-      return this.tierSet !== null;
+      return this.tierSet !== null && this.tierSet.source !== 'bundled';
     }
   }
 

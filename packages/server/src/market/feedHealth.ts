@@ -11,6 +11,7 @@ const SILENT_WAIT = 'Waiting for order-book update after a silent connection';
 const PAUSE_WAIT = 'Waiting for order-book update after a pause';
 const SILENT_MARK_WAIT = 'Waiting for mark price after a silent connection';
 const PAUSE_MARK_WAIT = 'Waiting for mark price after a pause';
+const RECONNECT_MARK_WAIT = 'Waiting for mark price after reconnect';
 
 export type Stream = 'depth' | 'trade' | 'ticker' | 'mark';
 
@@ -27,7 +28,10 @@ export interface FeedHealthOptions {
 interface SymState {
   bookValid: boolean;
   lastDepth: number | null;
-  /** When the last current (not late) mark price was received; null before the first. */
+  /**
+   * How old the last current (not late) mark price counts from: the earlier of when it was
+   * received and its exchange time on our clock; null before the first.
+   */
   lastMark: number | null;
   /** Lag in ms of the latest event of each stream; infinite when its event time was unusable. */
   lag: Record<Stream, number>;
@@ -51,6 +55,7 @@ export class FeedHealth {
   private readonly mark: boolean;
   private readonly markMaxAgeMs: number;
   private connected = false;
+  private connectedBefore = false;
   private lastFrame = 0;
   private connectAt = 0;
   private clockOffset = 0;
@@ -82,6 +87,11 @@ export class FeedHealth {
     this.connected = true;
     this.lastFrame = now;
     this.connectAt = now;
+    // A mark from before the drop says nothing about the new connection: wait for one on it.
+    if (this.mark && this.connectedBefore) {
+      for (const s of this.syms.values()) s.needsMark = RECONNECT_MARK_WAIT;
+    }
+    this.connectedBefore = true;
   }
 
   onDisconnect(_now: number): void {
@@ -150,7 +160,8 @@ export class FeedHealth {
   onMark(symbol: string, now: number, eventTime: number): void {
     const s = this.measure(symbol, 'mark', now, eventTime);
     if (this.late(s.lag.mark)) return;
-    s.lastMark = now;
+    // The older clock decides: a mark stamped well before it arrived is that old already.
+    s.lastMark = Math.min(now, eventTime - this.clockOffset);
     s.needsMark = null;
     if (!this.depth) this.caughtUp(s);
   }

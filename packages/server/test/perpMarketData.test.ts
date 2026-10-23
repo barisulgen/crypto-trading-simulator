@@ -378,6 +378,25 @@ describe('PerpMarketData refreshes', () => {
     t.md.stop();
   });
 
+  it('a bundled result counts as not yet loaded: the quick retry continues until a live source, then 24 h', async () => {
+    const t = stack();
+    const T = t.clock.now;
+    const results: TierSet['source'][] = ['bundled', 'bundled', 'official'];
+    t.setTiers(async () => tierSet(results.shift() ?? 'official', t.clock.now, ['BTCUSDT']));
+    t.md.start();
+    await t.advance(0);
+    expect(t.md.tierInfo()!.source).toBe('bundled'); // installed meanwhile
+    await t.advance(5000);
+    await t.advance(10_000);
+    expect(t.calls.tiers).toEqual([T, T + 5000, T + 15_000]);
+    expect(t.md.tierInfo()!.source).toBe('official');
+    await t.advance(60_000);
+    expect(t.calls.tiers).toHaveLength(3);
+    await t.advance(86_400_000 - 60_000);
+    expect(t.calls.tiers).toEqual([T, T + 5000, T + 15_000, T + 15_000 + 86_400_000]);
+    t.md.stop();
+  });
+
   it('a refresh that only reaches the bundled snapshot keeps tiers fetched live', async () => {
     const t = stack();
     await t.md.refreshTiers();
