@@ -7,7 +7,7 @@ export interface HealthCfg {
 const SILENT_WAIT = 'Waiting for order-book update after a silent connection';
 const PAUSE_WAIT = 'Waiting for order-book update after a pause';
 
-type Stream ='depth' | 'trade' | 'ticker';
+type Stream = 'depth' | 'trade' | 'ticker';
 
 interface SymState {
   bookValid: boolean;
