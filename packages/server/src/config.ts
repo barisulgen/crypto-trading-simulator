@@ -14,6 +14,8 @@ export interface Config {
   readonly appPassword: string | null;
   /** Non-enumerable: never serialised or iterated. */
   readonly secrets: string[];
+  /** Non-enumerable: the read-only Binance key pair, only when both are set; used for leverage tiers only. */
+  readonly binanceCredentials: { key: string; secret: string } | null;
 }
 
 export const COINS = ['BTC', 'ETH', 'SOL', 'NEAR', 'XRP', 'BNB', 'DOGE', 'SUI', 'HYPE', 'AVAX'];
@@ -78,5 +80,8 @@ export function loadConfig(
   } as Config;
   Object.defineProperty(config, 'secrets', { value: secrets, enumerable: false });
   Object.defineProperty(config, 'appPassword', { value: appPassword, enumerable: false });
+  const binanceCredentials =
+    merged.BINANCE_KEY && merged.BINANCE_SECRET ? Object.freeze({ key: merged.BINANCE_KEY, secret: merged.BINANCE_SECRET }) : null;
+  Object.defineProperty(config, 'binanceCredentials', { value: binanceCredentials, enumerable: false });
   return config;
 }

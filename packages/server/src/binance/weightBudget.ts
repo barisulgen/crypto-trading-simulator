@@ -49,6 +49,8 @@ export interface WeightBudgetDeps {
   budget?: number;
   maxWaitMs?: number;
   bulkHeadroom?: number;
+  /** Names the client in log lines (default 'Binance REST'). */
+  host?: string;
 }
 
 interface Reservation {
@@ -220,6 +222,6 @@ export class WeightBudget {
     const now = this.d.now();
     if (now - this.lastWaitLog < WAIT_LOG_EVERY_MS) return;
     this.lastWaitLog = now;
-    this.d.logger.warn(`Binance REST weight budget reached (used ${this.usedWeight}/${this.budget}); delaying requests`);
+    this.d.logger.warn(`${this.d.host ?? 'Binance REST'} weight budget reached (used ${this.usedWeight}/${this.budget}); delaying requests`);
   }
 }

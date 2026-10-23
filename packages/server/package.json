@@ -6,7 +6,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json",
-    "feed:smoke": "tsx scripts/feed-smoke.ts"
+    "feed:smoke": "tsx scripts/feed-smoke.ts",
+    "tiers:snapshot": "tsx scripts/update-tiers-snapshot.ts"
   },
   "dependencies": {
     "@fastify/static": "10.1.6",

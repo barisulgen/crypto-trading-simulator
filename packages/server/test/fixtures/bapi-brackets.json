@@ -1,0 +1,999 @@
+{
+  "code": "000000",
+  "message": null,
+  "messageDetail": null,
+  "data": {
+    "brackets": [
+      {
+        "symbol": "BTCUSDT",
+        "updateTime": 1755585384254,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 300000,
+            "bracketMaintenanceMarginRate": 0.004,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 101,
+            "maxOpenPosLeverage": 150
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 300000,
+            "bracketNotionalCap": 800000,
+            "bracketMaintenanceMarginRate": 0.005,
+            "cumFastMaintenanceAmount": 300,
+            "minOpenPosLeverage": 76,
+            "maxOpenPosLeverage": 100
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 800000,
+            "bracketNotionalCap": 3000000,
+            "bracketMaintenanceMarginRate": 0.0065,
+            "cumFastMaintenanceAmount": 1500,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 3000000,
+            "bracketNotionalCap": 12000000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 12000,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 12000000,
+            "bracketNotionalCap": 70000000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 132000,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 70000000,
+            "bracketNotionalCap": 100000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 482000,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 100000000,
+            "bracketNotionalCap": 230000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 2982000,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 230000000,
+            "bracketNotionalCap": 480000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 14482000,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 480000000,
+            "bracketNotionalCap": 600000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 26482000,
+            "minOpenPosLeverage": 4,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 10,
+            "bracketNotionalFloor": 600000000,
+            "bracketNotionalCap": 800000000,
+            "bracketMaintenanceMarginRate": 0.15,
+            "cumFastMaintenanceAmount": 41482000,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 3
+          },
+          {
+            "bracketSeq": 11,
+            "bracketNotionalFloor": 800000000,
+            "bracketNotionalCap": 1200000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 121482000,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 12,
+            "bracketNotionalFloor": 1200000000,
+            "bracketNotionalCap": 1800000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 421482000,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "ETHUSDT",
+        "updateTime": 1755585987074,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 300000,
+            "bracketMaintenanceMarginRate": 0.004,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 101,
+            "maxOpenPosLeverage": 150
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 300000,
+            "bracketNotionalCap": 800000,
+            "bracketMaintenanceMarginRate": 0.005,
+            "cumFastMaintenanceAmount": 300,
+            "minOpenPosLeverage": 76,
+            "maxOpenPosLeverage": 100
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 800000,
+            "bracketNotionalCap": 3000000,
+            "bracketMaintenanceMarginRate": 0.0065,
+            "cumFastMaintenanceAmount": 1500,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 3000000,
+            "bracketNotionalCap": 12000000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 12000,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 12000000,
+            "bracketNotionalCap": 50000000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 132000,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 50000000,
+            "bracketNotionalCap": 65000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 382000,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 65000000,
+            "bracketNotionalCap": 150000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 2007000,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 150000000,
+            "bracketNotionalCap": 320000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 9507000,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 320000000,
+            "bracketNotionalCap": 400000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 17507000,
+            "minOpenPosLeverage": 4,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 10,
+            "bracketNotionalFloor": 400000000,
+            "bracketNotionalCap": 530000000,
+            "bracketMaintenanceMarginRate": 0.15,
+            "cumFastMaintenanceAmount": 27507000,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 3
+          },
+          {
+            "bracketSeq": 11,
+            "bracketNotionalFloor": 530000000,
+            "bracketNotionalCap": 800000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 80507000,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 12,
+            "bracketNotionalFloor": 800000000,
+            "bracketNotionalCap": 1200000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 280507000,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "SOLUSDT",
+        "updateTime": 1750661353462,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 50000,
+            "bracketMaintenanceMarginRate": 0.005,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 76,
+            "maxOpenPosLeverage": 100
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 50000,
+            "bracketNotionalCap": 400000,
+            "bracketMaintenanceMarginRate": 0.0065,
+            "cumFastMaintenanceAmount": 75,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 400000,
+            "bracketNotionalCap": 1000000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 1475,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 1000000,
+            "bracketNotionalCap": 4000000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 11475,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 4000000,
+            "bracketNotionalCap": 8000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 31475,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 8000000,
+            "bracketNotionalCap": 40000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 231475,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 40000000,
+            "bracketNotionalCap": 80000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 2231475,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 80000000,
+            "bracketNotionalCap": 100000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 4231475,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 100000000,
+            "bracketNotionalCap": 200000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 16731475,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 10,
+            "bracketNotionalFloor": 200000000,
+            "bracketNotionalCap": 400000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 66731475,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "NEARUSDT",
+        "updateTime": 1738744397612,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 20000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 20000,
+            "bracketNotionalCap": 200000,
+            "bracketMaintenanceMarginRate": 0.015,
+            "cumFastMaintenanceAmount": 100,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 200000,
+            "bracketNotionalCap": 1000000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 1100,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 1000000,
+            "bracketNotionalCap": 2000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 6100,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 2000000,
+            "bracketNotionalCap": 10000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 56100,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 10000000,
+            "bracketNotionalCap": 20000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 556100,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 20000000,
+            "bracketNotionalCap": 25000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 1056100,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 25000000,
+            "bracketNotionalCap": 30000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 4181100,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 30000000,
+            "bracketNotionalCap": 35000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 11681100,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "XRPUSDT",
+        "updateTime": 1752765198799,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 40000,
+            "bracketMaintenanceMarginRate": 0.005,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 76,
+            "maxOpenPosLeverage": 100
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 40000,
+            "bracketNotionalCap": 80000,
+            "bracketMaintenanceMarginRate": 0.006,
+            "cumFastMaintenanceAmount": 40,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 80000,
+            "bracketNotionalCap": 150000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 360,
+            "minOpenPosLeverage": 41,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 150000,
+            "bracketNotionalCap": 400000,
+            "bracketMaintenanceMarginRate": 0.0125,
+            "cumFastMaintenanceAmount": 735,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 40
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 400000,
+            "bracketNotionalCap": 1000000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 3735,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 1000000,
+            "bracketNotionalCap": 2000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 8735,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 2000000,
+            "bracketNotionalCap": 10000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 58735,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 10000000,
+            "bracketNotionalCap": 20000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 558735,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 20000000,
+            "bracketNotionalCap": 25000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 1058735,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 10,
+            "bracketNotionalFloor": 25000000,
+            "bracketNotionalCap": 50000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 4183735,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 11,
+            "bracketNotionalFloor": 50000000,
+            "bracketNotionalCap": 100000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 16683735,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "BNBUSDT",
+        "updateTime": 1755759462839,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 10000,
+            "bracketMaintenanceMarginRate": 0.005,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 10000,
+            "bracketNotionalCap": 200000,
+            "bracketMaintenanceMarginRate": 0.006,
+            "cumFastMaintenanceAmount": 10,
+            "minOpenPosLeverage": 41,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 200000,
+            "bracketNotionalCap": 400000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 810,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 40
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 400000,
+            "bracketNotionalCap": 1500000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 4810,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 1500000,
+            "bracketNotionalCap": 3000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 12310,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 3000000,
+            "bracketNotionalCap": 15000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 87310,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 15000000,
+            "bracketNotionalCap": 30000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 837310,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 30000000,
+            "bracketNotionalCap": 37500000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 1587310,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 37500000,
+            "bracketNotionalCap": 75000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 6274810,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 10,
+            "bracketNotionalFloor": 75000000,
+            "bracketNotionalCap": 150000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 25024810,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "DOGEUSDT",
+        "updateTime": 1750753266160,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 80000,
+            "bracketMaintenanceMarginRate": 0.0065,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 80000,
+            "bracketNotionalCap": 150000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 280,
+            "minOpenPosLeverage": 41,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 150000,
+            "bracketNotionalCap": 750000,
+            "bracketMaintenanceMarginRate": 0.0125,
+            "cumFastMaintenanceAmount": 655,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 40
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 750000,
+            "bracketNotionalCap": 2000000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 6280,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 2000000,
+            "bracketNotionalCap": 4000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 16280,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 4000000,
+            "bracketNotionalCap": 20000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 116280,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 20000000,
+            "bracketNotionalCap": 40000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 1116280,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 40000000,
+            "bracketNotionalCap": 50000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 2116280,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 50000000,
+            "bracketNotionalCap": 100000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 8366280,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 10,
+            "bracketNotionalFloor": 100000000,
+            "bracketNotionalCap": 200000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 33366280,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "SUIUSDT",
+        "updateTime": 1727685212935,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 20000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 20000,
+            "bracketNotionalCap": 200000,
+            "bracketMaintenanceMarginRate": 0.015,
+            "cumFastMaintenanceAmount": 100,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 200000,
+            "bracketNotionalCap": 1000000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 1100,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 1000000,
+            "bracketNotionalCap": 2000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 6100,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 2000000,
+            "bracketNotionalCap": 10000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 56100,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 10000000,
+            "bracketNotionalCap": 20000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 556100,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 20000000,
+            "bracketNotionalCap": 25000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 1056100,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 25000000,
+            "bracketNotionalCap": 50000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 4181100,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 50000000,
+            "bracketNotionalCap": 100000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 16681100,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "HYPEUSDT",
+        "updateTime": 1757404074315,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 20000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 20000,
+            "bracketNotionalCap": 200000,
+            "bracketMaintenanceMarginRate": 0.015,
+            "cumFastMaintenanceAmount": 100,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 200000,
+            "bracketNotionalCap": 1000000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 1100,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 1000000,
+            "bracketNotionalCap": 2000000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 6100,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 2000000,
+            "bracketNotionalCap": 5000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 56100,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 5000000,
+            "bracketNotionalCap": 7500000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 306100,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 7500000,
+            "bracketNotionalCap": 10000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 493600,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 10000000,
+            "bracketNotionalCap": 12500000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 1743600,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 12500000,
+            "bracketNotionalCap": 15000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 4868600,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      },
+      {
+        "symbol": "AVAXUSDT",
+        "updateTime": 1733387441590,
+        "notionalLimit": 100,
+        "riskBrackets": [
+          {
+            "bracketSeq": 1,
+            "bracketNotionalFloor": 0,
+            "bracketNotionalCap": 25000,
+            "bracketMaintenanceMarginRate": 0.005,
+            "cumFastMaintenanceAmount": 0,
+            "minOpenPosLeverage": 51,
+            "maxOpenPosLeverage": 75
+          },
+          {
+            "bracketSeq": 2,
+            "bracketNotionalFloor": 25000,
+            "bracketNotionalCap": 80000,
+            "bracketMaintenanceMarginRate": 0.01,
+            "cumFastMaintenanceAmount": 125,
+            "minOpenPosLeverage": 41,
+            "maxOpenPosLeverage": 50
+          },
+          {
+            "bracketSeq": 3,
+            "bracketNotionalFloor": 80000,
+            "bracketNotionalCap": 160000,
+            "bracketMaintenanceMarginRate": 0.015,
+            "cumFastMaintenanceAmount": 525,
+            "minOpenPosLeverage": 26,
+            "maxOpenPosLeverage": 40
+          },
+          {
+            "bracketSeq": 4,
+            "bracketNotionalFloor": 160000,
+            "bracketNotionalCap": 800000,
+            "bracketMaintenanceMarginRate": 0.02,
+            "cumFastMaintenanceAmount": 1325,
+            "minOpenPosLeverage": 21,
+            "maxOpenPosLeverage": 25
+          },
+          {
+            "bracketSeq": 5,
+            "bracketNotionalFloor": 800000,
+            "bracketNotionalCap": 1600000,
+            "bracketMaintenanceMarginRate": 0.025,
+            "cumFastMaintenanceAmount": 5325,
+            "minOpenPosLeverage": 11,
+            "maxOpenPosLeverage": 20
+          },
+          {
+            "bracketSeq": 6,
+            "bracketNotionalFloor": 1600000,
+            "bracketNotionalCap": 8000000,
+            "bracketMaintenanceMarginRate": 0.05,
+            "cumFastMaintenanceAmount": 45325,
+            "minOpenPosLeverage": 6,
+            "maxOpenPosLeverage": 10
+          },
+          {
+            "bracketSeq": 7,
+            "bracketNotionalFloor": 8000000,
+            "bracketNotionalCap": 16000000,
+            "bracketMaintenanceMarginRate": 0.1,
+            "cumFastMaintenanceAmount": 445325,
+            "minOpenPosLeverage": 5,
+            "maxOpenPosLeverage": 5
+          },
+          {
+            "bracketSeq": 8,
+            "bracketNotionalFloor": 16000000,
+            "bracketNotionalCap": 20000000,
+            "bracketMaintenanceMarginRate": 0.125,
+            "cumFastMaintenanceAmount": 845325,
+            "minOpenPosLeverage": 3,
+            "maxOpenPosLeverage": 4
+          },
+          {
+            "bracketSeq": 9,
+            "bracketNotionalFloor": 20000000,
+            "bracketNotionalCap": 40000000,
+            "bracketMaintenanceMarginRate": 0.25,
+            "cumFastMaintenanceAmount": 3345325,
+            "minOpenPosLeverage": 2,
+            "maxOpenPosLeverage": 2
+          },
+          {
+            "bracketSeq": 10,
+            "bracketNotionalFloor": 40000000,
+            "bracketNotionalCap": 80000000,
+            "bracketMaintenanceMarginRate": 0.5,
+            "cumFastMaintenanceAmount": 13345325,
+            "minOpenPosLeverage": 1,
+            "maxOpenPosLeverage": 1
+          }
+        ]
+      }
+    ],
+    "version": "1792793343837_1792793343837"
+  },
+  "success": true
+}

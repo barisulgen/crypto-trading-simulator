@@ -28,6 +28,15 @@ describe('loadConfig', () => {
     expect(c.secrets).toEqual([]);
   });
 
+  it('exposes the Binance key pair only when both are set, never enumerably', () => {
+    const c = loadConfig(fx('test.env'), {});
+    expect(c.binanceCredentials).toEqual({ key: 'k123', secret: 's456' });
+    expect(Object.keys(c)).not.toContain('binanceCredentials');
+    expect(JSON.stringify(c)).not.toContain('k123');
+    expect(loadConfig(fx('test.env'), { BINANCE_SECRET: '' }).binanceCredentials).toBeNull();
+    expect(loadConfig(fx('missing.env'), {}).binanceCredentials).toBeNull();
+  });
+
   it('process env wins over the file', () => {
     const c = loadConfig(fx('test.env'), { BINANCE_KEY: 'zzz' });
     expect(c.secrets).toEqual(['zzz', 's456']);

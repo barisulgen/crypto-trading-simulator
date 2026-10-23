@@ -8,6 +8,15 @@ describe('redact', () => {
     expect(redact('{"X-MBX-APIKEY":"abcd","a":1}', [])).toBe('{"X-MBX-APIKEY":"[REDACTED]","a":1}');
     expect(redact('k123 and k123', ['k123'])).toBe('[REDACTED] and [REDACTED]');
   });
+  it('redacts the key header however it is quoted, and a signature as a JSON field', () => {
+    expect(redact("{ 'X-MBX-APIKEY': 'abcd' }", [])).toBe("{ 'X-MBX-APIKEY': '[REDACTED]' }");
+    expect(redact("headers: { 'x-mbx-apikey': 'abcd' }", [])).toBe("headers: { 'x-mbx-apikey': '[REDACTED]' }");
+    expect(redact('X-MBX-APIKEY=abcd&x=1', [])).toBe('X-MBX-APIKEY=[REDACTED]&x=1');
+    expect(redact('/fapi/v1/leverageBracket?timestamp=1&recvWindow=5000&signature=0fab9', [])).toBe(
+      '/fapi/v1/leverageBracket?timestamp=1&recvWindow=5000&signature=[REDACTED]',
+    );
+    expect(redact('{"signature":"0fab9"}', [])).toBe('{"signature":"[REDACTED]"}');
+  });
   it('handles regex metacharacters in secrets and ignores empty ones', () => {
     expect(redact('a.b*c and axbbc', ['a.b*c', ''])).toBe('[REDACTED] and axbbc');
   });

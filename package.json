@@ -17,6 +17,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "start:server": "tsx packages/server/src/main.ts",
     "feed:smoke": "npm run feed:smoke -w @sim/server",
+    "tiers:snapshot": "npm run tiers:snapshot -w @sim/server",
     "db:wipe": "tsx packages/server/scripts/wipe.ts"
   },
   "devDependencies": {

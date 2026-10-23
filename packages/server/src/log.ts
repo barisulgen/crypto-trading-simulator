@@ -16,8 +16,10 @@ export function redact(text: string, secrets: readonly string[]): string {
     out = out.replace(new RegExp(escapeRe(s), 'g'), '[REDACTED]');
   }
   out = out.replace(/signature=[^&\s"']*/gi, 'signature=[REDACTED]');
-  out = out.replace(/("?X-MBX-APIKEY"?\s*[:=]\s*)"[^"]*"/gi, '$1"[REDACTED]"');
-  out = out.replace(/(X-MBX-APIKEY\s*:\s*)[^\s",}]+/gi, '$1[REDACTED]');
+  out = out.replace(/(["']signature["']\s*:\s*)(["'])[^"']*\2/gi, '$1$2[REDACTED]$2');
+  // quoted values ("…" or '…'), then bare ones (header lines, query strings)
+  out = out.replace(/(["']?X-MBX-APIKEY["']?\s*[:=]\s*)(["'])[^"']*\2/gi, '$1$2[REDACTED]$2');
+  out = out.replace(/(X-MBX-APIKEY["']?\s*[:=]\s*)(?!["'[])[^\s"',}&]+/gi, '$1[REDACTED]');
   return out;
 }
 
