@@ -1192,6 +1192,8 @@ describe('preview', () => {
 describe('hasDeferredWork', () => {
   const attach = { stopLoss: '95', takeProfit: '110' };
   const orders = (engine: SpotEngine) => JSON.stringify([...engine.state.orders.values()]);
+  /** The ctx at another time. */
+  const when = (ctx: EngineCtx, now: number): EngineCtx => ({ ...ctx, now });
 
   it('false for armed stops, resting limits and orders still on their way', () => {
     const { ctx, engine } = setup();
@@ -1199,39 +1201,46 @@ describe('hasDeferredWork', () => {
     const resting = placed(engine.submit(limit('buy', '99.50', '1'), ctx));
     arriveNow(engine, resting, ctx);
     placed(engine.submit(limit('buy', '99.40', '1'), ctx)); // pending, arrives later
-    expect(engine.hasDeferredWork('BTCUSDT', ctx.now)).toBe(false);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, ctx.now))).toBe(false);
   });
 
   it('a triggered order: true once due or deferred by stale data, for its own symbol only; false once executed', () => {
     const { market, ctx, engine } = setup();
     const triggered = armAndTrigger(engine, sellStop('99.00', '1'), '99.00', ctx);
-    expect(engine.hasDeferredWork('BTCUSDT', triggered.arrivesAt! - 1)).toBe(false);
-    expect(engine.hasDeferredWork('BTCUSDT', triggered.arrivesAt!)).toBe(true);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, triggered.arrivesAt! - 1))).toBe(false);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, triggered.arrivesAt!))).toBe(true);
 
     market.setFresh('BTCUSDT', false);
     arriveNow(engine, triggered, ctx); // stale: deferred, arrivesAt null
     const before = orders(engine);
-    expect(engine.hasDeferredWork('BTCUSDT', ctx.now)).toBe(true);
-    expect(engine.hasDeferredWork('ETHUSDT', ctx.now)).toBe(false);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, ctx.now))).toBe(true);
+    expect(engine.hasDeferredWork('ETHUSDT', when(ctx, ctx.now))).toBe(false);
     expect(orders(engine)).toBe(before); // reads only
 
     market.setFresh('BTCUSDT', true);
     expect(fillOf(engine.onFresh('BTCUSDT', ctx)).order.status).toBe('filled');
-    expect(engine.hasDeferredWork('BTCUSDT', ctx.now)).toBe(false);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, ctx.now))).toBe(false);
   });
 
-  it('an attached pair waiting for data: true until it arms', () => {
+  it('an attached pair waiting for data: true once it can arm (fresh, with a last price), until it arms', () => {
     const { market, ctx, engine } = setup();
     const parent = placed(engine.submit(limit('buy', '99.50', '1', { attach }), ctx));
     arriveNow(engine, parent, ctx);
     engine.onTrade('BTCUSDT', trade('99.40', '0.5', true), ctx);
     market.setFresh('BTCUSDT', false);
     cancelNow(engine, parent.id, ctx); // the pair is placed while stale: its legs wait
-    expect(engine.hasDeferredWork('BTCUSDT', ctx.now)).toBe(true);
+    expect(engine.hasDeferredWork('BTCUSDT', ctx)).toBe(false); // still stale
 
     market.setFresh('BTCUSDT', true);
+    market.setLastPrice('BTCUSDT', null);
+    const before = orders(engine);
+    expect(engine.hasDeferredWork('BTCUSDT', ctx)).toBe(false); // no last price: onFresh could not arm it
+    expect(orders(engine)).toBe(before); // reads only
+    market.setLastPrice('BTCUSDT', D('99.95'));
+    expect(engine.hasDeferredWork('BTCUSDT', ctx)).toBe(true);
+
     expect(engine.onFresh('BTCUSDT', ctx)).toEqual([]);
-    expect(engine.hasDeferredWork('BTCUSDT', ctx.now)).toBe(false);
+    expect(engine.hasDeferredWork('BTCUSDT', ctx)).toBe(false);
   });
 
   it('a cancel: true once its arrival time has passed, unless the order\'s own earlier arrival goes first', () => {
@@ -1239,21 +1248,21 @@ describe('hasDeferredWork', () => {
     const id = arm(engine, stop('buy', 'stop_loss', '101', { quoteQty: '50.5' }), ctx);
     expect(engine.cancel(id, ctx).ok).toBe(true);
     const at = engine.state.orders.get(id)!.cancelArrivesAt!;
-    expect(engine.hasDeferredWork('BTCUSDT', at - 1)).toBe(false);
-    expect(engine.hasDeferredWork('BTCUSDT', at)).toBe(true);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, at - 1))).toBe(false);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, at))).toBe(true);
 
     market.clearRules('BTCUSDT'); // the cancel waits in flight for the rules
     ctx.now = at + 5000;
     expect(engine.arriveCancel(id, ctx)).toEqual([]);
-    expect(engine.hasDeferredWork('BTCUSDT', ctx.now)).toBe(true);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, ctx.now))).toBe(true);
     market.setRules('BTCUSDT', btcRules);
     only(engine.onFresh('BTCUSDT', ctx), 'order_cancelled');
-    expect(engine.hasDeferredWork('BTCUSDT', ctx.now)).toBe(false);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, ctx.now))).toBe(false);
 
     // Order and cancel both due, the order's arrival first: left to arrive() and arriveCancel().
     const pending = placed(engine.submit(sellStop('99', '0.5'), ctx));
     expect(engine.cancel(pending.id, ctx).ok).toBe(true);
     expect(pending.arrivesAt!).toBeLessThanOrEqual(engine.state.orders.get(pending.id)!.cancelArrivesAt!);
-    expect(engine.hasDeferredWork('BTCUSDT', ctx.now + 10_000)).toBe(false);
+    expect(engine.hasDeferredWork('BTCUSDT', when(ctx, ctx.now + 10_000))).toBe(false);
   });
 });

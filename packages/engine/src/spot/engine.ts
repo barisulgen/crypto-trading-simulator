@@ -41,6 +41,7 @@ import {
   arriveStop,
   arriveTriggered,
   attachOco,
+  canArmNow,
   cancelRequested,
   cancelStop,
   dueTriggered,
@@ -192,13 +193,15 @@ export class SpotEngine {
   }
 
   /**
-   * Whether onFresh has work for `symbol` at `now`: a cancel whose arrival time has passed, an
-   * attached pair waiting for data, or a triggered order that is due (deferred by stale data
-   * included). Reads state only; it does not look at the market.
+   * Whether onFresh has work for `symbol` at ctx.now: a cancel whose arrival time has passed, an
+   * attached pair waiting for data that can arm now (fresh book and a last price), or a triggered
+   * order that is due (deferred by stale data included). Reads only.
    */
-  hasDeferredWork(symbol: string, now: number): boolean {
+  hasDeferredWork(symbol: string, ctx: EngineCtx): boolean {
+    const canArm = canArmNow(symbol, ctx);
     for (const o of this.s.orders.values()) {
-      if (o.symbol === symbol && (cancelDue(o, now) || waitingToArm(o) || dueTriggered(o, now))) return true;
+      if (o.symbol !== symbol) continue;
+      if (cancelDue(o, ctx.now) || dueTriggered(o, ctx.now) || (canArm && waitingToArm(o))) return true;
     }
     return false;
   }

@@ -145,7 +145,7 @@ export function arriveStop(s: SpotState, order: SpotOrder, ctx: EngineCtx): Engi
 }
 
 /** Our data can judge "would trigger now": the book is fresh and there is a last price. */
-function canArmNow(symbol: string, ctx: EngineCtx): boolean {
+export function canArmNow(symbol: string, ctx: EngineCtx): boolean {
   return ctx.market.isFresh(symbol) && ctx.market.lastPrice(symbol) !== null;
 }
 
