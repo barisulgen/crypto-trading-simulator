@@ -231,6 +231,21 @@ describe('FeedHealth', () => {
     h.onConnect(12_000);
     expect(h.lastFrameAt()).toBe(12_000);
   });
+  it('markStalled: every symbol waits for its own current depth event, with the pause as the reason', () => {
+    const h = mk();
+    h.onDepth('ETHUSDT', 0, 0);
+    h.onFrame(1000);
+    h.markStalled(2000);
+    for (const s of ['BTCUSDT', 'ETHUSDT']) {
+      expect(h.reason(s, 2000)).toBe('Waiting for order-book update after a pause');
+    }
+    h.onTrade('BTCUSDT', 2100, 2100); // a current trade does not end the wait
+    h.onDepth('BTCUSDT', 2200, 2200 - 6000); // nor does a late depth event
+    expect(h.isFresh('BTCUSDT', 2200)).toBe(false);
+    h.onDepth('BTCUSDT', 2300, 2300);
+    expect(h.isFresh('BTCUSDT', 2300)).toBe(true);
+    expect(h.reason('ETHUSDT', 2300)).toBe('Waiting for order-book update after a pause');
+  });
   it('throws on unknown symbol', () => {
     expect(() => mk().reason('XXX', 0)).toThrow('Unknown symbol XXX');
   });

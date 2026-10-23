@@ -88,8 +88,11 @@ export interface RunnerDeps {
   seasonId: number;
   engine: SpotEngine;
   market: RunnerMarket;
-  /** FeedHealth (or a stand-in): when the last frame of the live data connection was received. */
-  health: { lastFrameAt(): number };
+  /**
+   * FeedHealth (or a stand-in): when the last frame of the live data connection was received,
+   * and the notice that the process was paused, so every book waits for current depth data.
+   */
+  health: { lastFrameAt(): number; markStalled(now: number): void };
   symbols: string[];
   fees: FeeSchedule;
   now: () => number;
@@ -132,6 +135,7 @@ export class EngineRunner {
    * still tolerated is not counted as fresh once it turns out longer.
    */
   private readonly lastFreshAt = new Map<string, number>();
+  /** The last health poll, or the moment a pause was handled. */
   private lastPollAt: number | null = null;
   /** Per symbol, the pending orders re-sent after a restart: they wait for its first fresh data. */
   private readonly awaitingFresh = new Map<string, Set<string>>();
@@ -337,20 +341,31 @@ export class EngineRunner {
 
   /** arrive() at arrivesAt; the engine ignores orders no longer waiting. */
   private scheduleArrival(orderId: string, arrivesAt: number): void {
-    this.scheduleAt(arrivesAt, (ctx) => this.d.engine.arrive(orderId, ctx));
+    this.scheduleAt(arrivesAt, orderId, (ctx) => this.d.engine.arrive(orderId, ctx));
   }
 
   /** arriveCancel() at cancelArrivesAt; the engine ignores orders with no cancel in flight. */
   private scheduleCancel(orderId: string, cancelArrivesAt: number): void {
-    this.scheduleAt(cancelArrivesAt, (ctx) => this.d.engine.arriveCancel(orderId, ctx));
+    this.scheduleAt(cancelArrivesAt, orderId, (ctx) => this.d.engine.arriveCancel(orderId, ctx));
   }
 
-  /** One engine call at time `at` (re-armed if the timer fires early), persisted like any other. */
-  private scheduleAt(at: number, call: (ctx: EngineCtx) => EngineEvent[]): void {
+  /**
+   * One engine call for an order at time `at` (re-armed if the timer fires early), persisted like
+   * any other. A pause is handled first; then stale data on the order's symbol, which the engine
+   * acts on (a deferred or rejected order), opens a gap before the call.
+   */
+  private scheduleAt(at: number, orderId: string, call: (ctx: EngineCtx) => EngineEvent[]): void {
     const fire = () => {
       const left = at - this.d.now();
       if (left > 0) return this.timer(fire, left);
-      this.background(() => this.apply(call));
+      this.background(() => {
+        this.checkStall(this.d.now());
+        const symbol = this.d.engine.state.orders.get(orderId)?.symbol;
+        if (symbol !== undefined && !this.d.market.isFresh(symbol) && this.startGap(symbol, this.staleReason(symbol))) {
+          this.broadcastHealth();
+        }
+        this.apply(call);
+      });
     };
     this.timer(fire, Math.max(0, at - this.d.now()));
   }
@@ -471,24 +486,43 @@ export class EngineRunner {
    * Stale data opens a gap. Fresh data closes the open gap, recorded as a feed_gap in the same
    * transaction as onFresh; with no gap open, onFresh still runs when the engine has deferred work
    * for the symbol, so work deferred during a stale stretch that no poll saw does not wait for a
-   * trade. A poll more than STALL_MS after the previous one means the process was paused in
-   * between (sleep, freeze): every symbol is treated as stale from the previous poll, even if its
-   * data looks fresh now, and that gap closes only at a later poll that finds it fresh. Last, the
-   * orders held back since startup whose data is now fresh are re-sent.
+   * trade. A poll that finds the process was paused (checkStall) does only that. Last, the orders
+   * held back since startup whose data is now fresh are re-sent.
    */
   private pollHealth(): void {
     const now = this.d.now();
-    const prev = this.lastPollAt;
+    const paused = this.checkStall(now);
     this.lastPollAt = now;
-    const pausedSince = prev !== null && now - prev > STALL_MS ? prev : null;
     let changed = false;
-    for (const symbol of this.d.symbols) {
-      if (pausedSince !== null) changed = this.startGap(symbol, PAUSED_REASON, pausedSince) || changed;
-      else if (!this.d.market.isFresh(symbol)) changed = this.startGap(symbol, this.staleReason(symbol)) || changed;
+    for (const symbol of paused ? [] : this.d.symbols) {
+      if (!this.d.market.isFresh(symbol)) changed = this.startGap(symbol, this.staleReason(symbol)) || changed;
       else changed = this.freshAtPoll(symbol, now) || changed;
     }
     if (changed) this.broadcastHealth();
     this.rearmWhenFresh();
+  }
+
+  /**
+   * More than STALL_MS since the last poll means the process was paused (sleep, event-loop
+   * freeze). Every poll, timer-driven engine call and trade checks this first, and whichever runs
+   * first after the pause handles it, once: every symbol is treated as stale from the last poll,
+   * even if its data looks fresh (a gap opens there, or the open gap is kept; either closes only
+   * at a poll that finds the symbol fresh), and the feed health makes every book wait for a
+   * current depth event, so nothing executes on a book from before the pause. Returns whether
+   * there was a pause.
+   */
+  private checkStall(now: number): boolean {
+    const since = this.lastPollAt;
+    if (!this.started || since === null || now - since <= STALL_MS) return false;
+    this.lastPollAt = now;
+    this.d.health.markStalled(now);
+    for (const symbol of this.d.symbols) {
+      const open = this.gaps.get(symbol);
+      if (open) open.pollOnly = true;
+      else this.startGap(symbol, PAUSED_REASON, since);
+    }
+    this.broadcastHealth();
+    return true;
   }
 
   /** A health poll found the symbol fresh. Returns whether its gap closed. */
@@ -497,7 +531,7 @@ export class EngineRunner {
     const gaps = this.takeGap(symbol, now);
     if (this.violations.length > 0) {
       if (gaps.length > 0) this.commit([], gaps);
-    } else if (gaps.length > 0 || this.d.engine.hasDeferredWork(symbol, now)) {
+    } else if (gaps.length > 0 || this.d.engine.hasDeferredWork(symbol, this.ctx())) {
       this.apply((ctx) => this.d.engine.onFresh(symbol, ctx), gaps);
     }
     if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${symbol}` });
@@ -512,6 +546,7 @@ export class EngineRunner {
    */
   private onTrade(symbol: string, trade: AggTrade): void {
     const now = this.d.now();
+    this.checkStall(now);
     const fresh = this.d.market.isFresh(symbol);
     const opened = !fresh && this.startGap(symbol, this.staleReason(symbol));
     const gaps = fresh && this.gaps.get(symbol)?.pollOnly !== true ? this.takeGap(symbol, now) : [];
@@ -528,14 +563,14 @@ export class EngineRunner {
   /**
    * Opens the symbol's gap, saved at once so a crash keeps its start: the last fresh moment, or
    * the poll before a pause if that is earlier, or the last frame received if that is earlier
-   * still (after a silent stretch nothing after that frame is known). An open gap is kept. A
-   * symbol not fresh since startup has none to open: the time before is its startup gap.
-   * Returns whether it opened.
+   * still (after a silent stretch nothing after that frame is known), and never after now (the
+   * wall clock can step back). An open gap is kept. A symbol not fresh since startup has none to
+   * open: the time before is its startup gap. Returns whether it opened.
    */
   private startGap(symbol: string, reason: string, pausedSince: number | null = null): boolean {
     const lastFresh = this.lastFreshAt.get(symbol);
     if (this.gaps.has(symbol) || lastFresh === undefined) return false;
-    const at = Math.min(pausedSince ?? Infinity, lastFresh, this.d.health.lastFrameAt());
+    const at = Math.min(pausedSince ?? Infinity, lastFresh, this.d.health.lastFrameAt(), this.d.now());
     openGap(this.d.db, this.d.seasonId, { market: 'spot', symbol, startedAt: at, reason });
     this.gaps.set(symbol, { at, reason, pollOnly: pausedSince !== null });
     this.notice({ kind: 'feed_gap', level: 'warn', text: `Live data interrupted for ${symbol}: ${reason}` });

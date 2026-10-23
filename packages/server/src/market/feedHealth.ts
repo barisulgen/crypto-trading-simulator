@@ -4,15 +4,21 @@ export interface HealthCfg {
   noUpdateMs: number;
 }
 
-type Stream = 'depth' | 'trade' | 'ticker';
+const SILENT_WAIT = 'Waiting for order-book update after a silent connection';
+const PAUSE_WAIT = 'Waiting for order-book update after a pause';
+
+type Stream ='depth' | 'trade' | 'ticker';
 
 interface SymState {
   bookValid: boolean;
   lastDepth: number | null;
   /** Lag in ms of the latest event of each stream; infinite when its event time was unusable. */
   lag: Record<Stream, number>;
-  /** A frame came after a silent stretch: the book is old until a current depth event arrives. */
-  needsDepth: boolean;
+  /**
+   * Why the book is old until a current depth event arrives (a frame came after a silent stretch,
+   * or the process was paused), or null.
+   */
+  needsDepth: string | null;
 }
 
 /** Judges per-symbol data freshness from connection health plus a long no-update limit. */
@@ -29,7 +35,7 @@ export class FeedHealth {
         bookValid: false,
         lastDepth: null,
         lag: { depth: 0, trade: 0, ticker: 0 },
-        needsDepth: false,
+        needsDepth: null,
       });
     }
   }
@@ -56,13 +62,22 @@ export class FeedHealth {
   }
 
   /**
+   * The process was paused (sleep, event-loop freeze): what arrives next may have been buffered
+   * during the pause, so every book is old until its next current depth event, as after a silent
+   * stretch.
+   */
+  markStalled(_now: number): void {
+    for (const s of this.syms.values()) s.needsDepth = PAUSE_WAIT;
+  }
+
+  /**
    * A frame arrived. After more than silentMs without one (a dead socket, or a frozen process
    * whose buffered frames only now arrive) every book may be old, and a trade or ticker does not
    * show otherwise: each symbol then waits for its next current depth event.
    */
   private touch(now: number): void {
     if (now - this.lastFrame > this.cfg.silentMs) {
-      for (const s of this.syms.values()) s.needsDepth = true;
+      for (const s of this.syms.values()) s.needsDepth = SILENT_WAIT;
     }
     this.lastFrame = now;
   }
@@ -89,7 +104,7 @@ export class FeedHealth {
     s.lastDepth = now;
     if (this.late(s.lag.depth)) return;
     // Only a current depth event shows the book is no older than the silence that preceded it.
-    s.needsDepth = false;
+    s.needsDepth = null;
     // It also shows the connection has caught up, which is all a late trade or ticker signals; a
     // quiet symbol would otherwise stay stale until its next trade.
     s.lag.trade = 0;
@@ -124,7 +139,7 @@ export class FeedHealth {
       const worst = Math.max(...late);
       return Number.isFinite(worst) ? `Feed lagging by ${(worst / 1000).toFixed(1)}s` : 'Feed lagging (invalid event time)';
     }
-    if (s.needsDepth) return 'Waiting for order-book update after a silent connection';
+    if (s.needsDepth !== null) return s.needsDepth;
     if (now - (s.lastDepth ?? this.connectAt) > noUpdateMs) {
       return `No order-book updates for ${noUpdateMs / 1000}s`;
     }

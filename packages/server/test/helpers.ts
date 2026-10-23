@@ -149,11 +149,20 @@ export class TestMarket extends FakeMarket {
   }
 }
 
-/** FeedHealth's lastFrameAt for runner tests over a TestMarket: frames keep arriving, the last one just now. */
+/**
+ * What the runner reads from FeedHealth, for runner tests over a TestMarket (whose freshness the
+ * test sets): frames keep arriving, the last one just now, until the test sets lastFrame; the
+ * stalls the runner reports are listed.
+ */
 export class FakeHealth {
+  lastFrame: number | null = null;
+  readonly stalls: number[] = [];
   constructor(private readonly now: () => number) {}
   lastFrameAt(): number {
-    return this.now();
+    return this.lastFrame ?? this.now();
+  }
+  markStalled(now: number): void {
+    this.stalls.push(now);
   }
 }
 
