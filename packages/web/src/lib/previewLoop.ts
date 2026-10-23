@@ -57,6 +57,18 @@ export class PreviewLoop {
     this.timer = setTimeout(() => void this.ask(), wait);
   }
 
+  /**
+   * Ask again now for the same form (the coin's feed state changed, so the answer on screen or on
+   * its way may no longer hold). An answer still on its way is dropped.
+   */
+  refresh(): void {
+    if (this.key === null) return;
+    this.clearTimer();
+    this.latest.cancel();
+    this.inFlight = null;
+    this.timer = setTimeout(() => void this.ask(), 0);
+  }
+
   dispose(): void {
     this.clearTimer();
     this.latest.cancel();

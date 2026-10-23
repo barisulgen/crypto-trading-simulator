@@ -56,6 +56,17 @@ export function buildOrderRequest(f: OrderFormFields): SpotOrderRequest {
   return req;
 }
 
+/** Whether a preview request (JSON from buildOrderRequest) is for this form's symbol, side and type. */
+export function previewMatches(key: string | null, f: OrderFormFields): boolean {
+  if (key === null) return false;
+  try {
+    const r = JSON.parse(key) as Partial<SpotOrderRequest>;
+    return r.symbol === f.symbol && r.side === f.side && r.type === f.type;
+  } catch {
+    return false;
+  }
+}
+
 const blank = (v: string) => v.trim() === '';
 
 /** What the owner still has to type, or null when every field the order needs is filled in. */

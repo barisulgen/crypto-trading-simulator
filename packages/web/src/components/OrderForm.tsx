@@ -14,6 +14,7 @@ import {
   hasPrice,
   hasTrigger,
   missingInput,
+  previewMatches,
 } from '../lib/orderForm.ts';
 import type { OrderFormFields } from '../lib/orderForm.ts';
 import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
@@ -33,6 +34,9 @@ function usePreview(key: string | null): PreviewState {
   useEffect(() => {
     const unsubscribe = useLive.subscribe((s, prev) => {
       if (s.book !== prev.book) loop.bookChanged();
+      // The coin went stale or came back: an estimate made before says nothing about now.
+      const symbol = s.selected.symbol;
+      if (symbol === prev.selected.symbol && s.health[symbol]?.fresh !== prev.health[symbol]?.fresh) loop.refresh();
     });
     return () => {
       unsubscribe();
@@ -78,6 +82,7 @@ function Estimate({
   priceDp,
   state,
   current,
+  staleReason,
   missing,
 }: {
   symbol: string;
@@ -88,6 +93,8 @@ function Estimate({
   state: PreviewState;
   /** False while the shown answer is for an older version of the form. */
   current: boolean;
+  /** Set while the coin's feed is stale: the estimate is dimmed and says why. */
+  staleReason: string | null;
   missing: string | null;
 }) {
   const p = state.preview;
@@ -104,7 +111,13 @@ function Estimate({
   if (!p) return <p className="text-xs text-faint">Estimating...</p>;
   const thin = p.exhausted ? fillable(p, side) : null;
   return (
-    <div className={`flex flex-col gap-2 ${current ? '' : 'opacity-60'}`}>
+    <div className={`flex flex-col gap-2 ${current && staleReason === null ? '' : 'opacity-60'}`}>
+      {staleReason !== null && (
+        <p role="status" className="rounded-ctl border border-accent/50 bg-accent-soft px-2.5 py-1.5 text-xs text-fg">
+          <span className="font-semibold">Estimate may be out of date: </span>
+          {staleReason}
+        </p>
+      )}
       <dl className="flex flex-col gap-1 text-xs">
         <Row label="Est. avg price">{p.estAvgPrice === null ? '-' : `${fmtNum(p.estAvgPrice, priceDp)} USDT`}</Row>
         <Row label="Est. slippage">
@@ -178,7 +191,10 @@ export function OrderForm() {
   const fields: OrderFormFields = { symbol, side, type, amountIn, amount, price, trigger, attach, stopLoss, takeProfit };
   const missing = missingInput(fields);
   const key = missing === null ? JSON.stringify(buildOrderRequest(fields)) : null;
-  const preview = usePreview(key);
+  const answer = usePreview(key);
+  // An answer for another symbol, side or order type is never shown, not even dimmed (the units differ).
+  const shown = previewMatches(answer.key, fields);
+  const preview = shown ? answer : NO_PREVIEW;
   const spend = side === 'buy' ? quote : base;
   const free = useFree(spend);
   const attachable = canAttach(fields);
@@ -242,7 +258,7 @@ export function OrderForm() {
   useEffect(() => setError(''), [formKey]);
 
   // The current estimate says the server would reject it: still submittable, styled as a warning.
-  const warn = preview.key === key && !!preview.preview?.rejectReason;
+  const warn = shown && preview.key === key && !!preview.preview?.rejectReason;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -432,6 +448,7 @@ export function OrderForm() {
           priceDp={tickDecimals(rules?.tickSize ?? '0.01') + 2}
           state={preview}
           current={preview.key === key}
+          staleReason={stale ? (health?.reason ?? 'No fresh data from Binance') : null}
           missing={missing}
         />
       </section>

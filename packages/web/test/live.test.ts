@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import type { AccountSnapshot, ServerMessage, WireAggTrade, WireOrder } from '../src/lib/api.ts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AccountSnapshot, Meta, ServerMessage, WireAggTrade, WireOrder } from '../src/lib/api.ts';
 import { initialLiveData, reduce, useLive } from '../src/lib/live.ts';
 import type { LiveData } from '../src/lib/live.ts';
 
@@ -156,5 +156,142 @@ describe('live store actions', () => {
     useLive.getState().priceClicked('81232.01');
     expect(useLive.getState().priceClick?.price).toBe('81232.01');
     expect(useLive.getState().priceClick?.seq).toBe((first?.seq ?? 0) + 1);
+  });
+});
+
+/** A socket the test drives by hand; close() only starts closing, as a real dead one would. */
+class FakeSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static all: FakeSocket[] = [];
+  readyState = 0;
+  sent: string[] = [];
+  closeCalls = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((ev: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  constructor(readonly url: string) {
+    FakeSocket.all.push(this);
+  }
+  send(data: string) {
+    this.sent.push(data);
+  }
+  close() {
+    this.closeCalls++;
+    this.readyState = FakeSocket.CLOSING;
+  }
+  open() {
+    this.readyState = FakeSocket.OPEN;
+    this.onopen?.();
+  }
+  say(msg: unknown) {
+    this.onmessage?.({ data: JSON.stringify(msg) });
+  }
+}
+
+const metaWith = (rules: string[]) =>
+  ({ coins: [], symbols: ['BTCUSDT', 'DOGEUSDT'], rules: Object.fromEntries(rules.map((r) => [r, {}])) }) as unknown as Meta;
+
+async function freshLive(meta: () => Meta) {
+  vi.resetModules();
+  FakeSocket.all = [];
+  vi.stubGlobal('WebSocket', FakeSocket);
+  vi.stubGlobal('location', { protocol: 'http:', host: 'x' });
+  vi.stubGlobal('window', { addEventListener: () => {} });
+  const mod = await import('../src/lib/live.ts');
+  const apiMod = await import('../src/lib/api.ts');
+  const metaCalls = vi.spyOn(apiMod.api, 'meta').mockImplementation(async () => meta());
+  return { ...mod, metaCalls };
+}
+
+describe('live connection', () => {
+  beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }));
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('a socket that goes silent for 5 s is marked down, closed and replaced', async () => {
+    const { startLive, useLive } = await freshLive(() => metaWith(['BTCUSDT', 'DOGEUSDT']));
+    startLive();
+    const first = FakeSocket.all[0]!;
+    first.open();
+    expect(useLive.getState().conn).toBe('open');
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(useLive.getState().conn).toBe('open');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(useLive.getState().conn).toBe('down');
+    expect(first.closeCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(FakeSocket.all).toHaveLength(2);
+  });
+
+  it('a message resets the silence timer', async () => {
+    const { startLive, useLive } = await freshLive(() => metaWith(['BTCUSDT', 'DOGEUSDT']));
+    startLive();
+    const ws = FakeSocket.all[0]!;
+    ws.open();
+    await vi.advanceTimersByTimeAsync(4999);
+    ws.say({ type: 'tickers', tickers: {} });
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(useLive.getState().conn).toBe('open');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(useLive.getState().conn).toBe('down');
+  });
+
+  it('reconnectNow replaces a socket that is not open', async () => {
+    const { startLive, reconnectNow } = await freshLive(() => metaWith(['BTCUSDT', 'DOGEUSDT']));
+    startLive();
+    const ws = FakeSocket.all[0]!;
+    ws.open();
+    ws.readyState = FakeSocket.CLOSING;
+    reconnectNow();
+    expect(FakeSocket.all).toHaveLength(2);
+    // An open socket is kept.
+    FakeSocket.all[1]!.open();
+    reconnectNow();
+    expect(FakeSocket.all).toHaveLength(2);
+  });
+
+  it('missing rules are refetched on health messages, at most every 5 s, until complete', async () => {
+    let complete = false;
+    const { startLive, metaCalls } = await freshLive(() =>
+      complete ? metaWith(['BTCUSDT', 'DOGEUSDT']) : metaWith(['BTCUSDT']),
+    );
+    startLive();
+    const ws = FakeSocket.all[0]!;
+    ws.open();
+    await vi.advanceTimersByTimeAsync(0);
+    const health = { type: 'health', health: {} };
+    const keepAlive = async (ms: number) => {
+      for (let t = 0; t < ms; t += 1000) {
+        await vi.advanceTimersByTimeAsync(1000);
+        ws.say({ type: 'tickers', tickers: {} });
+      }
+    };
+    await keepAlive(4000);
+    await keepAlive(2000); // 6 s after the open fetch
+    metaCalls.mockClear();
+    ws.say(health);
+    await keepAlive(1000);
+    ws.say(health);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(metaCalls).toHaveBeenCalledTimes(1);
+    await keepAlive(4000);
+    ws.say(health);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(metaCalls).toHaveBeenCalledTimes(2);
+    complete = true;
+    await keepAlive(5000);
+    ws.say(health);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(metaCalls).toHaveBeenCalledTimes(3);
+    await keepAlive(5000);
+    ws.say(health);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(metaCalls).toHaveBeenCalledTimes(3);
   });
 });

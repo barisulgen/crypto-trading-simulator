@@ -80,7 +80,9 @@ describe('live WebSocket client', () => {
     }
     latest().open();
     expect(useLive.getState().conn).toBe('open');
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(2500);
+    latest().onmessage?.({ data: JSON.stringify({ type: 'tickers', tickers: {} }) });
+    await vi.advanceTimersByTimeAsync(2500);
     latest().close();
     expect(useLive.getState().conn).toBe('down');
     expect(await delayUntilNextSocket()).toBe(1000);

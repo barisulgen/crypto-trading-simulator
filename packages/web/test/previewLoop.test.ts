@@ -107,3 +107,31 @@ describe('preview loop', () => {
     expect(states.at(-1)).toEqual({ key: 'k', preview: null, error: 'Unknown symbol X' });
   });
 });
+
+describe('preview loop refresh', () => {
+  it('asks again at once for the same form, dropping an answer still on its way', async () => {
+    const { loop, calls, states } = setup();
+    loop.setKey('k');
+    await vi.advanceTimersByTimeAsync(250);
+    calls[0]!.d.resolve(answer('1'));
+    await vi.advanceTimersByTimeAsync(0);
+    loop.refresh();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.map((c) => c.key)).toEqual(['k', 'k']);
+    loop.refresh(); // the second request is now superseded
+    await vi.advanceTimersByTimeAsync(0);
+    calls[1]!.d.resolve(answer('stale'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(states.at(-1)).toEqual({ key: 'k', preview: answer('1'), error: null });
+    calls[2]!.d.resolve(answer('3'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(states.at(-1)).toEqual({ key: 'k', preview: answer('3'), error: null });
+  });
+
+  it('does nothing without a form', async () => {
+    const { loop, calls } = setup();
+    loop.refresh();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toHaveLength(0);
+  });
+});

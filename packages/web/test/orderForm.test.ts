@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WirePreview } from '../src/lib/api.ts';
-import { buildOrderRequest, canAttach, createLatest, fillable, missingInput } from '../src/lib/orderForm.ts';
+import { buildOrderRequest, canAttach, createLatest, fillable, missingInput, previewMatches } from '../src/lib/orderForm.ts';
 import type { OrderFormFields } from '../src/lib/orderForm.ts';
 
 const form = (over: Partial<OrderFormFields> = {}): OrderFormFields => ({
@@ -173,5 +173,16 @@ describe('fillable amount of an exhausted preview', () => {
 
   it('nothing fillable gives null', () => {
     expect(fillable(preview({ receive: null, total: null, fee: { asset: null, amount: null, usd: null } }), 'buy')).toBeNull();
+  });
+});
+
+describe('previewMatches', () => {
+  it('accepts only an answer for the same symbol, side and type', () => {
+    const key = JSON.stringify(buildOrderRequest(form({ side: 'sell' })));
+    expect(previewMatches(key, form({ side: 'sell' }))).toBe(true);
+    expect(previewMatches(key, form({ side: 'buy' }))).toBe(false);
+    expect(previewMatches(key, form({ side: 'sell', symbol: 'ETHUSDT' }))).toBe(false);
+    expect(previewMatches(key, form({ side: 'sell', type: 'limit' }))).toBe(false);
+    expect(previewMatches(null, form())).toBe(false);
   });
 });

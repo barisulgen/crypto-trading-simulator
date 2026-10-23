@@ -25,6 +25,10 @@ const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 10_000;
 /** The backoff starts over only after a connection stayed open this long (no fast flapping). */
 const STABLE_OPEN_MS = 5000;
+/** The server pushes tickers every second: a socket silent this long is dead, whatever it claims. */
+const SILENT_MS = 5000;
+/** While exchange rules are missing for some symbol, /api/meta is asked again at most this often. */
+const META_RETRY_MS = 5000;
 
 export interface Notice {
   id: number;
@@ -219,6 +223,10 @@ let openedAt: number | null = null;
 let started = false;
 /** Whether any socket has opened yet (the next open is then a reconnect). */
 let everOpened = false;
+/** Fires when the current socket has sent nothing for SILENT_MS. */
+let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+/** When /api/meta was last asked for, ms. */
+let metaAskedAt = 0;
 
 function subscribe(): void {
   if (socket?.readyState !== WebSocket.OPEN) return;
@@ -228,6 +236,7 @@ function subscribe(): void {
 
 /** Load /api/meta (coins, rules, fees, season) into the store and the formatters. */
 export async function loadMeta(): Promise<void> {
+  metaAskedAt = Date.now();
   try {
     const meta = await api.meta();
     setRules(meta.rules);
@@ -237,6 +246,41 @@ export async function loadMeta(): Promise<void> {
       useLive.getState().pushNotice('error', `Could not load market rules: ${(e as Error).message}`);
     }
   }
+}
+
+/** Whether the loaded meta lacks rules for a configured symbol (or is not loaded at all). */
+function rulesMissing(): boolean {
+  const meta = useLive.getState().meta;
+  return !meta || Object.keys(meta.rules).length < meta.symbols.length;
+}
+
+function clearSilence(): void {
+  if (silenceTimer !== null) clearTimeout(silenceTimer);
+  silenceTimer = null;
+}
+
+/** Forget a socket without waiting for its close event (a dead one may never send it). */
+function detach(ws: WebSocket): void {
+  ws.onopen = ws.onmessage = ws.onclose = null;
+  try {
+    ws.close();
+  } catch {
+    // already gone
+  }
+  if (socket === ws) socket = null;
+  clearSilence();
+  openedAt = null;
+}
+
+function armSilence(ws: WebSocket): void {
+  clearSilence();
+  silenceTimer = setTimeout(() => {
+    silenceTimer = null;
+    if (socket !== ws) return;
+    detach(ws);
+    useLive.setState({ conn: 'down' });
+    scheduleReconnect();
+  }, SILENT_MS);
 }
 
 function scheduleReconnect(): void {
@@ -270,8 +314,8 @@ function connect(): void {
     useLive.setState((s) => ({ conn: 'open', reconnects: everOpened ? s.reconnects + 1 : s.reconnects }));
     everOpened = true;
     subscribe();
-    const meta = useLive.getState().meta;
-    if (!meta || Object.keys(meta.rules).length < meta.symbols.length) void loadMeta();
+    armSilence(ws);
+    if (rulesMissing()) void loadMeta();
   };
   ws.onmessage = (ev: MessageEvent<string>) => {
     let msg: ServerMessage;
@@ -280,10 +324,14 @@ function connect(): void {
     } catch {
       return;
     }
+    armSilence(ws);
     useLive.setState((s) => reduce(s, msg, Date.now()));
+    // Rules the server had not loaded at start arrive later: ask again as health messages come in.
+    if (msg.type === 'health' && rulesMissing() && Date.now() - metaAskedAt >= META_RETRY_MS) void loadMeta();
   };
   ws.onclose = () => {
     if (socket === ws) socket = null;
+    clearSilence();
     // Only a connection that held for a while resets the backoff: accept-then-drop keeps doubling.
     if (openedAt !== null && Date.now() - openedAt >= STABLE_OPEN_MS) retryDelay = RETRY_MIN_MS;
     openedAt = null;
@@ -296,7 +344,12 @@ function connect(): void {
 }
 
 /** Reconnect now (network back, or after logging in) instead of waiting out the backoff. */
-function reconnectNow(): void {
+export function reconnectNow(): void {
+  // A socket that is not open (stuck connecting, closing, or dead) is replaced, not trusted.
+  if (socket !== null && socket.readyState !== WebSocket.OPEN) {
+    detach(socket);
+    useLive.setState({ conn: 'down' });
+  }
   if (retryTimer !== null) {
     clearTimeout(retryTimer);
     retryTimer = null;
