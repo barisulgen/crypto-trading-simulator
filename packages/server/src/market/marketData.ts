@@ -5,9 +5,10 @@ import type { Logger } from '../log.ts';
 import type { BinanceRest } from '../binance/rest.ts';
 import { parseSpotRules, parseSymbolStatus } from '../binance/parseRules.ts';
 import type { FeedHealth } from './feedHealth.ts';
+import { LiveMarket } from './liveMarket.ts';
 import type { LocalBook } from './localBook.ts';
-import { OwnLiquidity } from './ownLiquidity.ts';
-import type { DepthLevels, Ticker } from './spotFeed.ts';
+import { measureClockOffset, Pollers } from './pollers.ts';
+import type { DepthLevels, Ticker } from './streamParse.ts';
 import { defaultSetTimer } from './ws.ts';
 import type { SetTimer } from './ws.ts';
 
@@ -17,10 +18,7 @@ export const RULES_REFRESH_MS = 3_600_000;
 /** While any symbol is not TRADING on Binance, exchangeInfo is polled this often to see the halt end. */
 export const HALT_REPOLL_MS = 45_000;
 export const CLOCK_REFRESH_MS = 600_000;
-const TRADE_RING = 50;
 const POLL_STAGGER_MS = 1000;
-const STARTUP_RETRY_START_MS = 5000;
-const STARTUP_RETRY_MAX_MS = 60_000;
 
 export interface MarketDataDeps {
   symbols: string[];
@@ -41,111 +39,59 @@ export interface MarketDataDeps {
  */
 export class MarketData extends EventEmitter implements MarketView {
   private readonly symbols: string[];
-  private readonly books: Map<string, LocalBook>;
   private readonly health: FeedHealth;
   private readonly rest: MarketDataDeps['rest'];
   private readonly log: Logger;
   private readonly now: () => number;
-  private readonly setTimer: SetTimer;
+  private readonly pollers: Pollers;
+  private readonly live: LiveMarket;
   private readonly ruleMap = new Map<string, SpotRules>();
   /** Binance trading status per symbol, from the same exchangeInfo entry as its rules. */
   private readonly status = new Map<string, string>();
   private readonly avg = new Map<string, { price: Decimal; at: number }>();
-  private readonly last = new Map<string, Decimal>();
   /** The last best bid of a synced book and when it was seen; kept while the book is emptied. */
   private readonly lastBid = new Map<string, { price: Decimal; at: number }>();
-  private readonly tick = new Map<string, Ticker>();
-  private readonly trades = new Map<string, AggTrade[]>();
-  private readonly own = new Map<string, OwnLiquidity>();
-  private cancels = new Set<() => void>();
-  private stopped = false;
   private started = false;
 
   constructor(d: MarketDataDeps) {
     super();
     this.symbols = d.symbols;
-    this.books = d.books;
     this.health = d.health;
     this.rest = d.rest;
     this.log = d.logger;
     this.now = d.now ?? Date.now;
-    this.setTimer = d.setTimer ?? defaultSetTimer;
+    this.pollers = new Pollers(d.setTimer ?? defaultSetTimer);
+    this.live = new LiveMarket(d.books);
     d.feed.on('trade', (symbol: string, t: AggTrade) => {
-      this.last.set(symbol, t.price);
-      const ring = this.trades.get(symbol) ?? [];
-      ring.unshift(t);
-      if (ring.length > TRADE_RING) ring.length = TRADE_RING;
-      this.trades.set(symbol, ring);
+      this.live.onTrade(symbol, t);
       this.emit('trade', symbol, t);
     });
     d.feed.on('ticker', (symbol: string, t: Ticker) => {
-      this.tick.set(symbol, t);
+      this.live.onTicker(symbol, t);
       this.emit('ticker', symbol, t);
     });
     d.feed.on('book', (symbol: string, levels?: DepthLevels) => {
-      const own = this.own.get(symbol);
-      if (own && levels) {
-        for (const [p] of levels.b) own.onLevelUpdate('bids', D(p));
-        for (const [p] of levels.a) own.onLevelUpdate('asks', D(p));
-      }
+      this.live.onBook(symbol, levels);
       this.noteBid(symbol);
       this.emit('book', symbol);
     });
-    d.feed.on('snapshot', (symbol: string) => this.own.get(symbol)?.clear());
-    for (const s of d.symbols) this.own.set(s, new OwnLiquidity());
+    d.feed.on('snapshot', (symbol: string) => this.live.onSnapshot(symbol));
   }
 
   /** Loads rules, measures the clock offset and starts the pollers. Idempotent; stop() then start() restarts. */
   start(): void {
     if (this.started) return;
     this.started = true;
-    this.stopped = false;
-    this.every(() => this.refreshRules(), () => (this.anyHalted() ? HALT_REPOLL_MS : RULES_REFRESH_MS), 0, true);
-    this.every(() => this.refreshClockOffset(), CLOCK_REFRESH_MS, 0, true);
+    this.pollers.every(() => this.refreshRules(), () => (this.anyHalted() ? HALT_REPOLL_MS : RULES_REFRESH_MS), 0, true);
+    this.pollers.every(() => this.refreshClockOffset(), CLOCK_REFRESH_MS, 0, true);
     this.symbols.forEach((s, i) =>
-      this.every(async () => (await this.pollAvgPrice(s), true), AVG_PRICE_POLL_MS, i * POLL_STAGGER_MS, false),
+      this.pollers.every(async () => (await this.pollAvgPrice(s), true), AVG_PRICE_POLL_MS, i * POLL_STAGGER_MS, false),
     );
   }
 
   stop(): void {
-    this.stopped = true;
     this.started = false;
-    for (const c of this.cancels) c();
-    this.cancels.clear();
-  }
-
-  /**
-   * Runs `fn` after `firstDelay`, then every `ms` (a function is asked again after each run). With
-   * `untilFirstSuccess`, a failed run is retried quickly (5 s doubling to 60 s) until it first
-   * succeeds, then at the normal period.
-   */
-  private every(
-    fn: () => Promise<boolean>,
-    ms: number | (() => number),
-    firstDelay: number,
-    untilFirstSuccess: boolean,
-  ): void {
-    const period = typeof ms === 'number' ? () => ms : ms;
-    let cancel: () => void = () => {};
-    let ok = false;
-    let retry = STARTUP_RETRY_START_MS;
-    const arm = (delay: number) => {
-      this.cancels.delete(cancel);
-      cancel = this.setTimer(() => {
-        if (this.stopped) return;
-        void fn()
-          .catch(() => false)
-          .then((success) => {
-            if (this.stopped) return;
-            if (success) ok = true;
-            if (ok || !untilFirstSuccess) return arm(period());
-            arm(retry);
-            retry = Math.min(retry * 2, STARTUP_RETRY_MAX_MS);
-          });
-      }, delay);
-      this.cancels.add(cancel);
-    };
-    arm(firstDelay);
+    this.pollers.stop();
   }
 
   /** True when every symbol has rules afterwards. */
@@ -182,11 +128,8 @@ export class MarketData extends EventEmitter implements MarketView {
 
   async refreshClockOffset(): Promise<boolean> {
     try {
-      const t0 = this.now();
-      const r = await this.rest.serverTime();
-      const t1 = this.now();
-      const offset = Number(r?.serverTime) - (t0 + t1) / 2;
-      if (!Number.isFinite(offset)) return false;
+      const offset = await measureClockOffset(() => this.rest.serverTime(), this.now);
+      if (offset === null) return false;
       this.health.setClockOffset(offset);
       return true;
     } catch (e) {
@@ -212,17 +155,11 @@ export class MarketData extends EventEmitter implements MarketView {
   }
 
   book(symbol: string): BookSnapshot {
-    return this.ownView(symbol, this.bookOf(symbol).snapshot());
+    return this.live.book(symbol);
   }
 
   best(symbol: string, side: Side): Decimal | null {
-    const bookSide = side === 'buy' ? 'asks' : 'bids';
-    const own = this.own.get(symbol);
-    const b = this.bookOf(symbol);
-    if (!own || own.count(bookSide) === 0) return (side === 'buy' ? b.bestAsk() : b.bestBid())?.price ?? null;
-    // Each claim can remove at most one level, so the best left is within the first claims + 1.
-    const top = b.snapshot(own.count(bookSide) + 1)[bookSide];
-    return own.apply(bookSide, top)[0]?.price ?? null;
+    return this.live.best(symbol, side);
   }
 
   /**
@@ -230,9 +167,7 @@ export class MarketData extends EventEmitter implements MarketView {
    * bids for a sell): later walks see those levels reduced until a depth update touches them.
    */
   consume(symbol: string, side: Side, levels: PriceLevel[]): void {
-    const own = this.own.get(symbol);
-    if (!own) throw new Error(`Unknown symbol ${symbol}`);
-    own.consume(side === 'buy' ? 'asks' : 'bids', levels);
+    this.live.consume(symbol, side, levels);
     this.noteBid(symbol);
   }
 
@@ -242,7 +177,7 @@ export class MarketData extends EventEmitter implements MarketView {
   }
 
   lastPrice(symbol: string): Decimal | null {
-    return this.last.get(symbol) ?? null;
+    return this.live.lastPrice(symbol);
   }
 
   rules(symbol: string): SpotRules {
@@ -269,28 +204,21 @@ export class MarketData extends EventEmitter implements MarketView {
 
   /** Remember the best bid (less the owner's own fills) and when it was seen, for while the book is emptied. */
   private noteBid(symbol: string): void {
-    if (!this.books.has(symbol)) return;
+    if (!this.live.has(symbol)) return;
     const bid = this.best(symbol, 'sell');
     if (bid) this.lastBid.set(symbol, { price: bid, at: this.now() });
   }
 
-  /** The book less what the owner's own taker fills took. */
-  private ownView(symbol: string, book: BookSnapshot): BookSnapshot {
-    const own = this.own.get(symbol);
-    if (!own || own.count('bids') + own.count('asks') === 0) return book;
-    return { bids: own.apply('bids', book.bids), asks: own.apply('asks', book.asks) };
-  }
-
   tickers(): Record<string, Ticker> {
-    return Object.fromEntries(this.tick);
+    return this.live.tickers();
   }
 
-  recentTrades(symbol: string, n = TRADE_RING): AggTrade[] {
-    return (this.trades.get(symbol) ?? []).slice(0, n);
+  recentTrades(symbol: string, n?: number): AggTrade[] {
+    return this.live.recentTrades(symbol, n);
   }
 
   bookTop(symbol: string, levels = 20): BookSnapshot {
-    return this.bookOf(symbol).snapshot(levels);
+    return this.live.bookTop(symbol, levels);
   }
 
   healthSnapshot(): Record<string, { fresh: boolean; reason: string | null }> {
@@ -302,11 +230,5 @@ export class MarketData extends EventEmitter implements MarketView {
       out[s] = { fresh: reason === null && this.ruleMap.has(s), reason: reason ?? (this.ruleMap.has(s) ? null : 'Trading rules not loaded') };
     }
     return out;
-  }
-
-  private bookOf(symbol: string): LocalBook {
-    const b = this.books.get(symbol);
-    if (!b) throw new Error(`Unknown symbol ${symbol}`);
-    return b;
   }
 }

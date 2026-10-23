@@ -15,4 +15,4 @@ export type { OcoRequest } from './spot/stops.ts';
 export { arrivalDelay } from './spot/orders.ts';
 export { applyBuyToBasis, applySellToBasis, emptyBasis, valueAccount } from './spot/accounting.ts';
 export type { AccountValue, CoinValue } from './spot/accounting.ts';
-export type { Bracket, PerpRules, TierSet, TierSource } from './perp/types.ts';
+export type { Bracket, PerpMarketView, PerpRules, TierSet, TierSource } from './perp/types.ts';

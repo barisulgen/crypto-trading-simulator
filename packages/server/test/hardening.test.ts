@@ -5,6 +5,7 @@ import { FeedHealth } from '../src/market/feedHealth.ts';
 import { LocalBook } from '../src/market/localBook.ts';
 import { MarketData } from '../src/market/marketData.ts';
 import { SpotFeed } from '../src/market/spotFeed.ts';
+import { ConnectLimiter } from '../src/market/ws.ts';
 import { fakeTimers, FakeWs, tick } from './helpers.ts';
 import exchangeInfo from './fixtures/btcusdt-exchangeinfo.json' with { type: 'json' };
 
@@ -54,15 +55,15 @@ describe('SpotFeed hardening', () => {
     for (let round = 0; round < 3; round++) {
       for (let i = 0; i < 1500; i++) {
         ws.msg(diff(1000 + round * 1500 + i, 1000 + round * 1500 + i));
-        max = Math.max(max, (feed as any).st.get('BTCUSDT').buffer.length);
+        max = Math.max(max, (feed as any).sync.st.get('BTCUSDT').buffer.length);
       }
       timers.fire();
       await tick();
     }
     expect(max).toBe(1000);
-    expect((feed as any).st.get('BTCUSDT').buffer.length).toBeLessThanOrEqual(1000);
+    expect((feed as any).sync.st.get('BTCUSDT').buffer.length).toBeLessThanOrEqual(1000);
     // the newest diffs are the ones retained
-    const buf = (feed as any).st.get('BTCUSDT').buffer;
+    const buf = (feed as any).sync.st.get('BTCUSDT').buffer;
     expect(buf[buf.length - 1].u).toBe(1000 + 2 * 1500 + 1499);
   });
 
@@ -87,7 +88,7 @@ describe('SpotFeed hardening', () => {
     timers.fire();
     await tick();
     ws.msg(diff(99, 101));
-    expect((feed as any).st.get('BTCUSDT').failures).toBe(0);
+    expect((feed as any).sync.st.get('BTCUSDT').failures).toBe(0);
     ws.msg(diff(500, 501)); // gap -> first retry again 1 s
     expect(timers.pending().map((t) => t.ms)).toEqual([1000]);
   });
@@ -294,6 +295,34 @@ describe('CandleService hardening', () => {
     expect(timers.pending().map((t) => t.ms)).toEqual([1000]);
     timers.fire();
     expect(sockets).toHaveLength(2);
+    svc.close();
+  });
+
+  it('waits for the shared connection-attempt limit before opening the kline socket', () => {
+    const sockets: FakeWs[] = [];
+    const clock = { t: 0 };
+    const timers = fakeTimers();
+    const limiter = new ConnectLimiter({ limit: 1, windowMs: 300_000 });
+    limiter.acquire(0); // another socket used the only attempt
+    const svc = new CandleService({
+      rest: {} as any,
+      logger: silent,
+      now: () => clock.t,
+      setTimer: timers.setTimer,
+      limiter,
+      wsFactory: (u) => {
+        const w = new FakeWs(u);
+        sockets.push(w);
+        return w as any;
+      },
+    });
+    clock.t = 1000;
+    svc.subscribe('BTCUSDT', '1m', () => {});
+    expect(sockets).toHaveLength(0);
+    expect(timers.pending().map((t) => t.ms)).toEqual([299_000]);
+    clock.t = 300_000;
+    timers.fire();
+    expect(sockets).toHaveLength(1);
     svc.close();
   });
 

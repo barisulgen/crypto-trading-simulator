@@ -57,3 +57,56 @@ describe('LocalBook', () => {
     expect(t.asks).toHaveLength(2);
   });
 });
+
+describe('LocalBook futures mode', () => {
+  const futures = () => {
+    const b = new LocalBook({ mode: 'futures' });
+    b.applySnapshot(snap());
+    return b;
+  };
+
+  it('applies a first event that straddles lastUpdateId, then chains on pu', () => {
+    const b = futures();
+    expect(b.applyDiff({ U: 90, u: 105, pu: 89, b: [['99.9', '3']], a: [] })).toBe('applied');
+    expect(b.valid).toBe(true);
+    expect(b.bestBid()!.qty.toString()).toBe('3');
+    expect(b.applyDiff({ U: 106, u: 110, pu: 105, b: [], a: [['100', '0'], ['100.2', '1']] })).toBe('applied');
+    expect(b.bestAsk()!.price.toString()).toBe('100.2');
+  });
+
+  it('a later event whose pu is not the previous u is a gap', () => {
+    const b = futures();
+    expect(b.applyDiff({ U: 90, u: 105, pu: 89, b: [], a: [] })).toBe('applied');
+    expect(b.applyDiff({ U: 106, u: 110, pu: 104, b: [['50', '1']], a: [] })).toBe('gap');
+    expect(b.valid).toBe(false);
+    expect(b.bestBid()!.price.toString()).toBe('99.9'); // never half-applied
+    expect(b.applyDiff({ U: 111, u: 112, pu: 110, b: [], a: [] })).toBe('gap'); // stays invalid until a snapshot
+  });
+
+  it('drops events with u below lastUpdateId; one ending exactly at it bridges', () => {
+    const b = futures();
+    expect(b.applyDiff({ U: 80, u: 99, pu: 79, b: [], a: [] })).toBe('dropped');
+    expect(b.valid).toBe(false);
+    expect(b.applyDiff({ U: 99, u: 100, pu: 99, b: [], a: [] })).toBe('applied');
+    expect(b.valid).toBe(true);
+  });
+
+  it('a first event that starts after lastUpdateId is a gap', () => {
+    const b = futures();
+    expect(b.applyDiff({ U: 101, u: 105, pu: 100, b: [], a: [] })).toBe('gap');
+    expect(b.valid).toBe(false);
+  });
+
+  it('does not apply the spot rule: U = lastUpdateId + 1 with u above it chains only by pu', () => {
+    // Spot would accept U 101 as the bridge; futures needs U <= lastUpdateId.
+    const b = futures();
+    expect(b.applyDiff({ U: 101, u: 102, pu: 100, b: [], a: [] })).toBe('gap');
+  });
+
+  it('spot mode stays the default and ignores pu', () => {
+    const b = new LocalBook({ mode: 'spot' });
+    b.applySnapshot(snap());
+    expect(b.applyDiff({ U: 99, u: 102, pu: 1, b: [], a: [] })).toBe('applied');
+    expect(b.applyDiff({ U: 103, u: 104, pu: 7, b: [], a: [] })).toBe('applied');
+  });
+});

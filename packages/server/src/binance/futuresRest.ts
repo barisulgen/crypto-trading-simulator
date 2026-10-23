@@ -3,8 +3,8 @@ import { redact } from '../log.ts';
 import type { Logger } from '../log.ts';
 import { defaultSetTimer } from '../market/ws.ts';
 import type { SetTimer } from '../market/ws.ts';
-import { PauseController, quietLogger, RestCore } from './restCore.ts';
-import type { RawJson } from './restCore.ts';
+import { quietLogger, RestCore } from './restCore.ts';
+import type { PauseController, RawJson } from './restCore.ts';
 import { BUDGET_EXHAUSTED, BUDGET_MAX_WAIT_MS, CLIENT_CLOSED, WeightBudget } from './weightBudget.ts';
 import type { Lane } from './weightBudget.ts';
 
@@ -134,8 +134,8 @@ export interface FuturesRestOptions {
   logger?: Logger;
   /** Longest a request waits for weight budget or its funding slot before it rejects (default 30 s). */
   maxWaitMs?: number;
-  /** The REST pause shared with the other Binance clients on this IP (default: a pause of its own). */
-  pause?: PauseController;
+  /** The REST pause shared with the other Binance clients on this IP: limits and bans are per IP. */
+  pause: PauseController;
 }
 
 export interface AggTradesQuery {
@@ -168,11 +168,11 @@ export class FuturesRest {
   constructor(
     fetchImpl: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
-    opts: FuturesRestOptions = {},
+    opts: FuturesRestOptions,
   ) {
     const logger = opts.logger ?? quietLogger;
     const setTimer = opts.setTimer ?? defaultSetTimer;
-    const pause = opts.pause ?? new PauseController(now, logger);
+    const pause = opts.pause;
     const weights = new WeightBudget({
       now,
       setTimer,

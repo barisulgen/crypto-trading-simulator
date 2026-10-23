@@ -5,7 +5,10 @@ import type { FastifyInstance } from 'fastify';
 import { SimEngine, SpotEngine } from '@sim/engine';
 import { buildApp } from './api/http.ts';
 import { ClientHub } from './api/ws.ts';
+import { FuturesRest } from './binance/futuresRest.ts';
 import { BinanceRest } from './binance/rest.ts';
+import { PauseController } from './binance/restCore.ts';
+import { fetchUnofficialBrackets, TierLoader } from './binance/tiers.ts';
 import { loadConfig } from './config.ts';
 import { currentSeasonId, openDb } from './db/db.ts';
 import { loadLedger, loadSpotState } from './db/store.ts';
@@ -14,8 +17,10 @@ import { CandleService } from './market/candles.ts';
 import { FeedHealth } from './market/feedHealth.ts';
 import { LocalBook } from './market/localBook.ts';
 import { MarketData } from './market/marketData.ts';
+import { PerpFeed, perpHealth } from './market/perpFeed.ts';
+import { PerpMarketData } from './market/perpMarketData.ts';
 import { SpotFeed } from './market/spotFeed.ts';
-import { defaultSetTimer } from './market/ws.ts';
+import { ConnectLimiter, defaultSetTimer } from './market/ws.ts';
 import { EngineRunner } from './runner.ts';
 import { onShutdownSignals } from './shutdownSignals.ts';
 
@@ -28,12 +33,37 @@ const seasonId = currentSeasonId(db);
 const ledger = loadLedger(db, seasonId, ['USDT', ...config.coins]);
 const sim = new SimEngine(ledger, new SpotEngine(loadSpotState(db, seasonId, ledger)));
 
-const rest = new BinanceRest(fetch, Date.now, { logger });
+// Binance limits REST calls and WebSocket connection attempts per IP: one pause and one
+// connection limiter for every client.
+const pause = new PauseController(Date.now, logger);
+const limiter = new ConnectLimiter();
+const rest = new BinanceRest(fetch, Date.now, { logger, pause });
+const futuresRest = new FuturesRest(fetch, Date.now, { logger, pause });
 const health = new FeedHealth(config.symbols, config.health);
 const books = new Map(config.symbols.map((s) => [s, new LocalBook()]));
-const feed = new SpotFeed({ symbols: config.symbols, rest, health, books, logger });
+const feed = new SpotFeed({ symbols: config.symbols, rest, health, books, logger, limiter });
 const market = new MarketData({ symbols: config.symbols, feed, books, health, rest, logger });
-const candles = new CandleService({ rest, logger });
+const candles = new CandleService({ rest, logger, limiter });
+
+const perpHealths = perpHealth(config.symbols, config.health);
+const perpBooks = new Map(config.symbols.map((s) => [s, new LocalBook({ mode: 'futures' })]));
+const perpFeed = new PerpFeed({ symbols: config.symbols, rest: futuresRest, health: perpHealths, books: perpBooks, logger, limiter });
+const tiers = new TierLoader({
+  symbols: config.symbols,
+  rest: futuresRest,
+  credentials: config.binanceCredentials,
+  unofficial: () => fetchUnofficialBrackets(fetch, pause),
+  logger,
+});
+const perpMarket = new PerpMarketData({
+  symbols: config.symbols,
+  feed: perpFeed,
+  books: perpBooks,
+  health: perpHealths,
+  rest: futuresRest,
+  tiers,
+  logger,
+});
 
 let hub: ClientHub | null = null;
 let app: FastifyInstance | null = null;
@@ -46,8 +76,11 @@ async function shutdown(code: number): Promise<void> {
   hub?.stop();
   feed.close();
   market.stop();
+  perpFeed.close();
+  perpMarket.stop();
   candles.close();
   rest.dispose(); // queued REST requests are dropped, never sent after shutdown began
+  futuresRest.dispose();
   await app?.close().catch(() => {});
   db.close();
   process.exit(code);
@@ -91,6 +124,8 @@ runner.start();
 hub.start();
 market.start();
 feed.start();
+perpMarket.start();
+perpFeed.start();
 
 onShutdownSignals(process, () => void shutdown(0));
 

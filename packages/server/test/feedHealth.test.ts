@@ -250,3 +250,84 @@ describe('FeedHealth', () => {
     expect(() => mk().reason('XXX', 0)).toThrow('Unknown symbol XXX');
   });
 });
+
+describe('FeedHealth of a connection without depth (trades, tickers and mark price)', () => {
+  const T = 1_000_000;
+  const mkMarket = () => {
+    const h = new FeedHealth(['BTCUSDT', 'ETHUSDT'], cfg, { streams: ['trade', 'ticker', 'mark'] });
+    h.onConnect(T);
+    h.onMark('BTCUSDT', T, T);
+    return h;
+  };
+
+  it('needs no order book: fresh with a current mark, never "resyncing" or short of depth updates', () => {
+    const h = mkMarket();
+    expect(h.isFresh('BTCUSDT', T)).toBe(true);
+    for (let t = T + 1000; t <= T + 200_000; t += 1000) h.onMark('BTCUSDT', t, t);
+    expect(h.isFresh('BTCUSDT', T + 200_000)).toBe(true);
+  });
+
+  it('a symbol with no mark yet is not fresh', () => {
+    expect(mkMarket().reason('ETHUSDT', T)).toBe('Waiting for mark price');
+    expect(mkMarket().isMarkFresh('ETHUSDT', T)).toBe(false);
+  });
+
+  it('the mark is fresh up to 10 000 ms after it was received, then stale', () => {
+    const h = mkMarket();
+    h.onFrame(T + 9000); // the connection itself is not silent
+    expect(h.isMarkFresh('BTCUSDT', T + 10_000)).toBe(true);
+    expect(h.isFresh('BTCUSDT', T + 10_000)).toBe(true);
+    expect(h.isMarkFresh('BTCUSDT', T + 10_001)).toBe(false);
+    expect(h.reason('BTCUSDT', T + 10_001)).toBe('No mark price for 10s');
+  });
+
+  it('a late mark is stale until a current one arrives; a malformed one proves nothing', () => {
+    const h = mkMarket();
+    h.onMark('BTCUSDT', T + 1000, T + 1000 - 6000);
+    expect(h.isMarkFresh('BTCUSDT', T + 1000)).toBe(false);
+    expect(h.reason('BTCUSDT', T + 1000)).toBe('Feed lagging by 6.0s');
+    h.onMark('BTCUSDT', T + 2000, T + 2000);
+    expect(h.isMarkFresh('BTCUSDT', T + 2000)).toBe(true);
+    h.onMark('BTCUSDT', T + 3000, Number.NaN);
+    expect(h.isMarkFresh('BTCUSDT', T + 3000)).toBe(false);
+    expect(h.reason('BTCUSDT', T + 3000)).toBe('Feed lagging (invalid event time)');
+  });
+
+  it('a late trade makes the symbol stale but leaves the mark fresh; a current mark shows the connection caught up', () => {
+    const h = mkMarket();
+    h.onTrade('BTCUSDT', T + 1000, T + 1000 - 7000);
+    expect(h.reason('BTCUSDT', T + 1000)).toBe('Feed lagging by 7.0s');
+    expect(h.isMarkFresh('BTCUSDT', T + 1000)).toBe(true);
+    h.onMark('BTCUSDT', T + 2000, T + 2000);
+    expect(h.isFresh('BTCUSDT', T + 2000)).toBe(true);
+  });
+
+  it('after a pause or a silent stretch, the mark waits for a current mark update', () => {
+    const h = mkMarket();
+    h.markStalled(T + 2000);
+    expect(h.isMarkFresh('BTCUSDT', T + 2000)).toBe(false);
+    expect(h.reason('BTCUSDT', T + 2000)).toBe('Waiting for mark price after a pause');
+    h.onTrade('BTCUSDT', T + 2100, T + 2100); // a trade does not end the wait
+    expect(h.isMarkFresh('BTCUSDT', T + 2100)).toBe(false);
+    h.onMark('BTCUSDT', T + 2200, T + 2200);
+    expect(h.isMarkFresh('BTCUSDT', T + 2200)).toBe(true);
+
+    h.onFrame(T + 20_000); // 17.8 s without a frame
+    h.onMark('BTCUSDT', T + 20_000, T + 20_000 - 6000); // a buffered, late mark
+    expect(h.isMarkFresh('BTCUSDT', T + 20_000)).toBe(false);
+    h.onMark('BTCUSDT', T + 20_100, T + 20_100);
+    expect(h.isMarkFresh('BTCUSDT', T + 20_100)).toBe(true);
+  });
+
+  it('the mark needs the connection: disconnected or silent means a stale mark', () => {
+    const h = mkMarket();
+    h.onDisconnect(T + 500);
+    expect(h.isMarkFresh('BTCUSDT', T + 500)).toBe(false);
+    expect(h.reason('BTCUSDT', T + 500)).toBe('Disconnected');
+  });
+
+  it('a spot connection ignores the mark', () => {
+    const h = mk();
+    expect(h.isFresh('BTCUSDT', 1000)).toBe(true); // no mark stream, no mark needed
+  });
+});

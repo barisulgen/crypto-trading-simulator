@@ -35,8 +35,25 @@ function applyLevels(side: Side, updates: Raw, desc: boolean): void {
   }
 }
 
-/** Local depth book following Binance's snapshot + diff-stream procedure. */
+export type BookMode = 'spot' | 'futures';
+
+/** One depth update: first and last update id, and (futures only) the last update id of the previous event. */
+export interface DepthDiff {
+  U: number;
+  u: number;
+  pu?: number;
+  b: Raw;
+  a: Raw;
+}
+
+/**
+ * Local depth book following Binance's snapshot + diff-stream procedure. Spot: drop events with
+ * u <= lastUpdateId; the first applied one has U <= lastUpdateId + 1; each later one starts at the
+ * previous u + 1. Futures: drop events with u < lastUpdateId; the first applied one has
+ * U <= lastUpdateId <= u; each later one's pu is the previous u. Anything else is a gap.
+ */
 export class LocalBook {
+  private readonly mode: BookMode;
   private bids: Side = [];
   private asks: Side = [];
   private lastUpdateId = 0;
@@ -44,6 +61,10 @@ export class LocalBook {
   private synced = false; // first bridging diff applied
   private hasSnapshot = false;
   private ok = false;
+
+  constructor(opts: { mode?: BookMode } = {}) {
+    this.mode = opts.mode ?? 'spot';
+  }
 
   get valid(): boolean {
     return this.ok;
@@ -61,16 +82,17 @@ export class LocalBook {
     this.ok = false;
   }
 
-  applyDiff(e: { U: number; u: number; b: Raw; a: Raw }): DiffResult {
+  applyDiff(e: DepthDiff): DiffResult {
     if (!this.hasSnapshot) return 'gap';
+    const futures = this.mode === 'futures';
     if (!this.synced) {
-      if (e.u <= this.lastUpdateId) return 'dropped';
-      if (e.U > this.lastUpdateId + 1) return this.fail();
+      if (futures ? e.u < this.lastUpdateId : e.u <= this.lastUpdateId) return 'dropped';
+      if (e.U > (futures ? this.lastUpdateId : this.lastUpdateId + 1)) return this.fail();
       this.synced = true;
       this.ok = true;
     } else {
       if (!this.ok) return 'gap';
-      if (e.U !== this.prevU + 1) return this.fail();
+      if (futures ? e.pu !== this.prevU : e.U !== this.prevU + 1) return this.fail();
     }
     applyLevels(this.bids, e.b, true);
     applyLevels(this.asks, e.a, false);

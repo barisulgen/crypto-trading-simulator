@@ -22,3 +22,34 @@ export const defaultSetTimer: SetTimer = (fn, ms) => {
 
 export const rawToString = (data: unknown): string =>
   Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
+
+export interface ConnectLimiterOptions {
+  /** Most connection attempts in any rolling window (default 240: 80 % of Binance's 300 per 5 min per IP). */
+  limit?: number;
+  windowMs?: number;
+}
+
+/**
+ * Binance allows 300 WebSocket connection attempts per 5 minutes per IP, counted across every
+ * socket. One limiter is shared by all of them; a socket that would go over waits instead.
+ */
+export class ConnectLimiter {
+  private readonly limit: number;
+  private readonly windowMs: number;
+  private attempts: number[] = [];
+
+  constructor(opts: ConnectLimiterOptions = {}) {
+    this.limit = opts.limit ?? 240;
+    this.windowMs = opts.windowMs ?? 300_000;
+  }
+
+  /** Records an attempt at `now` and returns 0, or, when the window is full, the ms to wait (nothing recorded). */
+  acquire(now: number): number {
+    this.attempts = this.attempts.filter((t) => t > now - this.windowMs);
+    if (this.attempts.length < this.limit) {
+      this.attempts.push(now);
+      return 0;
+    }
+    return Math.max(1, this.attempts[0]! + this.windowMs - now);
+  }
+}

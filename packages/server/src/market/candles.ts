@@ -2,7 +2,7 @@ import type { Logger } from '../log.ts';
 import type { BinanceRest } from '../binance/rest.ts';
 import { ControlQueue } from './controlQueue.ts';
 import { defaultSetTimer, defaultWsFactory, rawToString } from './ws.ts';
-import type { SetTimer, WsFactory, WsLike } from './ws.ts';
+import type { ConnectLimiter, SetTimer, WsFactory, WsLike } from './ws.ts';
 
 export const INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 export type Interval = (typeof INTERVALS)[number];
@@ -23,6 +23,8 @@ export interface CandleServiceDeps {
   wsFactory?: WsFactory;
   now?: () => number;
   setTimer?: SetTimer;
+  /** Shared by every Binance socket of this process; none when absent. */
+  limiter?: ConnectLimiter;
 }
 
 /** The newest page (no endTime) is re-fetched after this long; older pages never change. */
@@ -53,6 +55,7 @@ export class CandleService {
   private readonly wsFactory: WsFactory;
   private readonly now: () => number;
   private readonly setTimer: SetTimer;
+  private readonly limiter: ConnectLimiter | null;
   private readonly cache = new Map<string, { at: number; value: Promise<Candle[]> }>();
   private readonly subs = new Map<string, Set<(c: Candle) => void>>();
   private ws: WsLike | null = null;
@@ -70,6 +73,7 @@ export class CandleService {
     this.wsFactory = d.wsFactory ?? defaultWsFactory;
     this.now = d.now ?? Date.now;
     this.setTimer = d.setTimer ?? defaultSetTimer;
+    this.limiter = d.limiter ?? null;
   }
 
   async history(symbol: string, interval: string, endTime?: number): Promise<Candle[]> {
@@ -164,6 +168,15 @@ export class CandleService {
 
   private ensureSocket(): void {
     if (this.ws || this.closed || this.cancelReconnect) return;
+    const wait = this.limiter?.acquire(this.now()) ?? 0;
+    if (wait > 0) {
+      this.log.warn(`kline socket: connection attempt limit reached; connecting in ${Math.ceil(wait / 1000)}s`);
+      this.cancelReconnect = this.setTimer(() => {
+        this.cancelReconnect = null;
+        if (this.subs.size > 0) this.ensureSocket();
+      }, wait);
+      return;
+    }
     const ws = this.wsFactory(KLINE_WS_URL);
     this.ws = ws;
     let dead = false;
