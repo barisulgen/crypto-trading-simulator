@@ -12,6 +12,7 @@ import {
   openGap,
   persist,
   queryHistory,
+  settleLateCancels,
   touchAlive,
 } from '../src/db/store.ts';
 
@@ -208,6 +209,48 @@ describe('persist and loadSpotState', () => {
     expect(reloaded.orders.get(other.id)!.cancelArrivesAt).toBeNull();
     // Key order aside (the field is added back last), the reloaded state is the same.
     expect(JSON.parse(snapshot(reloaded))).toEqual(JSON.parse(snapshot(engine.state)));
+  });
+
+  it('settleLateCancels answers the cancel of an order that finished while it was in flight, once, in one transaction', () => {
+    const { engine, ctx, db, seasonId } = setup();
+    engine.deposit('spot', D('1000'), ctx);
+    const filled = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
+    arrive(engine, filled, ctx);
+    const open = placedOrder(engine.submit(limitBuy('99.40', '1'), ctx));
+    arrive(engine, open, ctx);
+    engine.cancel(filled.id, ctx);
+    engine.cancel(open.id, ctx);
+    const openAt = engine.state.orders.get(open.id)!.cancelArrivesAt;
+    ctx.now += 1;
+    const events = engine.onTrade('BTCUSDT', trade('99.45', '5', true), ctx); // fills the 99.50 buy only
+    persist(db, seasonId, engine.state, events);
+    const dataOf = (id: string) =>
+      JSON.parse((db.prepare('SELECT data FROM orders WHERE id = ?').get(id) as { data: string }).data);
+    expect(dataOf(filled.id).cancelArrivesAt).not.toBeNull();
+
+    const now = ctx.now + 60_000;
+    const written = settleLateCancels(db, seasonId, now);
+    expect(written.map((e) => [e.type, e.time, e.order.id, e.reason, e.order.cancelArrivesAt])).toEqual([
+      ['cancel_rejected', now, filled.id, 'Cancel arrived too late: order already filled', null],
+    ]);
+    expect(dataOf(filled.id).cancelArrivesAt).toBeNull();
+    expect(db.prepare('SELECT status, updated_at AS updatedAt FROM orders WHERE id = ?').get(filled.id)).toEqual({
+      status: 'filled',
+      updatedAt: now,
+    });
+    const rows = db.prepare("SELECT time, symbol, market, payload FROM events WHERE type = 'cancel_rejected'").all() as {
+      time: number;
+      symbol: string;
+      market: string;
+      payload: string;
+    }[];
+    expect(rows.map((r) => [r.time, r.symbol, r.market, JSON.parse(r.payload).reason])).toEqual([
+      [now, 'BTCUSDT', 'spot', 'Cancel arrived too late: order already filled'],
+    ]);
+    // A live order's cancel is left to the engine.
+    expect(dataOf(open.id).cancelArrivesAt).toBe(openAt);
+    expect(settleLateCancels(db, seasonId, now + 1)).toEqual([]);
+    expect(db.prepare("SELECT count(*) AS n FROM events WHERE type = 'cancel_rejected'").get()).toEqual({ n: 1 });
   });
 
   it('terminal orders are stored but not loaded', () => {

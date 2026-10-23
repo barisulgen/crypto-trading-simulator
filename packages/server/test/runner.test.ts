@@ -447,6 +447,35 @@ describe('EngineRunner', () => {
     expect(b.fatal).toEqual([]);
   });
 
+  it('restart: a cancel in flight on an order that filled before the stop is recorded as too late during startup', () => {
+    const a = setup();
+    a.runner.start();
+    a.runner.deposit('spot', D('1000'));
+    const order = submittedOrder(a.runner.submit(limitBuy('99.50', '1')));
+    a.clock.advance(100);
+    a.runner.cancel(order.id);
+    a.clock.advance(1);
+    a.market.trade('BTCUSDT', trade('99.00', '5'));
+    expect(a.orderRow(order.id)!.status).toBe('filled');
+    a.runner.stop(); // before the cancel arrives
+    expect(JSON.parse(a.orderRow(order.id)!.data).cancelArrivesAt).not.toBeNull();
+    expect(a.eventsOf('cancel_rejected')).toEqual([]);
+
+    a.clock.advance(60_000);
+    const b = setup({ db: a.db, clock: a.clock });
+    expect(b.eventsOf('cancel_rejected').map((e) => [e.time, e.symbol, e.payload.order.id, e.payload.reason])).toEqual([
+      [b.clock.now, 'BTCUSDT', order.id, 'Cancel arrived too late: order already filled'],
+    ]);
+    expect(b.eventsOf('cancel_rejected')[0]!.payload.order.cancelArrivesAt).toBeNull();
+    expect(JSON.parse(b.orderRow(order.id)!.data).cancelArrivesAt).toBeNull();
+    expect(b.orderRow(order.id)!.status).toBe('filled');
+
+    // Recorded once: a later restart finds nothing left to answer.
+    const c = setup({ db: a.db, clock: a.clock });
+    expect(c.eventsOf('cancel_rejected')).toHaveLength(1);
+    expect(c.fatal).toEqual([]);
+  });
+
   it('restart within the cancel delay: the cancel arrives at its own time', () => {
     const a = setup();
     a.runner.start();

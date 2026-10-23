@@ -26,6 +26,7 @@ import {
   loadOpenGaps,
   openGap,
   persist,
+  settleLateCancels,
   toJson,
   touchAlive,
 } from './db/store.ts';
@@ -153,6 +154,7 @@ export class EngineRunner {
     this.violations = checkInvariants(deps.engine.state);
     for (const v of this.violations) deps.logger.error(`Account state failed integrity check: ${v}`);
     this.seedGaps();
+    this.settleLateCancels();
     if (this.violations.length === 0 && !this.dead) this.recover();
   }
 
@@ -393,6 +395,19 @@ export class EngineRunner {
     this.lastStateKey = key;
     this.d.onBroadcast({ type: 'account', account: this.account() });
     this.d.onBroadcast({ type: 'orders', orders });
+  }
+
+  /**
+   * Startup: a cancel still in flight on an order that finished before the server stopped is
+   * answered as too late (cancel_rejected); such orders are not loaded, so recover() never sees them.
+   */
+  private settleLateCancels(): void {
+    if (this.dead) return;
+    try {
+      settleLateCancels(this.d.db, this.d.seasonId, this.d.now());
+    } catch (e) {
+      this.die('persist failed', e);
+    }
   }
 
   /**

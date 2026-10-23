@@ -242,6 +242,45 @@ export function persist(
   })();
 }
 
+// ---- late cancels ----
+
+type CancelRejected = Extract<EngineEvent, { type: 'cancel_rejected' }>;
+
+/**
+ * Startup: an order that finished (filled, rejected, or cancelled with its pair) while the owner's
+ * cancel of it was in flight, with the server stopped before that cancel arrived. Finished orders
+ * are not loaded, so nothing else answers that cancel: each is recorded now as cancel_rejected and
+ * the stored order's cancel in flight is cleared, all in one transaction. Returns the events written.
+ */
+export function settleLateCancels(db: Db, seasonId: number, now: number): CancelRejected[] {
+  const rows = db
+    .prepare(
+      `SELECT data FROM orders WHERE season_id = ? AND status NOT IN (${NON_TERMINAL.map(() => '?').join(',')})
+         AND json_extract(data, '$.cancelArrivesAt') IS NOT NULL
+       ORDER BY created_at, rowid`,
+    )
+    .all(seasonId, ...NON_TERMINAL) as { data: string }[];
+  if (rows.length === 0) return [];
+  const insEvent = db.prepare(
+    "INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, 'cancel_rejected', ?, 'spot', ?)",
+  );
+  const upOrder = db.prepare(
+    'UPDATE orders SET data = ?, updated_at = max(updated_at, ?) WHERE id = ? AND season_id = ?',
+  );
+  const events = rows.map((r): CancelRejected => {
+    const order = { ...reviveOrder(JSON.parse(r.data) as Record<string, unknown>), cancelArrivesAt: null };
+    const reason = `Cancel arrived too late: order already ${order.status}`;
+    return { type: 'cancel_rejected', time: now, order, reason };
+  });
+  db.transaction(() => {
+    for (const e of events) {
+      insEvent.run(seasonId, e.time, e.order.symbol, toJson(e));
+      upOrder.run(toJson(e.order), e.time, e.order.id, seasonId);
+    }
+  })();
+  return events;
+}
+
 // ---- open gaps ----
 
 /**
