@@ -1,6 +1,9 @@
 import type { Decimal } from '../decimal.ts';
 import type { BookSnapshot, Side } from '../types.ts';
 
+/** A perpetual position's direction: a long gains when the price rises, a short when it falls. */
+export type PositionSide = 'long' | 'short';
+
 /** Binance USDⓈ-M perpetual trading rules for one symbol (fapi exchangeInfo). */
 export interface PerpRules {
   symbol: string;

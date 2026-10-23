@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { D, floorToStep, isMultipleOf, roundUp8 } from '../src/decimal.ts';
+import { D, floorToStep, isMultipleOf, roundDown8, roundUp8 } from '../src/decimal.ts';
 
 describe('decimal helpers', () => {
   it('floors to a step', () => {
@@ -12,6 +12,10 @@ describe('decimal helpers', () => {
   });
   it('rounds up to 8 decimals', () => {
     expect(roundUp8(D('0.149660001')).toString()).toBe('0.14966001');
+  });
+  it('rounds down to 8 decimals', () => {
+    expect(roundDown8(D('0.149660019')).toString()).toBe('0.14966001');
+    expect(roundDown8(D('-0.149660019')).toString()).toBe('-0.14966001');
   });
   it('never uses exponent notation', () => {
     expect(D('0.00000012').toString()).toBe('0.00000012');

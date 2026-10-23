@@ -24,3 +24,8 @@ export function isMultipleOf(x: Decimal, step: Decimal): boolean {
 export function roundUp8(x: Decimal): Decimal {
   return x.toDecimalPlaces(8, Decimal.ROUND_UP);
 }
+
+/** Round toward zero to 8 decimal places. */
+export function roundDown8(x: Decimal): Decimal {
+  return x.toDecimalPlaces(8, Decimal.ROUND_DOWN);
+}
