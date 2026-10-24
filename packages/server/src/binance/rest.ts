@@ -1,11 +1,12 @@
 import type { Logger } from '../log.ts';
 import { defaultSetTimer } from '../market/ws.ts';
 import type { SetTimer } from '../market/ws.ts';
-import { PauseController, quietLogger, RestCore } from './restCore.ts';
-import type { RawJson } from './restCore.ts';
+import { aggTradesQuery, PauseController, quietLogger, RestCore } from './restCore.ts';
+import type { AggTradesQuery, RawJson } from './restCore.ts';
 import { requestLane, requestWeight, WEIGHT_LIMIT_1M, WeightBudget } from './weightBudget.ts';
+import type { Lane } from './weightBudget.ts';
 
-export type { RawJson } from './restCore.ts';
+export type { AggTradesQuery, RawJson } from './restCore.ts';
 
 const BASE = 'https://api.binance.com';
 
@@ -59,8 +60,8 @@ export class BinanceRest {
     this.core.dispose();
   }
 
-  private get(path: string, query: string): Promise<RawJson> {
-    return this.core.get(path, query, { weight: requestWeight(path, query), lane: requestLane(path) });
+  private get(path: string, query: string, lane: Lane = requestLane(path)): Promise<RawJson> {
+    return this.core.get(path, query, { weight: requestWeight(path, query), lane });
   }
 
   exchangeInfo(symbols: string[]): Promise<RawJson> {
@@ -75,9 +76,25 @@ export class BinanceRest {
     return this.get('/api/v3/avgPrice', `symbol=${symbol}`);
   }
 
-  klines(symbol: string, interval: string, limit: number, endTime?: number): Promise<RawJson> {
+  /**
+   * Klines ending by `endTime` (the latest when omitted), from `opts.startTime` when given. History
+   * fetched for catch-up asks for the bulk lane, so it waits behind the live requests.
+   */
+  klines(
+    symbol: string,
+    interval: string,
+    limit: number,
+    endTime?: number,
+    opts: { startTime?: number; lane?: Lane } = {},
+  ): Promise<RawJson> {
+    const start = opts.startTime === undefined ? '' : `&startTime=${opts.startTime}`;
     const end = endTime === undefined ? '' : `&endTime=${endTime}`;
-    return this.get('/api/v3/klines', `symbol=${symbol}&interval=${interval}&limit=${limit}${end}`);
+    return this.get('/api/v3/klines', `symbol=${symbol}&interval=${interval}&limit=${limit}${start}${end}`, opts.lane);
+  }
+
+  /** Aggregate trades (only catch-up asks for them): always in the bulk lane. */
+  aggTrades(q: AggTradesQuery): Promise<RawJson> {
+    return this.get('/api/v3/aggTrades', aggTradesQuery(q));
   }
 
   serverTime(): Promise<RawJson> {

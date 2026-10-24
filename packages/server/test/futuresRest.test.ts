@@ -103,6 +103,29 @@ describe('futures request weights', () => {
   });
 });
 
+describe('futures catch-up history in the bulk lane', () => {
+  it('aggTrades, klines and markPriceKlines asked for in the bulk lane stop 200 short of the budget, behind live requests', async () => {
+    const { rest, clock, calls } = client();
+    for (let i = 0; i < 86; i++) await rest.aggTrades({ symbol: 'BTCUSDT', fromId: i, limit: 1000 }); // 1720
+    clock.advance(40_000);
+    const order: string[] = [];
+    const track = (name: string, p: Promise<unknown>) => p.then(() => order.push(name));
+    const all = [
+      track('trades', rest.aggTrades({ symbol: 'BTCUSDT', startTime: 1, endTime: 2, limit: 1000 }, 'bulk')),
+      track('klines', rest.klines('BTCUSDT', '1m', 31, 10, 20, 'bulk')),
+      track('marks', rest.markPriceKlines('BTCUSDT', '1m', 31, 10, 20, 'bulk')),
+      track('info', rest.exchangeInfo()),
+    ];
+    await tick();
+    await tick();
+    expect(order).toEqual(['info']);
+    expect(calls).toHaveLength(87);
+    clock.advance(20_000);
+    await Promise.all(all);
+    expect(order).toEqual(['info', 'trades', 'klines', 'marks']);
+  });
+});
+
 describe('futures weight budget', () => {
   it('is 1920 per 60 s, separate from spot: 96 aggTrades calls fit, the 97th waits for the first to leave the window', async () => {
     const { rest, clock, calls } = client();

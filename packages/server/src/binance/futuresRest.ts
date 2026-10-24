@@ -3,8 +3,8 @@ import { redact } from '../log.ts';
 import type { Logger } from '../log.ts';
 import { defaultSetTimer } from '../market/ws.ts';
 import type { SetTimer } from '../market/ws.ts';
-import { quietLogger, RestCore } from './restCore.ts';
-import type { PauseController, RawJson } from './restCore.ts';
+import { aggTradesQuery, quietLogger, RestCore } from './restCore.ts';
+import type { AggTradesQuery, PauseController, RawJson } from './restCore.ts';
 import { BUDGET_EXHAUSTED, BUDGET_MAX_WAIT_MS, CLIENT_CLOSED, WeightBudget } from './weightBudget.ts';
 import type { Lane } from './weightBudget.ts';
 
@@ -45,7 +45,10 @@ export function futuresRequestWeight(path: string, query: string): number {
   return w;
 }
 
-/** Depth snapshots are bulk; everything else (aggTrades, klines, mark price, rules, time) is critical. */
+/**
+ * Depth snapshots are bulk; everything else (aggTrades, klines, mark price, rules, time) is
+ * critical unless the caller asks for the bulk lane (the history catch-up fetches do).
+ */
 export function futuresRequestLane(path: string): Lane {
   return path === '/fapi/v1/depth' ? 'bulk' : 'critical';
 }
@@ -138,13 +141,7 @@ export interface FuturesRestOptions {
   pause: PauseController;
 }
 
-export interface AggTradesQuery {
-  symbol: string;
-  fromId?: number;
-  startTime?: number;
-  endTime?: number;
-  limit: number;
-}
+export type { AggTradesQuery } from './restCore.ts';
 
 export interface FundingRateQuery {
   symbol: string;
@@ -218,9 +215,15 @@ export class FuturesRest {
   }
 
   /** `query` as a function is built only when the request is sent (see RestCore.get); `weightQuery` then prices it. */
-  private get(path: string, query: string | (() => string), headers?: Record<string, string>, weightQuery = ''): Promise<RawJson> {
+  private get(
+    path: string,
+    query: string | (() => string),
+    headers?: Record<string, string>,
+    weightQuery = '',
+    lane: Lane = futuresRequestLane(path),
+  ): Promise<RawJson> {
     const weight = futuresRequestWeight(path, typeof query === 'string' ? query : weightQuery);
-    return this.core.get(path, query, { weight, lane: futuresRequestLane(path), headers });
+    return this.core.get(path, query, { weight, lane, headers });
   }
 
   private async fundingGet(path: string, query: string): Promise<RawJson> {
@@ -238,22 +241,35 @@ export class FuturesRest {
     return this.get('/fapi/v1/depth', `symbol=${symbol}&limit=${limit}`);
   }
 
-  aggTrades(q: AggTradesQuery): Promise<RawJson> {
-    const query = `symbol=${q.symbol}${opt('fromId', q.fromId)}${opt('startTime', q.startTime)}${opt('endTime', q.endTime)}&limit=${q.limit}`;
-    return this.get('/fapi/v1/aggTrades', query);
+  /** `lane` 'bulk' for history fetched by catch-up, so it waits behind the live requests. */
+  aggTrades(q: AggTradesQuery, lane?: Lane): Promise<RawJson> {
+    return this.get('/fapi/v1/aggTrades', aggTradesQuery(q), undefined, '', lane);
   }
 
-  klines(symbol: string, interval: string, limit: number, startTime?: number, endTime?: number): Promise<RawJson> {
+  klines(symbol: string, interval: string, limit: number, startTime?: number, endTime?: number, lane?: Lane): Promise<RawJson> {
     return this.get(
       '/fapi/v1/klines',
       `symbol=${symbol}&interval=${interval}&limit=${limit}${opt('startTime', startTime)}${opt('endTime', endTime)}`,
+      undefined,
+      '',
+      lane,
     );
   }
 
-  markPriceKlines(symbol: string, interval: '1m', limit: number, startTime: number, endTime: number): Promise<RawJson> {
+  markPriceKlines(
+    symbol: string,
+    interval: '1m',
+    limit: number,
+    startTime: number,
+    endTime: number,
+    lane?: Lane,
+  ): Promise<RawJson> {
     return this.get(
       '/fapi/v1/markPriceKlines',
       `symbol=${symbol}&interval=${interval}&limit=${limit}&startTime=${startTime}&endTime=${endTime}`,
+      undefined,
+      '',
+      lane,
     );
   }
 

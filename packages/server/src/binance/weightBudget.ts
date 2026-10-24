@@ -14,6 +14,7 @@ export const CLIENT_CLOSED = 'Binance REST client closed';
 const WAIT_LOG_EVERY_MS = 10_000;
 
 const FIXED_WEIGHTS: Record<string, number> = {
+  '/api/v3/aggTrades': 4,
   '/api/v3/avgPrice': 2,
   '/api/v3/exchangeInfo': 20,
   '/api/v3/klines': 2,
@@ -33,13 +34,15 @@ export function requestWeight(path: string, query: string): number {
 
 /**
  * Waiting requests are released by lane: 'critical' (small, keeps prices and rules alive: avgPrice,
- * exchangeInfo, time, klines) before 'bulk' (depth snapshots); first come first served within a lane.
- * Bulk also stops BULK_HEADROOM short of the budget, so a snapshot storm cannot starve avgPrice.
+ * exchangeInfo, time, klines) before 'bulk' (depth snapshots, and the history catch-up fetches:
+ * aggTrades, and klines asked for in the bulk lane); first come first served within a lane. Bulk
+ * also stops BULK_HEADROOM short of the budget, so a snapshot storm or a long catch-up cannot
+ * starve avgPrice.
  */
 export type Lane = 'critical' | 'bulk';
 
 export function requestLane(path: string): Lane {
-  return path === '/api/v3/depth' ? 'bulk' : 'critical';
+  return path === '/api/v3/depth' || path === '/api/v3/aggTrades' ? 'bulk' : 'critical';
 }
 
 export interface WeightBudgetDeps {

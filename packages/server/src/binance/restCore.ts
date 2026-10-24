@@ -12,6 +12,25 @@ export type RawJson = any;
 
 export const quietLogger: Logger = { info() {}, warn() {}, error() {} };
 
+/**
+ * An aggregate-trades query, spot or futures: by `fromId`, by `startTime`/`endTime`, or neither for
+ * the most recent trades.
+ */
+export interface AggTradesQuery {
+  symbol: string;
+  fromId?: number;
+  startTime?: number;
+  endTime?: number;
+  limit: number;
+}
+
+const opt = (key: string, v: number | undefined) => (v === undefined ? '' : `&${key}=${v}`);
+
+/** The query string of an aggTrades call. */
+export function aggTradesQuery(q: AggTradesQuery): string {
+  return `symbol=${q.symbol}${opt('fromId', q.fromId)}${opt('startTime', q.startTime)}${opt('endTime', q.endTime)}&limit=${q.limit}`;
+}
+
 /** Retry-After in seconds, or null when missing or unusable. */
 export function retryAfter(res: Response): number | null {
   const ra = Number(res.headers?.get?.('retry-after') ?? Number.NaN);

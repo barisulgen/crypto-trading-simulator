@@ -56,6 +56,22 @@ describe('request weights', () => {
     expect(requestWeight('/api/v3/exchangeInfo', 'symbols=[]')).toBe(20);
     expect(requestWeight('/api/v3/klines', 'symbol=X&interval=1m&limit=500')).toBe(2);
     expect(requestWeight('/api/v3/time', '')).toBe(1);
+    expect(requestWeight('/api/v3/aggTrades', 'symbol=X&limit=1000')).toBe(4);
+  });
+
+  it('sends aggTrades by id, by time and for the latest trade, and klines by time, with the expected query', async () => {
+    const { rest, calls } = client();
+    await rest.aggTrades({ symbol: 'BTCUSDT', fromId: 42, limit: 1000 });
+    await rest.aggTrades({ symbol: 'BTCUSDT', startTime: 1, endTime: 2, limit: 1000 });
+    await rest.aggTrades({ symbol: 'BTCUSDT', limit: 1 });
+    await rest.klines('BTCUSDT', '1m', 31, 20, { startTime: 10, lane: 'bulk' });
+    expect(calls).toEqual([
+      'https://api.binance.com/api/v3/aggTrades?symbol=BTCUSDT&fromId=42&limit=1000',
+      'https://api.binance.com/api/v3/aggTrades?symbol=BTCUSDT&startTime=1&endTime=2&limit=1000',
+      'https://api.binance.com/api/v3/aggTrades?symbol=BTCUSDT&limit=1',
+      'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=31&startTime=10&endTime=20',
+    ]);
+    expect(rest.usedWeight).toBe(4 + 4 + 4 + 2);
   });
 
   it('reserves each request in a rolling 60 s window', async () => {
@@ -232,6 +248,27 @@ describe('request lanes', () => {
     await Promise.all(all);
     expect(order).toEqual(['avg BTC', 'info', 'time', 'klines', 'avg ETH', 'depth BTC', 'depth ETH']);
     expect(calls.length).toBe(sent + 7);
+  });
+
+  it('catch-up history (aggTrades, klines asked for in the bulk lane) waits behind live requests and stops short of the budget', async () => {
+    const { rest, clock, calls } = client();
+    await spend(rest, 4400);
+    clock.advance(40_000);
+    const order: string[] = [];
+    const track = (name: string, p: Promise<unknown>) => p.then(() => order.push(name));
+    const all = [
+      track('trades', rest.aggTrades({ symbol: 'BTCUSDT', startTime: 1, endTime: 2, limit: 1000 })),
+      track('history klines', rest.klines('BTCUSDT', '1m', 31, 20, { startTime: 10, lane: 'bulk' })),
+      track('avg', rest.avgPrice('BTCUSDT')),
+    ];
+    await tick();
+    await tick();
+    // The bulk lane may not go past 4400 of the 4800: only the live request is sent.
+    expect(order).toEqual(['avg']);
+    expect(calls.length).toBe(4400 / 20 + 1);
+    clock.advance(20_000); // the spent weight leaves the window
+    await Promise.all(all);
+    expect(order).toEqual(['avg', 'trades', 'history klines']);
   });
 });
 
