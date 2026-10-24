@@ -28,7 +28,9 @@ import {
   loadSpotState,
   openGap,
   persist,
+  queryFills,
   queryHistory,
+  recentOrders,
   settleLateCancels,
   touchAlive,
 } from '../src/db/store.ts';
@@ -1248,5 +1250,35 @@ describe('checkInvariants: perps', () => {
     s.positions.BTCUSDT = p;
     s.positions.ETHUSDT = { ...p, id: 'p-other' };
     expect(checkInvariants(sim)).toEqual(['Position under ETHUSDT is for BTCUSDT', 'More than one position for BTCUSDT']);
+  });
+});
+
+describe('fills and recent orders by market', () => {
+  it('perp fills carry market, position id and uncovered; a capped close keeps bankruptcyCapped in its event', () => {
+    const { ctx, sim, perp, db, seasonId } = perpSetup();
+    const events: SimEvent[] = [];
+    const dep = sim.deposit('leverage', D('5000'), ctx);
+    if (!dep.ok) throw new Error(dep.reason);
+    events.push(...dep.events);
+    const open = perp.submit(perpMarketOrder('buy', '0.1'), ctx);
+    const opened = perpArrive(perp, perpPlaced(open), ctx);
+    // A catch-up close held to the margin is stored as the engine gave it.
+    const capped = opened.map((e) =>
+      e.type === 'fill' ? { ...e, fill: { ...e.fill, bankruptcyCapped: true as const, uncappedPrice: D('76000.5') } } : e,
+    );
+    events.push(...open, ...capped);
+    persist(db, seasonId, sim, events);
+
+    const positionId = perp.state.positions.BTCUSDT!.id;
+    const fills = queryFills(db, seasonId, { market: 'perp', limit: 10 });
+    expect(fills).toEqual([expect.objectContaining({ market: 'perp', positionId, uncovered: null, roundTripId: null, qty: '0.1' })]);
+    expect(queryFills(db, seasonId, { market: 'spot', limit: 10 })).toEqual([]);
+    expect(queryFills(db, seasonId, { market: 'perp', symbol: 'ETHUSDT', limit: 10 })).toEqual([]);
+    const [row] = queryHistory(db, { seasonId, types: ['fill'], market: 'perp', limit: 10 }).rows;
+    expect(row!.payload).toMatchObject({ fill: { bankruptcyCapped: true, uncappedPrice: '76000.5', positionId } });
+
+    const recent = recentOrders(db, seasonId, 10, 'perp') as { market: string; status: string }[];
+    expect(recent.map((o) => [o.market, o.status])).toEqual([['perp', 'filled']]);
+    expect(recentOrders(db, seasonId, 10, 'spot')).toEqual([]);
   });
 });

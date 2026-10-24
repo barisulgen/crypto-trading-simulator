@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Logger } from '../log.ts';
 
 export const SESSION_COOKIE = 'sim_session';
+export const SESSION_EXPIRED = 'Session expired; log in again';
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 /** A session ends after this long without use ... */
@@ -34,6 +35,21 @@ function deny(reply: FastifyReply, code: number, error: string): FastifyReply {
   return reply.code(code).send({ error });
 }
 
+/** A LAN session seen from a long-lived connection (the /ws socket) opened with it. */
+export interface SessionHandle {
+  /** False once the session has expired (idle 24 h or 7 days old) or is gone. */
+  alive(): boolean;
+  /** Use of the session: renews its idle timer while it is alive. */
+  touch(): void;
+}
+
+export interface Auth {
+  /** The session of a request that passed the gate; null without a password (localhost only: no sessions). */
+  sessionOf(req: FastifyRequest): SessionHandle | null;
+  /** How many addresses have recent wrong passwords on record (for tests). */
+  loginFailureAddresses(): number;
+}
+
 export interface AuthOptions {
   appPassword: string | null;
   logger: Logger;
@@ -50,13 +66,14 @@ export interface AuthOptions {
  * `/%61pi/account` is `/api/account`), and only POST /api/login and `publicRoutes` are open;
  * every other route, /ws and unmatched paths need the session (401 otherwise).
  * A session expires after 24 h without use or 7 days after login (401 'Session expired; log in
- * again'); 5 wrong passwords from one address within 15 minutes block further logins from it
- * (429) until the oldest failure is 15 minutes old.
+ * again'); messages and heartbeats on a /ws socket count as use (sessionOf). 5 wrong passwords
+ * from one address within 15 minutes block further logins from it (429) until the oldest failure is
+ * 15 minutes old; every login attempt first forgets the addresses whose failures are all older.
  * Without a password (localhost only), every request whose Host or Origin is not local is
  * refused (403), so another website cannot reach the API through DNS rebinding or a
  * cross-site WebSocket.
  */
-export function registerAuth(app: FastifyInstance, opts: AuthOptions): void {
+export function registerAuth(app: FastifyInstance, opts: AuthOptions): Auth {
   if (opts.appPassword === null) {
     app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
       const host = hostnameOf(req.headers.host ?? '', false);
@@ -66,12 +83,14 @@ export function registerAuth(app: FastifyInstance, opts: AuthOptions): void {
         return deny(reply, 403, 'Forbidden origin');
       }
     });
-    return;
+    return { sessionOf: () => null, loginFailureAddresses: () => 0 };
   }
 
   const expected = digest(opts.appPassword);
   const now = opts.now ?? Date.now;
   const sessions = new Map<string, { createdAt: number; lastUsed: number }>();
+  const expired = (s: { createdAt: number; lastUsed: number }, t: number): boolean =>
+    t - s.lastUsed >= SESSION_IDLE_MS || t - s.createdAt >= SESSION_MAX_MS;
   /** Times (ms) of each address's recent wrong passwords, oldest first. */
   const failures = new Map<string, number[]>();
   const recentFailures = (ip: string): number[] => {
@@ -94,9 +113,9 @@ export function registerAuth(app: FastifyInstance, opts: AuthOptions): void {
     const session = token === null ? undefined : sessions.get(token);
     if (token === null || !session) return deny(reply, 401, 'Login required');
     const t = now();
-    if (t - session.lastUsed >= SESSION_IDLE_MS || t - session.createdAt >= SESSION_MAX_MS) {
+    if (expired(session, t)) {
       sessions.delete(token);
-      return deny(reply, 401, 'Session expired; log in again');
+      return deny(reply, 401, SESSION_EXPIRED);
     }
     session.lastUsed = t;
   });
@@ -105,6 +124,8 @@ export function registerAuth(app: FastifyInstance, opts: AuthOptions): void {
     const body = req.body as { password?: unknown } | null;
     const password = body && typeof body === 'object' ? body.password : undefined;
     if (typeof password !== 'string' || password === '') return deny(reply, 400, 'Missing field password');
+    // Addresses that never came back would otherwise stay on record for good.
+    for (const ip of [...failures.keys()]) recentFailures(ip);
     const recent = recentFailures(req.ip);
     if (recent.length >= LOGIN_FAILURES_MAX) {
       const minutes = Math.ceil((recent[0]! + LOGIN_WINDOW_MS - now()) / 60_000);
@@ -119,9 +140,7 @@ export function registerAuth(app: FastifyInstance, opts: AuthOptions): void {
     }
     const token = randomBytes(32).toString('hex');
     const t = now();
-    for (const [k, v] of sessions) {
-      if (t - v.lastUsed >= SESSION_IDLE_MS || t - v.createdAt >= SESSION_MAX_MS) sessions.delete(k);
-    }
+    for (const [k, v] of sessions) if (expired(v, t)) sessions.delete(k);
     sessions.set(token, { createdAt: t, lastUsed: t });
     failures.delete(req.ip);
     reply.header(
@@ -130,4 +149,24 @@ export function registerAuth(app: FastifyInstance, opts: AuthOptions): void {
     );
     return reply.code(200).send({ ok: true });
   });
+
+  return {
+    // The gate has let the request through, so its cookie names a live session. Once that session
+    // expires it is left in the map: the next request with the cookie is told it expired.
+    sessionOf: (req) => {
+      const token = cookieValue(req.headers.cookie, SESSION_COOKIE);
+      if (token === null) return null;
+      const alive = () => {
+        const s = sessions.get(token);
+        return s !== undefined && !expired(s, now());
+      };
+      return {
+        alive,
+        touch: () => {
+          if (alive()) sessions.get(token)!.lastUsed = now();
+        },
+      };
+    },
+    loginFailureAddresses: () => failures.size,
+  };
 }

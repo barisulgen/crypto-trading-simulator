@@ -48,6 +48,7 @@ export {
   DEFAULT_LEVERAGE,
   emptyPerpState,
   evictTerminal as evictTerminalPerp,
+  leverageFor,
   putOrder as putPerpOrder,
   takeDirty as takePerpDirty,
 } from './perp/state.ts';

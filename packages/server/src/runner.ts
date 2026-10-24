@@ -5,12 +5,16 @@ import {
   ctxFor,
   floorMinute,
   FUNDING_WINDOW_MS,
+  leverageFor,
   liquidationPrice,
+  maintenanceMargin,
+  marginRatio,
   ORDER_NOT_OPEN,
   RESTART_REASON,
   arrivalDelay,
   putOrder,
   putPerpOrder,
+  unrealizedPnl,
   valueAccount,
 } from '@sim/engine';
 import type {
@@ -36,6 +40,7 @@ import type {
   PerpOrderRequest,
   PerpPreview,
   PerpRules,
+  Position,
   PriceLevel,
   Side,
   SimCtx,
@@ -103,6 +108,41 @@ export class RefusedError extends Error {
 /** Feed health by symbol; `catchingUp` is set while the key catches up after a gap. */
 export type HealthMap = Record<string, { fresh: boolean; reason: string | null; catchingUp?: boolean }>;
 
+/** Feed health of every market and symbol (spot:BTCUSDT, perp:BTCUSDT, ...), with whether each is catching up. */
+export type MarketHealth = Record<MarketKey, { fresh: boolean; reason: string | null; catchingUp: boolean }>;
+
+/**
+ * What the health message carries: the spot feed health by symbol (as the spot screens read it),
+ * every market and symbol's health, and the keys catching up.
+ */
+export interface HealthMessage {
+  health: HealthMap;
+  markets: MarketHealth;
+  catchingUp: MarketKey[];
+}
+
+/**
+ * An open position as the owner sees it, at the last mark price received: while that mark is stale
+ * (markFresh false) the figures are from it and flagged, and with no mark at all they are null,
+ * never guessed. The margin ratio is maintenance margin / margin balance (liquidated at 1; written
+ * "Infinity" once the balance is gone); the maintenance figures and the liquidation price are null
+ * while the leverage tiers are not loaded, and the liquidation price is also null when a fall in
+ * price cannot liquidate the position.
+ */
+export interface PositionView extends Position {
+  marginMode: 'isolated';
+  markPrice: Decimal | null;
+  markFresh: boolean;
+  /** When the mark was received (ms); null before the first. */
+  markAt: number | null;
+  unrealizedPnl: Decimal | null;
+  /** Margin plus unrealised P&L. */
+  marginBalance: Decimal | null;
+  maintenanceMargin: Decimal | null;
+  marginRatio: Decimal | null;
+  liquidationPrice: Decimal | null;
+}
+
 /** Account value plus the raw wallet balances and each held coin's average-cost basis. */
 export interface AccountSnapshot extends AccountValue {
   balances: Ledger['balances'];
@@ -113,8 +153,9 @@ export interface AccountSnapshot extends AccountValue {
 export type RunnerMessage =
   | { type: 'account'; account: AccountSnapshot }
   | { type: 'orders'; orders: SpotOrder[]; perpOrders: PerpOrder[] }
+  | { type: 'positions'; positions: PositionView[] }
   | ({ type: 'notice' } & Notice)
-  | { type: 'health'; health: HealthMap; catchingUp: MarketKey[] };
+  | ({ type: 'health' } & HealthMessage);
 
 /** What the runner reads from MarketData beyond the engine's MarketView. */
 export interface RunnerMarket extends MarketView {
@@ -462,6 +503,24 @@ export class EngineRunner implements FundingSim {
     return health;
   }
 
+  /** Every watched market and symbol (spot keys first), with its feed health and whether it is catching up. */
+  marketHealth(): MarketHealth {
+    const snapshots = { spot: this.d.spotMarket.healthSnapshot(), perp: this.d.perpMarket.healthSnapshot() };
+    const catching = new Set(this.catchUp.keys());
+    const out = {} as MarketHealth;
+    for (const key of this.keys) {
+      const { market, symbol } = splitKey(key);
+      const h = snapshots[market][symbol] ?? { fresh: false, reason: 'Data stale' };
+      out[key] = { fresh: h.fresh, reason: h.reason, catchingUp: catching.has(key) };
+    }
+    return out;
+  }
+
+  /** The health message's content (see HealthMessage). */
+  healthMessage(): HealthMessage {
+    return { health: this.healthSnapshot(), markets: this.marketHealth(), catchingUp: this.catchUp.keys() };
+  }
+
   // ---- reads ----
 
   account(): AccountSnapshot {
@@ -500,6 +559,50 @@ export class EngineRunner implements FundingSim {
     return [...this.d.sim.perp.state.orders.values()]
       .filter((o) => LIVE.has(o.status))
       .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /** An order of either market still in memory (live, or finished and not yet saved); undefined otherwise. */
+  order(orderId: string): SpotOrder | PerpOrder | undefined {
+    return this.d.sim.spot.state.orders.get(orderId) ?? this.d.sim.perp.state.orders.get(orderId);
+  }
+
+  /** Every open position at the last mark received, oldest first (see PositionView). */
+  positions(): PositionView[] {
+    const perp = this.d.perpMarket;
+    return Object.values(this.d.sim.perp.state.positions)
+      .sort((a, b) => a.openedAt - b.openedAt)
+      .map((p): PositionView => {
+        const brackets = this.bracketsOf(p.symbol);
+        const mark = perp.markPrice(p.symbol);
+        const view: PositionView = {
+          ...p,
+          marginMode: 'isolated',
+          markPrice: mark,
+          markFresh: mark !== null && perp.isMarkFresh(p.symbol),
+          markAt: mark === null ? null : perp.markReceivedAt(p.symbol),
+          unrealizedPnl: null,
+          marginBalance: null,
+          maintenanceMargin: null,
+          marginRatio: null,
+          liquidationPrice: brackets ? liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin) : null,
+        };
+        if (mark === null) return view;
+        const pnl = unrealizedPnl(p.side, p.qty, p.entryPrice, mark);
+        const balance = p.margin.plus(pnl);
+        const maintenance = brackets ? maintenanceMargin(brackets, p.qty, mark) : null;
+        return {
+          ...view,
+          unrealizedPnl: pnl,
+          marginBalance: balance,
+          maintenanceMargin: maintenance,
+          marginRatio: maintenance ? marginRatio(maintenance, balance) : null,
+        };
+      });
+  }
+
+  /** The symbol's perp leverage setting (the default, capped at the maximum, until one is set) and margin mode. */
+  perpSetting(symbol: string): { leverage: number; marginMode: 'isolated' } {
+    return { leverage: leverageFor(this.d.sim.perp.state, symbol, this.bracketsOf(symbol)), marginMode: 'isolated' };
   }
 
   get state(): SpotState {
@@ -719,7 +822,7 @@ export class EngineRunner implements FundingSim {
     this.timer(fire, Math.max(0, at - this.d.now()));
   }
 
-  /** Account and orders after every engine call; skipped only when nothing changed and there were no events. */
+  /** Account, orders and positions after every engine call; skipped only when nothing changed and there were no events. */
   private publishState(changed: boolean): void {
     const orders = this.openOrders();
     const perpOrders = this.openPerpOrders();
@@ -730,6 +833,7 @@ export class EngineRunner implements FundingSim {
     this.lastStateKey = key;
     this.d.onBroadcast({ type: 'account', account: this.account() });
     this.d.onBroadcast({ type: 'orders', orders, perpOrders });
+    this.d.onBroadcast({ type: 'positions', positions: this.positions() });
   }
 
   /**
@@ -1148,12 +1252,9 @@ export class EngineRunner implements FundingSim {
     return this.marketOf(market).healthSnapshot()[symbol]?.reason ?? 'Data stale';
   }
 
-  /**
-   * The spot health map, as the clients read it (perp health joins it with the perp API), and every
-   * key catching up.
-   */
+  /** The health message: spot health by symbol, every market and symbol's health, and every key catching up. */
   private broadcastHealth(): void {
-    this.d.onBroadcast({ type: 'health', health: this.healthSnapshot(), catchingUp: this.catchUp.keys() });
+    this.d.onBroadcast({ type: 'health', ...this.healthMessage() });
   }
 
   /**
@@ -1215,8 +1316,10 @@ function label(key: MarketKey): string {
 }
 
 /** The order a submit created (its first event names it: placed or rejected). */
-export function submittedOrder(events: EngineEvent[]): SpotOrder {
-  const first = events.find((e) => 'order' in e) as { order: SpotOrder } | undefined;
+export function submittedOrder(events: EngineEvent[]): SpotOrder;
+export function submittedOrder(events: PerpEvent[]): PerpOrder;
+export function submittedOrder(events: SimEvent[]): SpotOrder | PerpOrder {
+  const first = events.find((e) => 'order' in e) as { order: SpotOrder | PerpOrder } | undefined;
   if (!first) throw new Error('submit produced no order');
   return first.order;
 }

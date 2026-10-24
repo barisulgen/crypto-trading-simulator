@@ -212,6 +212,7 @@ export class TestPerpMarket extends FakePerpMarket {
   /** Deliver a live futures trade, as PerpMarketData does. */
   trade(symbol: string, t: AggTrade): void {
     this.setLastPrice(symbol, t.price);
+    this.tradeLog.set(symbol, [...(this.tradeLog.get(symbol) ?? []), t]);
     this.emitter.emit('trade', symbol, t);
   }
   /** Deliver a mark price update (recorded as the market's mark first, as PerpMarketData does). */
@@ -219,7 +220,34 @@ export class TestPerpMarket extends FakePerpMarket {
     this.setMarkPrice(symbol, D(price));
     this.markTimes.set(symbol, this.now());
     const m: MarkUpdate = { markPrice: D(price), indexPrice: D(price), fundingRate: D(fundingRate), nextFundingTime, eventTime: 0 };
+    this.markUpdates.set(symbol, m);
     this.emitter.emit('mark', symbol, m);
+  }
+  private readonly markUpdates = new Map<string, MarkUpdate>();
+  /** The last mark update of every symbol that has had one (mark()), as PerpMarketData.marks() reports it. */
+  marks(): Record<string, { markPrice: Decimal; fundingRate: Decimal; nextFundingTime: number; fresh: boolean }> {
+    const out: Record<string, { markPrice: Decimal; fundingRate: Decimal; nextFundingTime: number; fresh: boolean }> = {};
+    for (const [s, m] of this.markUpdates) {
+      out[s] = { markPrice: m.markPrice, fundingRate: m.fundingRate, nextFundingTime: m.nextFundingTime, fresh: this.isMarkFresh(s) };
+    }
+    return out;
+  }
+  /** A depth update changed the symbol's book (the 'book' event PerpMarketData emits). */
+  bookUpdate(symbol: string): void {
+    this.emitter.emit('book', symbol);
+  }
+  bookTop(symbol: string, levels = 20): BookSnapshot {
+    const b = this.book(symbol);
+    return { bids: b.bids.slice(0, levels), asks: b.asks.slice(0, levels) };
+  }
+  /** The futures trades delivered with trade(), oldest first. */
+  private readonly tradeLog = new Map<string, AggTrade[]>();
+  recentTrades(symbol: string, n = 50): AggTrade[] {
+    return (this.tradeLog.get(symbol) ?? []).slice(-n);
+  }
+  tierSource: { source: 'official' | 'unofficial' | 'bundled'; fetchedAt: number } | null = { source: 'bundled', fetchedAt: 1_760_000_000_000 };
+  tierInfo(): { source: 'official' | 'unofficial' | 'bundled'; fetchedAt: number } | null {
+    return this.tierSource;
   }
   consume(symbol: string, side: Side, levels: PriceLevel[]): void {
     this.consumed.push({ symbol, side, levels });

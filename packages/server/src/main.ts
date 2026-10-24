@@ -132,17 +132,19 @@ const funding = new FundingService({
 });
 hub = new ClientHub({
   market,
+  perpMarket,
   candles,
   runner,
   symbols: config.symbols,
   setTimer: defaultSetTimer,
   logger,
-  health: () => ({ health: runner.healthSnapshot(), catchingUp: runner.catchingUp() }),
+  health: () => runner.healthMessage(),
 });
 
 app = await buildApp({
   runner,
   market,
+  perpMarket,
   hub,
   candles,
   db,

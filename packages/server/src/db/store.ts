@@ -880,18 +880,19 @@ export function queryHistory(db: Db, q: HistoryQuery): { rows: HistoryRow[]; nex
   return { rows, nextBefore: rows.length === q.limit && last ? last.id : null };
 }
 
-/** The season's most recently updated orders, any status, as stored (decimals as strings). */
-export function recentOrders(db: Db, seasonId: number, limit: number): unknown[] {
+/** The season's most recently updated orders of one market, any status, as stored (decimals as strings), each with its market. */
+export function recentOrders(db: Db, seasonId: number, limit: number, market: Market): unknown[] {
   const rows = db
-    .prepare('SELECT data FROM orders WHERE season_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?')
-    .all(seasonId, limit) as { data: string }[];
-  return rows.map((r) => JSON.parse(r.data) as unknown);
+    .prepare('SELECT data, market FROM orders WHERE season_id = ? AND market = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?')
+    .all(seasonId, market, limit) as { data: string; market: Market }[];
+  return rows.map((r) => ({ ...(JSON.parse(r.data) as object), market: r.market }));
 }
 
 export interface FillRow {
   id: string;
   orderId: string;
   symbol: string;
+  market: Market;
   side: string;
   qty: string;
   price: string;
@@ -906,22 +907,36 @@ export interface FillRow {
   driftUsd: string;
   triggerPrice: string | null;
   realizedPnl: string | null;
+  /** Spot fills only; null for perp fills. */
   roundTripId: string | null;
+  /** Perp fills only: the position the fill opened or reduced; null for spot fills. */
+  positionId: string | null;
+  /** Perp fills only: the loss neither the margin nor free leverage USDT could cover; null when none. */
+  uncovered: string | null;
   time: number;
 }
 
-/** The season's fills, newest first, optionally for one symbol. */
-export function queryFills(db: Db, seasonId: number, q: { symbol?: string; limit: number }): FillRow[] {
+/**
+ * The season's fills of one market, newest first, optionally for one symbol. A close held to the
+ * position's margin (bankruptcyCapped, uncappedPrice) is told by its fill event in the history.
+ */
+export function queryFills(db: Db, seasonId: number, q: { market: Market; symbol?: string; limit: number }): FillRow[] {
   const bySymbol = q.symbol !== undefined;
   return db
     .prepare(
-      `SELECT id, order_id AS orderId, symbol, side, qty, price, quote, liquidity, fee_asset AS feeAsset, fee,
+      `SELECT id, order_id AS orderId, symbol, market, side, qty, price, quote, liquidity, fee_asset AS feeAsset, fee,
          fee_usd AS feeUsd, best_at_arrival AS bestAtArrival, best_at_submit AS bestAtSubmit,
          slippage_usd AS slippageUsd, drift_usd AS driftUsd, trigger_price AS triggerPrice,
-         realized_pnl AS realizedPnl, round_trip_id AS roundTripId, time
-       FROM fills WHERE season_id = ?${bySymbol ? ' AND symbol = ?' : ''} ORDER BY time DESC, rowid DESC LIMIT ?`,
+         realized_pnl AS realizedPnl, round_trip_id AS roundTripId, position_id AS positionId, uncovered, time
+       FROM fills WHERE season_id = ? AND market = ?${bySymbol ? ' AND symbol = ?' : ''}
+       ORDER BY time DESC, rowid DESC LIMIT ?`,
     )
-    .all(...(bySymbol ? [seasonId, q.symbol!, q.limit] : [seasonId, q.limit])) as FillRow[];
+    .all(...(bySymbol ? [seasonId, q.market, q.symbol!, q.limit] : [seasonId, q.market, q.limit])) as FillRow[];
+}
+
+/** Whether the database holds data recorded before catch-up existed (meta.test_data, set only by Phase 1). */
+export function isTestData(db: Db): boolean {
+  return db.prepare("SELECT 1 FROM meta WHERE key = 'test_data'").get() !== undefined;
 }
 
 // ---- equity, heartbeat ----
