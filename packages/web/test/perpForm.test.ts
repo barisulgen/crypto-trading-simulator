@@ -579,9 +579,9 @@ describe('perp live state', () => {
     });
   });
 
-  it('catching up after a feed gap blocks submit and says why; a stale feed still names its own reason', () => {
+  it('catching up after a data gap blocks submit and says why; a stale feed still names its own reason', () => {
     expect(perpLiveState({ feed: live, mark: mark(true), down: false, catchingUp: true })).toEqual({
-      staleReason: 'Catching up after a feed gap: trading resumes when it is done',
+      staleReason: 'Catching up after a data gap: trading resumes when it is done',
       blocked: true,
       liveMark: '80000',
     });

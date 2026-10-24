@@ -1,6 +1,18 @@
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { EmptyEstimate } from '../src/components/EmptyEstimate.tsx';
 import type { WirePreview } from '../src/lib/api.ts';
-import { buildOrderRequest, canAttach, createLatest, fillable, missingInput, previewMatches, submitBlock } from '../src/lib/orderForm.ts';
+import {
+  buildOrderRequest,
+  canAttach,
+  CATCHING_UP_REASON,
+  createLatest,
+  fillable,
+  missingInput,
+  previewMatches,
+  submitBlock,
+} from '../src/lib/orderForm.ts';
 import type { OrderFormFields } from '../src/lib/orderForm.ts';
 
 const form = (over: Partial<OrderFormFields> = {}): OrderFormFields => ({
@@ -196,10 +208,21 @@ describe('previewMatches', () => {
 });
 
 describe('submit button while the market is not live', () => {
-  it('is off and says why: interrupted, or catching up after a feed gap', () => {
+  it('the empty estimate (nothing entered yet) says why trading is off while the market catches up', () => {
+    const hint = 'Enter an amount to see the estimated price, fee and total.';
+    const catching = renderToStaticMarkup(createElement(EmptyEstimate, { hint, staleReason: CATCHING_UP_REASON }));
+    expect(catching).toContain('Catching up after a data gap: trading resumes when it is done');
+    expect(catching).toContain('role="status"');
+    expect(catching).toContain(hint);
+    const live = renderToStaticMarkup(createElement(EmptyEstimate, { hint, staleReason: null }));
+    expect(live).toContain(hint);
+    expect(live).not.toContain('role="status"');
+  });
+
+  it('is off and says why: interrupted, or catching up after a data gap', () => {
     expect(submitBlock({ stale: false, catchingUp: false })).toBeNull();
     expect(submitBlock({ stale: true, catchingUp: false })).toBe('Live data interrupted');
-    expect(submitBlock({ stale: false, catchingUp: true })).toBe('Catching up after a feed gap');
+    expect(submitBlock({ stale: false, catchingUp: true })).toBe('Catching up after a data gap');
     // Stale data outranks a pending catch-up.
     expect(submitBlock({ stale: true, catchingUp: true })).toBe('Live data interrupted');
   });

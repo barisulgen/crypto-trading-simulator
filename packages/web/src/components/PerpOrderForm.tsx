@@ -26,6 +26,7 @@ import type { PreviewState } from '../lib/previewLoop.ts';
 import { NO_QUICK, amountStep, perpQuickAmount, quickStep } from '../lib/quickAmount.ts';
 import type { Pct, QuickEvent, QuickState } from '../lib/quickAmount.ts';
 import { LeverageDialog, MarginModeDialog } from './LeverageDialog.tsx';
+import { EmptyEstimate } from './EmptyEstimate.tsx';
 import { QuickAmounts } from './QuickAmounts.tsx';
 import { TiersNote } from './TiersNote.tsx';
 import { Segmented, TextField } from './ui.tsx';
@@ -148,7 +149,7 @@ export function PerpEstimate({
 }) {
   const p = state.preview;
   if (missing !== null && state.key === null) {
-    return <p className="text-xs text-faint">{missing} to see the margin, fee and liquidation price.</p>;
+    return <EmptyEstimate hint={`${missing} to see the margin, fee and liquidation price.`} staleReason={staleReason} />;
   }
   if (state.error !== null) return <Note tone="error">{state.error}</Note>;
   if (!p) return <p className="text-xs text-faint">Estimating...</p>;
@@ -299,7 +300,7 @@ export function PerpOrderForm() {
   const leverage = perp?.leverage;
   const marginMode = perp ? MARGIN_MODE_LABEL[perp.marginMode] : '-';
   // Never a live-looking estimate on data that is not live.
-  // A catch-up still applying a feed gap: the server refuses orders on the symbol until it is done.
+  // A catch-up still applying a data gap: the server refuses orders on the symbol until it is done.
   const catchingUp = useLive((s) => feedStatus(s, 'perp', symbol).state === 'catching_up');
   const { staleReason, blocked, liveMark } = perpLiveState({ feed, mark, down, catchingUp });
 

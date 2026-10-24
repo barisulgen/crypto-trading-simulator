@@ -51,7 +51,7 @@ export const EVENT_TYPES = [
   { type: 'round_trip_closed', label: 'Round trips' },
   { type: 'funding', label: 'Funding' },
   { type: 'liquidation', label: 'Liquidations' },
-  { type: 'feed_gap', label: 'Feed gaps' },
+  { type: 'feed_gap', label: 'Data gaps' },
   { type: 'catch_up', label: 'Catch-ups' },
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number]['type'];
@@ -696,7 +696,7 @@ function describeKnown(row: HistoryRow): EventView {
     case 'feed_gap': {
       const g = row.payload as FeedGapPayload;
       return view(
-        'Feed gap',
+        'Data gap',
         'accent',
         [
           { label: 'Start', value: fmtDateTime(g.startedAt) },

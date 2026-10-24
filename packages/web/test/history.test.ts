@@ -455,10 +455,10 @@ describe('history rows', () => {
     expect(tone(v, 'P&L')).toBe('up');
   });
 
-  it('feed gap: start, end, duration and the reason', () => {
+  it('data gap: start, end, duration and the reason', () => {
     const start = at(2026, 10, 18, 9, 3, 2);
     const v = describeEvent(row('feed_gap', { startedAt: start, endedAt: T, reason: 'No depth update for 120 s' }, 'ETHUSDT'));
-    expect(v.label).toBe('Feed gap');
+    expect(v.label).toBe('Data gap');
     expect(v.tone).toBe('accent');
     expect(v.coin).toBe('ETH');
     expect(lines(v)).toEqual(['Start: 18 Oct 2026 09:03:02', 'End: 18 Oct 2026 09:05:07', 'Duration: 2m 05s']);

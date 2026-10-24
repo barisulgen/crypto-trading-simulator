@@ -151,7 +151,7 @@ export function perpLiveState(p: {
   feed: { fresh: boolean; reason: string | null } | undefined;
   mark: PerpMark | undefined;
   down: boolean;
-  /** The symbol's perp data is catching up after a feed gap: the server refuses orders until it is done. */
+  /** The symbol's perp data is catching up after a data gap: the server refuses orders until it is done. */
   catchingUp?: boolean;
 }): { staleReason: string | null; blocked: boolean; liveMark: string | null } {
   const feedStale = p.feed !== undefined && !p.feed.fresh;

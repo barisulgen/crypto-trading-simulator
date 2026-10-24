@@ -24,6 +24,7 @@ import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
 import type { PreviewState } from '../lib/previewLoop.ts';
 import { NO_QUICK, amountStep, quickAmount, quickHint, quickStep, spotFree } from '../lib/quickAmount.ts';
 import type { Pct, QuickEvent, QuickState } from '../lib/quickAmount.ts';
+import { EmptyEstimate } from './EmptyEstimate.tsx';
 import { PerpOrderForm } from './PerpOrderForm.tsx';
 import { Available, QuickAmounts } from './QuickAmounts.tsx';
 import { Segmented, TextField } from './ui.tsx';
@@ -103,7 +104,7 @@ function Estimate({
 }) {
   const p = state.preview;
   if (missing !== null && state.key === null) {
-    return <p className="text-xs text-faint">{missing} to see the estimated price, fee and total.</p>;
+    return <EmptyEstimate hint={`${missing} to see the estimated price, fee and total.`} staleReason={staleReason} />;
   }
   if (state.error !== null) {
     return (
@@ -184,7 +185,7 @@ function SpotOrderForm() {
   const base = rules?.base ?? symbol.replace(/USDT$/, '');
   const quote = rules?.quote ?? 'USDT';
   const stale = health !== undefined && !health.fresh;
-  // Catching up after a feed gap: the server refuses orders on the coin until it is done.
+  // Catching up after a data gap: the server refuses orders on the coin until it is done.
   const catchingUp = useLive((s) => feedStatus(s, 'spot', symbol).state === 'catching_up');
   const block = submitBlock({ stale, catchingUp });
 

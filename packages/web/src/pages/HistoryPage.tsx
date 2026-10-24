@@ -381,7 +381,7 @@ export function HistoryPage({ params }: { params: URLSearchParams }) {
     ) : (
       <Message>
         <p className="text-sm text-muted">Nothing recorded yet</p>
-        Deposits, orders, fills, positions, funding, liquidations and feed gaps will be listed here as they happen.
+        Deposits, orders, fills, positions, funding, liquidations and data gaps will be listed here as they happen.
       </Message>
     );
   } else {
