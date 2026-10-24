@@ -17,7 +17,7 @@ import { FeedGaps } from '../src/feedGaps.ts';
 import { marketKey, splitKey } from '../src/market/marketKey.ts';
 import type { MarketKey } from '../src/market/marketKey.ts';
 import { btcRules } from '../../engine/test/fixtures.ts';
-import { FakeClock, TestMarket, TestPerpMarket, liveStack, runnerHarness, settle } from './helpers.ts';
+import { FakeClock, FakeHistory, TestMarket, TestPerpMarket, liveStack, runnerHarness, settle } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
 const SYMBOLS = ['BTCUSDT'];
@@ -641,7 +641,7 @@ describe('EngineRunner', () => {
     t.clock.advance(200);
     t.market.setFresh('BTCUSDT', false);
     t.clock.advance(2000);
-    const release = t.history.hold();
+    const release = (t.history as FakeHistory).hold();
     t.market.setFresh('BTCUSDT', true);
     t.clock.advance(1000);
     expect(t.runner.catchingUp()).toEqual([marketKey('spot', 'BTCUSDT')]);
