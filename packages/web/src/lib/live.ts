@@ -22,6 +22,7 @@ import type {
   WirePosition,
 } from './api.ts';
 import { setPerpRules, setRules } from './format.ts';
+import { CATCHING_UP_REASON } from './orderForm.ts';
 import { bannerEntries } from './positions.ts';
 import type { BannerEntry } from './positions.ts';
 
@@ -287,6 +288,24 @@ export function catchingUpFeeds(s: Pick<LiveData, 'health' | 'markets' | 'catchi
   return out;
 }
 
+/** Whether the market's symbol is catching up after a data gap, whatever its freshness now. */
+function isCatchingUp(s: Pick<LiveData, 'health' | 'markets' | 'catchingUp'>, market: Market, symbol: string): boolean {
+  const key = `${market}:${symbol}`;
+  return (
+    s.catchingUp.includes(key) ||
+    s.markets[key]?.catchingUp === true ||
+    (market === 'spot' && s.health[symbol]?.catchingUp === true)
+  );
+}
+
+/**
+ * Why an action on the market's symbol (an order, a cancel, a pair, a leverage change) is off now
+ * because it catches up after a data gap, or null: the server refuses them all until it is done (409).
+ */
+export function catchingUpBlock(s: Pick<LiveData, 'health' | 'markets' | 'catchingUp'>, market: Market, symbol: string): string | null {
+  return isCatchingUp(s, market, symbol) ? CATCHING_UP_REASON : null;
+}
+
 /**
  * Why a transfer out of the leverage wallet is off now, or null: while any perpetual catches up, or
  * while one with a position or open orders has stale data (its feed interrupted or its mark stale),
@@ -299,7 +318,7 @@ export function leverageTransferBlock(
     ...Object.keys(s.markets).filter((k) => k.startsWith('perp:')).map((k) => k.slice(5)),
     ...s.catchingUp.filter((k) => k.startsWith('perp:')).map((k) => k.slice(5)),
   ]);
-  if ([...perps].some((symbol) => feedStatus(s, 'perp', symbol).state === 'catching_up')) {
+  if ([...perps].some((symbol) => isCatchingUp(s, 'perp', symbol))) {
     return 'Catching up after a data gap: transfers from the leverage wallet resume when it is done';
   }
   const open = [...(s.positions ?? []).map((p) => p.symbol), ...s.perpOrders.map((o) => o.symbol)];

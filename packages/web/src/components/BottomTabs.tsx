@@ -6,7 +6,7 @@ import type { Market, WireFillRow, WireOrder, WirePerpOrder } from '../lib/api.t
 import { ORDER_TYPE_LABEL, driftSign, fmtBalance, fmtCost, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { avgFill, holdingRows, valueTitle } from '../lib/holdings.ts';
 import type { HoldingRow } from '../lib/holdings.ts';
-import { useLive } from '../lib/live.ts';
+import { catchingUpBlock, useLive } from '../lib/live.ts';
 import type { LiveState } from '../lib/live.ts';
 import { cmpDec, floorToStep, fmtClock, fmtChartTime } from '../lib/market.ts';
 import { AttachPairDialog } from './AttachPairDialog.tsx';
@@ -57,6 +57,16 @@ function cancellable(o: Pick<WireOrder, 'status' | 'type'>): boolean {
 /** A cancel is on its way to the exchange (it takes an arrival delay): shown instead of the Cancel button. */
 function Cancelling() {
   return <span className="text-2xs whitespace-nowrap text-muted">Cancelling…</span>;
+}
+
+/** A cancel button, off with the reason while the order's market and coin catch up (the server refuses it). */
+function CancelButton({ market, symbol, label, onClick }: { market: Market; symbol: string; label: string; onClick(): void }) {
+  const blocked = useLive((s) => catchingUpBlock(s, market, symbol));
+  return (
+    <Button tone="quiet" size="sm" disabled={blocked !== null} title={blocked ?? undefined} onClick={onClick}>
+      {label}
+    </Button>
+  );
 }
 
 const ORDER_COLS: Col[] = [
@@ -141,9 +151,7 @@ function OrderRow({ o, onCancel, cancel = true }: { o: AnyOrder; onCancel(o: Any
           (o.cancelArrivesAt !== null ? (
             <Cancelling />
           ) : (
-            <Button tone="quiet" size="sm" onClick={() => onCancel(o)}>
-              Cancel
-            </Button>
+            <CancelButton market={market} symbol={o.symbol} label="Cancel" onClick={() => onCancel(o)} />
           ))}
       </Actions>
     </Row>
@@ -193,9 +201,7 @@ function OpenOrders() {
             (cancelling ? (
               <Cancelling />
             ) : (
-              <Button tone="quiet" size="sm" onClick={() => void cancel(legs[0]!)}>
-                Cancel pair
-              </Button>
+              <CancelButton market={o.market} symbol={o.symbol} label="Cancel pair" onClick={() => void cancel(legs[0]!)} />
             ))}
         </div>
         {legs.map((l) => (
@@ -225,6 +231,7 @@ const HOLDING_TEMPLATE = 'minmax(2.5rem,0.7fr) minmax(5.5rem,1fr) minmax(5rem,1f
 function HoldingLine({ h, onAttach }: { h: HoldingRow; onAttach(h: HoldingRow, qty: string): void }) {
   const tick = useLive((s) => s.meta?.rules[h.symbol]?.tickSize);
   const step = useLive((s) => s.meta?.rules[h.symbol]?.stepSize);
+  const blocked = useLive((s) => catchingUpBlock(s, 'spot', h.symbol));
   // Whole steps only: a buy's fee leaves a remainder the exchange would reject (LOT_SIZE).
   const wholeFree = step ? floorToStep(h.free, step) : h.free;
   return (
@@ -261,11 +268,12 @@ function HoldingLine({ h, onAttach }: { h: HoldingRow; onAttach(h: HoldingRow, q
       <Actions>
         <Button
           size="sm"
-          disabled={wholeFree === '0'}
+          disabled={wholeFree === '0' || blocked !== null}
           title={
-            wholeFree === '0'
+            blocked ??
+            (wholeFree === '0'
               ? 'Less than one size step is free: the rest is locked in open orders'
-              : 'Attach a linked stop-loss and take-profit'
+              : 'Attach a linked stop-loss and take-profit')
           }
           onClick={() => onAttach(h, wholeFree)}
         >

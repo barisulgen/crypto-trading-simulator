@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import { fmtUsd } from '../lib/format.ts';
-import { useLive } from '../lib/live.ts';
+import { catchingUpBlock, useLive } from '../lib/live.ts';
 import { maxPositionAt } from '../lib/perpForm.ts';
 import { Button, Dialog, ErrorText, TextField } from './ui.tsx';
 
@@ -26,12 +26,14 @@ function wholeIn(input: string, max: number): number | null {
 
 /**
  * Leverage from 1 to the coin's maximum (its first tier's), on a slider or typed, with the largest
- * position the tiers allow at the chosen leverage. The server has the last word: a refusal (the
- * leverage locked meanwhile, out of range) is shown as it said it.
+ * position the tiers allow at the chosen leverage. Off, with the reason, while the perpetual
+ * catches up after a data gap. The server has the last word: a refusal (the leverage locked
+ * meanwhile, out of range) is shown as it said it.
  */
 export function LeverageDialog({ open, symbol, onClose }: { open: boolean; symbol: string; onClose(): void }) {
   const perp = useLive((s) => s.meta?.perp?.[symbol]);
   const pushNotice = useLive((s) => s.pushNotice);
+  const blocked = useLive((s) => catchingUpBlock(s, 'perp', symbol));
   const max = perp?.maxLeverage ?? null;
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
@@ -116,8 +118,9 @@ export function LeverageDialog({ open, symbol, onClose }: { open: boolean; symbo
         <p className="text-xs text-muted">
           Higher leverage needs less margin for the same position and puts the liquidation price closer to the entry.
         </p>
+        {blocked && <ErrorText>{blocked}</ErrorText>}
         <ErrorText>{error}</ErrorText>
-        <Button type="submit" tone="primary" className="h-10" disabled={busy || chosen === null}>
+        <Button type="submit" tone="primary" className="h-10" disabled={busy || blocked !== null || chosen === null}>
           {busy ? 'Setting...' : chosen === null ? 'Set leverage' : `Set ${chosen}x`}
         </Button>
       </form>

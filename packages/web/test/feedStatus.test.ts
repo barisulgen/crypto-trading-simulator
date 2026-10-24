@@ -5,7 +5,7 @@ import { CatchUpIndicatorView } from '../src/components/CatchUpIndicator.tsx';
 import { FeedStatusList, feedLabel } from '../src/components/FeedIndicator.tsx';
 import { TestBannerView } from '../src/components/TestBanner.tsx';
 import type { MarketHealth } from '../src/lib/api.ts';
-import { catchingUpFeeds, feedStatus, feedSummary, initialLiveData, leverageTransferBlock } from '../src/lib/live.ts';
+import { catchingUpBlock, catchingUpFeeds, feedStatus, feedSummary, initialLiveData, leverageTransferBlock } from '../src/lib/live.ts';
 import type { LiveData } from '../src/lib/live.ts';
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
@@ -77,6 +77,25 @@ describe('feed status per coin and market', () => {
       { symbol: 'ETHUSDT', market: 'spot' },
       { symbol: 'ETHUSDT', market: 'perp' },
     ]);
+  });
+});
+
+describe('actions off while a market catches up', () => {
+  const reason = 'Catching up after a data gap: trading resumes when it is done';
+
+  it('gives the reason for the market and coin catching up only, fresh or not (the server refuses either way)', () => {
+    const s = state({ catchingUp: ['perp:BTCUSDT'] });
+    expect(catchingUpBlock(s, 'perp', 'BTCUSDT')).toBe(reason);
+    expect(catchingUpBlock(s, 'spot', 'BTCUSDT')).toBeNull();
+    expect(catchingUpBlock(s, 'perp', 'ETHUSDT')).toBeNull();
+    const stale = state({ catchingUp: ['spot:ETHUSDT'], markets: { 'spot:ETHUSDT': { fresh: false, reason: 'Disconnected', catchingUp: true } } });
+    expect(catchingUpBlock(stale, 'spot', 'ETHUSDT')).toBe(reason);
+  });
+
+  it('reads the per-symbol spot health before the per-market map arrives', () => {
+    const s = { ...initialLiveData(), health: { BTCUSDT: { fresh: true, reason: null, catchingUp: true } } };
+    expect(catchingUpBlock(s, 'spot', 'BTCUSDT')).toBe(reason);
+    expect(catchingUpBlock(state(), 'spot', 'BTCUSDT')).toBeNull();
   });
 });
 
