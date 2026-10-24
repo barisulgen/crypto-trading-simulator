@@ -2,10 +2,11 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { LiquidationAlertDialog, LiquidationAlertView, holdOnEscape } from '../src/components/LiquidationAlert.tsx';
-import { LastPriceHint } from '../src/components/PositionTpSlDialog.tsx';
+import { OpenOrdersView } from '../src/components/BottomTabs.tsx';
+import { LastPriceHint, StopLeg } from '../src/components/PositionTpSlDialog.tsx';
 import { PositionLine } from '../src/components/PositionsTab.tsx';
 import { WarningBannerView } from '../src/components/WarningBanner.tsx';
-import type { AccountSnapshot, WirePerpOrder, WirePosition } from '../src/lib/api.ts';
+import type { AccountSnapshot, WireOrder, WirePerpOrder, WirePosition } from '../src/lib/api.ts';
 import { pricesLoading, pricesPausedLabel } from '../src/lib/holdings.ts';
 import { initialLiveData, reduce, useLive } from '../src/lib/live.ts';
 import type { LiveData } from '../src/lib/live.ts';
@@ -212,6 +213,42 @@ describe('stop-loss and take-profit of a position', () => {
     const limit = stop({ id: 'l', type: 'limit', closePosition: false, price: '85000' });
     expect(positionStops([other, limit, tp, sl], wire())).toEqual({ stopLoss: sl, takeProfit: tp });
     expect(positionStops([other], wire())).toEqual({ stopLoss: null, takeProfit: null });
+  });
+
+  // A perp stop-loss/take-profit pair is cancelled a leg at a time: the server cancels only the
+  // order it is sent, and the other leg stays armed. No button may promise both.
+  const pair = (over: Partial<WirePerpOrder>) =>
+    stop({ ocoGroupId: 'g1', cancelArrivesAt: null, arrivesAt: 1, createdAt: 1, qty: null, quoteQty: null, price: null, filledQty: '0', filledQuote: '0', fee: '0', attach: null, parentId: null, ...over });
+  const sl = pair({ id: 'sl', type: 'stop_loss', triggerPrice: '70000' });
+  const tp = pair({ id: 'tp', type: 'take_profit', triggerPrice: '90000' });
+
+  it('the dialog offers a Cancel per leg of a pair, never "Cancel both"', () => {
+    for (const [o, label] of [[sl, 'Stop-loss'], [tp, 'Take-profit']] as const) {
+      const html = renderToStaticMarkup(createElement(StopLeg, { o, label, onCancel: noop }));
+      expect(html).toContain(label);
+      expect(html).not.toContain('Cancel both');
+      expect(html.match(/>Cancel</g)).toHaveLength(1);
+    }
+  });
+
+  it('the open orders list gives each perp leg its own Cancel, and keeps one Cancel pair for a spot pair', () => {
+    const spotLeg = (id: string, type: 'stop_loss' | 'take_profit') =>
+      ({ ...pair({ id, type, triggerPrice: '1' }), symbol: 'ETHUSDT', ocoGroupId: 'g2', qty: '1', closePosition: false }) as unknown as WireOrder;
+    const html = renderToStaticMarkup(
+      createElement(OpenOrdersView, { spot: [spotLeg('s1', 'stop_loss'), spotLeg('s2', 'take_profit')], perp: [sl, tp], onCancel: noop }),
+    );
+    const groups = html.split('aria-label="Linked pair"').slice(1);
+    expect(groups).toHaveLength(2);
+    const perpGroup = groups.find((g) => g.includes('Perp'))!;
+    const spotGroup = groups.find((g) => g.includes('Spot'))!;
+    expect(perpGroup).not.toContain('Cancel pair');
+    expect(perpGroup.match(/>Cancel</g)).toHaveLength(2);
+    expect(spotGroup.match(/>Cancel pair</g)).toHaveLength(1);
+    expect(spotGroup).not.toMatch(/>Cancel</);
+    // Once one perp leg is cancelled, the other is a plain order with its own Cancel.
+    const lone = renderToStaticMarkup(createElement(OpenOrdersView, { spot: [], perp: [tp], onCancel: noop }));
+    expect(lone).not.toContain('Linked pair');
+    expect(lone.match(/>Cancel</g)).toHaveLength(1);
   });
 });
 

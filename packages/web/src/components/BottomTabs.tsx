@@ -158,7 +158,7 @@ function OrderRow({ o, onCancel, cancel = true }: { o: AnyOrder; onCancel(o: Any
   );
 }
 
-/** Open orders of both markets, newest first; the two legs of a linked pair stay together under one Cancel. */
+/** Open orders of both markets, newest first. */
 function OpenOrders() {
   const spot = useLive((s) => s.orders);
   const perp = useLive((s) => s.perpOrders);
@@ -171,7 +171,22 @@ function OpenOrders() {
       pushNotice('error', e instanceof ApiError ? e.message : String(e));
     }
   }
+  return <OpenOrdersView spot={spot} perp={perp} onCancel={(o) => void cancel(o)} />;
+}
 
+/**
+ * The open orders given, newest first; the two legs of a linked pair stay together, under one
+ * Cancel pair on spot and with a Cancel each on perps.
+ */
+export function OpenOrdersView({
+  spot,
+  perp,
+  onCancel: cancel,
+}: {
+  spot: WireOrder[];
+  perp: WirePerpOrder[];
+  onCancel(o: AnyOrder): void;
+}) {
   const orders: AnyOrder[] = [
     ...spot.map((o) => ({ ...o, market: 'spot' as const })),
     ...perp.map((o) => ({ ...o, market: 'perp' as const })),
@@ -190,22 +205,30 @@ function OpenOrders() {
     const legs = orders
       .filter((l) => l.market === o.market && l.ocoGroupId === o.ocoGroupId)
       .sort((a, b) => (a.type === b.type ? 0 : a.type === 'stop_loss' ? -1 : 1));
+    // A leg whose partner is gone (a perp leg cancelled on its own) is no longer linked to anything.
+    if (legs.length < 2) {
+      items.push(<OrderRow key={o.id} o={o} onCancel={cancel} />);
+      continue;
+    }
+    // A spot pair is cancelled as one: a cancel sent for either leg covers both. A perp stop-loss
+    // or take-profit is cancelled on its own, the other leg staying armed, so each has its Cancel.
+    const together = o.market === 'spot';
     const executing = legs.some((l) => !cancellable(l));
-    // One cancel covers the pair, whichever leg it was sent for.
     const cancelling = legs.some((l) => l.cancelArrivesAt !== null);
     items.push(
       <div key={group} role="group" aria-label="Linked pair" className="border-l-2 border-faint">
         <div className="flex items-center justify-between gap-2 px-3 pt-1.5 text-2xs text-muted">
           <span>Linked pair - when one triggers, the other is cancelled</span>
-          {!executing &&
+          {together &&
+            !executing &&
             (cancelling ? (
               <Cancelling />
             ) : (
-              <CancelButton market={o.market} symbol={o.symbol} label="Cancel pair" onClick={() => void cancel(legs[0]!)} />
+              <CancelButton market={o.market} symbol={o.symbol} label="Cancel pair" onClick={() => cancel(legs[0]!)} />
             ))}
         </div>
         {legs.map((l) => (
-          <OrderRow key={l.id} o={l} onCancel={cancel} cancel={false} />
+          <OrderRow key={l.id} o={l} onCancel={cancel} cancel={!together} />
         ))}
       </div>,
     );

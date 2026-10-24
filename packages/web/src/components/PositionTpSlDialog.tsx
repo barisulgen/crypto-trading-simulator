@@ -36,6 +36,32 @@ export function LastPriceHint({
 }
 
 /**
+ * A stop already set on the position: its trigger, and its Cancel (or that a cancel is on its way).
+ * Cancel removes this stop only: the other of a pair stays armed.
+ */
+export function StopLeg({ o, label, onCancel }: { o: WirePerpOrder; label: string; onCancel(o: WirePerpOrder): void }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-ctl border border-line bg-canvas px-3 py-2 text-sm">
+      <span>
+        <span className="text-muted">{label}</span> {fmtPrice(o.symbol, o.triggerPrice, { market: 'perp' })} USDT
+      </span>
+      {o.cancelArrivesAt !== null ? (
+        <span className="text-xs text-muted">Cancelling…</span>
+      ) : (
+        <Button
+          size="sm"
+          disabled={o.status === 'triggered'}
+          title={o.ocoGroupId !== null ? `Cancels this ${label.toLowerCase()} only; the other stays armed` : undefined}
+          onClick={() => onCancel(o)}
+        >
+          Cancel
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/**
  * POST /api/perp/tpsl: a stop-loss and/or take-profit that close the whole position at market when
  * the last price reaches them (both set: when one triggers, the other is cancelled). A position has
  * at most one of each, so a leg already set is shown with its Cancel instead of a field. Refused
@@ -101,20 +127,7 @@ export function PositionTpSlDialog({ symbol, onClose }: { symbol: string | null;
     }
   }
 
-  const leg = (o: WirePerpOrder, label: string) => (
-    <div className="flex items-center justify-between gap-3 rounded-ctl border border-line bg-canvas px-3 py-2 text-sm">
-      <span>
-        <span className="text-muted">{label}</span> {fmtPrice(o.symbol, o.triggerPrice, { market: 'perp' })} USDT
-      </span>
-      {o.cancelArrivesAt !== null ? (
-        <span className="text-xs text-muted">Cancelling…</span>
-      ) : (
-        <Button size="sm" disabled={o.status === 'triggered'} onClick={() => void cancel(o)}>
-          {o.ocoGroupId !== null ? 'Cancel both' : 'Cancel'}
-        </Button>
-      )}
-    </div>
-  );
+  const leg = (o: WirePerpOrder, label: string) => <StopLeg o={o} label={label} onCancel={(x) => void cancel(x)} />;
 
   const typed = (!stops.stopLoss && !blank(stopLoss)) || (!stops.takeProfit && !blank(takeProfit));
   return (
