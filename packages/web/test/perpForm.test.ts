@@ -1,14 +1,16 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { D, Decimal, assumedPrice, orderCost } from '@sim/engine';
+import { D, Decimal, PerpEngine, assumedPrice, emptyLedger, emptyPerpState, orderCost } from '@sim/engine';
+import type { Bracket, PerpCtx, PerpMarketView, PerpOrderRequest, PerpRules } from '@sim/engine';
 import { PerpEstimate } from '../src/components/PerpOrderForm.tsx';
-import type { WireLevel, WirePerpOrder, WirePerpPreview, WirePosition } from '../src/lib/api.ts';
+import type { PerpMark, WireLevel, WirePerpOrder, WirePerpPreview, WirePosition } from '../src/lib/api.ts';
 import {
   buildPerpRequest,
   leverageLock,
   maxPositionAt,
   perpMissingInput,
+  perpLiveState,
   perpPreviewMatches,
   reduceExcess,
   reduceOnlyState,
@@ -180,7 +182,7 @@ describe('perp quick amounts: the share of free leverage USDT the engine would l
   it('reduce-only in USDT values the share at the limit price, else the mark; 100 % sends the coins', () => {
     const reduce = { qty: '0.5' };
     expect(perpQuickAmount(quick({ pct: 50, reduce, price: '80000.15' }))).toEqual({
-      amount: '20000.03',
+      amount: '20000.04',
       belowStep: false,
       belowCent: false,
     });
@@ -190,6 +192,126 @@ describe('perp quick amounts: the share of free leverage USDT the engine would l
       belowCent: false,
       sellAll: '0.5',
     });
+  });
+});
+
+const PERP_RULES: PerpRules = {
+  symbol: 'BTCUSDT',
+  base: 'BTC',
+  quote: 'USDT',
+  status: 'TRADING',
+  tickSize: D('0.1'),
+  minPrice: D('556.8'),
+  maxPrice: D('4529764'),
+  stepSize: D('0.001'),
+  minQty: D('0.001'),
+  maxQty: D('1000'),
+  marketStepSize: D('0.001'),
+  marketMinQty: D('0.001'),
+  marketMaxQty: D('120'),
+  minNotional: D('50'),
+  maxNumOrders: 200,
+  multiplierUp: D('1.05'),
+  multiplierDown: D('0.95'),
+  liquidationFee: D('0.0125'),
+  marketTakeBound: D('0.05'),
+};
+const TIERS: Bracket[] = [{ floor: D(0), cap: D('1000000000'), mmr: D('0.004'), cum: D(0), maxLeverage: 150 }];
+
+/**
+ * The engine itself on the quick amount's book, mark, last price and free USDT: its preview, then
+ * submit and arrival. 'accepted' when the order was placed and arrived without a rejection.
+ */
+function throughEngine(i: PerpQuickInput, qty: string): { preview: string | null; outcome: string } {
+  const level = (l: WireLevel) => ({ price: D(l.price), qty: D(l.qty) });
+  const book = { bids: i.bids.map(level), asks: i.asks.map(level) };
+  const view: PerpMarketView = {
+    isFresh: () => true,
+    isMarkFresh: () => true,
+    book: () => book,
+    best: (_symbol, side) => (side === 'buy' ? book.asks : book.bids)[0]?.price ?? null,
+    lastPrice: () => D(i.last!),
+    markPrice: () => D(i.mark!),
+    rules: () => PERP_RULES,
+    brackets: () => TIERS,
+  };
+  const ledger = emptyLedger(['USDT', 'BTC']);
+  ledger.balances.leverage.USDT = { free: D(i.free), locked: D(0) };
+  const engine = new PerpEngine(emptyPerpState(ledger));
+  engine.state.settings.BTCUSDT = { leverage: i.leverage, marginMode: 'isolated' };
+  let n = 0;
+  const ctx: PerpCtx = {
+    now: 1_000_000,
+    rng: () => 0,
+    newId: (prefix) => `${prefix}${++n}`,
+    market: view,
+    fees: { maker: D('0.0002'), taker: D(i.taker) },
+  };
+  const req: PerpOrderRequest = { symbol: 'BTCUSDT', side: i.side, type: i.type, qty };
+  if (i.type !== 'market') req.price = i.price;
+  const preview = engine.preview(req, ctx).rejectReason;
+  const submitted = engine.submit(req, ctx);
+  const placed = submitted.find((e) => e.type === 'order_placed');
+  if (placed?.type !== 'order_placed') {
+    const rejected = submitted.find((e) => e.type === 'order_rejected');
+    return { preview, outcome: `rejected at submit: ${rejected?.type === 'order_rejected' ? rejected.reason : '?'}` };
+  }
+  ctx.now = Math.max(ctx.now, placed.order.arrivesAt!);
+  const arrived = engine.arrive(placed.order.id, ctx);
+  const rejected = arrived.find((e) => e.type === 'order_rejected');
+  if (rejected?.type === 'order_rejected') return { preview, outcome: `rejected at arrival: ${rejected.reason}` };
+  return { preview, outcome: 'accepted' };
+}
+
+describe('perp quick amounts through the engine: placed and accepted at arrival on the same book', () => {
+  const deep = (price: string) => [lv(price, '100')];
+  const cases: [string, Partial<PerpQuickInput>][] = [
+    // A click on the best ask prefills the price: all of it fills at once, charged at market terms.
+    ['limit buy at the ask', { type: 'limit', side: 'buy', price: '80010', asks: deep('80010') }],
+    // Bids above the buffered last price: the part that fills at once is reserved at the bid, above the lock's 80120.
+    [
+      'limit sell through a high bid',
+      { type: 'limit', side: 'sell', price: '80100', bids: deep('80200'), free: '6000' },
+    ],
+    ['resting limit buy', { type: 'limit', side: 'buy', price: '79000' }],
+    ['market buy', { type: 'market', side: 'buy', mark: '79990', asks: deep('80010') }],
+    ['market sell', { type: 'market', side: 'sell', bids: deep('79990') }],
+  ];
+  for (const [name, over] of cases) {
+    it(`${name}: 100 % is accepted and previews no problem; one step more is refused and previews it`, () => {
+      const i = quick({ unit: 'coin', ...over });
+      const q = perpQuickAmount(i)!.amount;
+      expect(throughEngine(i, q)).toEqual({ preview: null, outcome: 'accepted' });
+      const more = throughEngine(i, plusStep(q, i.step));
+      expect(more.outcome).toMatch(/^rejected/);
+      expect(more.preview).not.toBeNull();
+    });
+  }
+
+  it('a limit buy through the ask that partly rests is accepted at arrival', () => {
+    const i = quick({
+      unit: 'coin',
+      type: 'limit',
+      side: 'buy',
+      price: '80100',
+      asks: [lv('80010', '0.05'), lv('80300', '5')],
+    });
+    const q = perpQuickAmount(i)!.amount;
+    expect(throughEngine(i, q)).toEqual({ preview: null, outcome: 'accepted' });
+  });
+
+  it('a market order is never sized past the visible depth (beyond it the cost is not known)', () => {
+    const i = quick({ unit: 'coin', type: 'market', side: 'buy', asks: [lv('80010', '0.05'), lv('80020', '0.03')] });
+    expect(perpQuickAmount(i)!.amount).toBe('0.08');
+    expect(perpQuickAmount({ ...i, unit: 'usd' })!.amount).toBe('6400.00');
+  });
+
+  it('a reduce-only amount in USDT converts back to the same coins', () => {
+    const i = quick({ pct: 50, reduce: { qty: '0.5' }, price: '80000.15' });
+    expect(floorDivToStep(perpQuickAmount(i)!.amount, '80000.15', i.step)).toBe('0.25');
+    const m = quick({ pct: 75, reduce: { qty: '0.37' }, type: 'market', mark: '80123.4' });
+    const coins = perpQuickAmount({ ...m, unit: 'coin' })!.amount;
+    expect(floorDivToStep(perpQuickAmount(m)!.amount, '80123.4', m.step)).toBe(coins);
   });
 });
 
@@ -374,6 +496,13 @@ describe('perp estimate', () => {
     expect(html).toContain('76,345.5');
   });
 
+  it('an estimate made at another leverage than the chip shows is dimmed and says which', () => {
+    const html = render({ leverage: 25 });
+    expect(html).toContain('Estimated at 20x');
+    expect(html).toContain('opacity-60');
+    expect(render({ leverage: 20 })).not.toContain('opacity-60');
+  });
+
   it('limits have no slippage line', () => {
     expect(render({ type: 'limit' })).not.toContain('Est. slippage');
   });
@@ -393,5 +522,54 @@ describe('perp estimate', () => {
     });
     expect(html).toContain('0.3 BTC more than your position');
     expect(html).toContain('price band');
+  });
+});
+
+describe('perp live state', () => {
+  const mark = (fresh: boolean): PerpMark => ({
+    markPrice: '80000',
+    indexPrice: '80010',
+    fundingRate: '0.0001',
+    nextFundingTime: 0,
+    fresh,
+  });
+  const live = { fresh: true, reason: null };
+
+  it('all live: no reason, submit allowed, the mark usable', () => {
+    expect(perpLiveState({ feed: live, mark: mark(true), down: false })).toEqual({
+      staleReason: null,
+      blocked: false,
+      liveMark: '80000',
+    });
+  });
+
+  it('a stale feed blocks submit with its reason (or a default)', () => {
+    expect(
+      perpLiveState({ feed: { fresh: false, reason: 'No trades for 12 s' }, mark: mark(true), down: false }),
+    ).toEqual({ staleReason: 'No trades for 12 s', blocked: true, liveMark: '80000' });
+    expect(perpLiveState({ feed: { fresh: false, reason: null }, mark: mark(true), down: false }).staleReason).toBe(
+      'No fresh data from Binance',
+    );
+  });
+
+  it('a stale mark blocks submit and is never used', () => {
+    expect(perpLiveState({ feed: live, mark: mark(false), down: false })).toEqual({
+      staleReason: 'No mark price update for over 10 s',
+      blocked: true,
+      liveMark: null,
+    });
+  });
+
+  it('our socket down or no mark yet: the estimate says so, the server still decides on submit', () => {
+    expect(perpLiveState({ feed: live, mark: mark(true), down: true })).toEqual({
+      staleReason: 'Connection to the simulator lost',
+      blocked: false,
+      liveMark: null,
+    });
+    expect(perpLiveState({ feed: undefined, mark: undefined, down: false })).toEqual({
+      staleReason: 'No mark price yet',
+      blocked: false,
+      liveMark: null,
+    });
   });
 });

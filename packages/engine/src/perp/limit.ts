@@ -169,9 +169,37 @@ function marketable(best: Decimal | null, side: Side, price: Decimal): boolean {
  * it for the fill that completes the order.
  */
 function lockShare(order: PerpOrder, qty: Decimal): Decimal {
-  const remaining = remainingQty(order);
-  if (qty.gte(remaining)) return order.lockAmount;
-  return Decimal.min(order.lockAmount, roundUp8(order.lockAmount.mul(qty).div(remaining)));
+  return lockShareOf(order.lockAmount, remainingQty(order), qty);
+}
+
+function lockShareOf(lock: Decimal, remaining: Decimal, qty: Decimal): Decimal {
+  if (qty.gte(remaining)) return lock;
+  return Decimal.min(lock, roundUp8(lock.mul(qty).div(remaining)));
+}
+
+/**
+ * What an opening limit needs at arrival to take `walk` out of `remaining`: the taker part at the
+ * market cost (costOf: the market assumed price and the current mark), plus the share of `lock`
+ * the resting part keeps. Arrival compares it with the lock plus free USDT.
+ */
+function arrivalNeed(
+  side: Side,
+  walk: WalkResult,
+  lock: Decimal,
+  remaining: Decimal,
+  p: { mark: Decimal; last: Decimal; leverage: number },
+  ctx: PerpCtx,
+): Decimal {
+  const taker = costOf(side, walk, walk.qty, p, ctx);
+  return taker.plus(lock.minus(lockShareOf(lock, remaining, walk.qty)));
+}
+
+/**
+ * The refusal when the taker part's market cost is more than the lock plus free USDT: the lock was
+ * taken at the limit price, but what fills at once is charged like a market order.
+ */
+function shortAtExecution(need: Decimal, available: Decimal): string {
+  return `Insufficient margin at execution: the part that fills at once is charged at market terms (need ${need}, available ${available})`;
 }
 
 /**
@@ -204,11 +232,11 @@ function shortOfMargin(s: PerpState, order: PerpOrder, walk: WalkResult, ctx: Pe
   if (!mark) return MARK_UNAVAILABLE;
   const last = ctx.market.lastPrice(order.symbol);
   if (!last) return `Last price unavailable for ${order.symbol}`;
-  const taker = costOf(order.side, walk, walk.qty, { mark, last, leverage: order.leverage }, ctx);
-  const need = taker.plus(order.lockAmount.minus(lockShare(order, walk.qty)));
+  const p = { mark, last, leverage: order.leverage };
+  const need = arrivalNeed(order.side, walk, order.lockAmount, remainingQty(order), p, ctx);
   const available = order.lockAmount.plus(freeUsdt(s));
   if (need.lte(available)) return null;
-  return `Insufficient margin at execution: price moved (need ${need}, available ${available})`;
+  return shortAtExecution(need, available);
 }
 
 /**
@@ -364,6 +392,18 @@ export function previewLimit(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx):
     walk?.bestPrice && takerQty.gt(0) ? slippage.div(walk.bestPrice.mul(takerQty)).mul(100) : D(0);
   preview.notional = quote;
   preview.fee = fee;
+  // Arrival re-prices the part that fills at once like a market order: the same check here, so the
+  // preview never shows as fine an order that arrival on this book would refuse.
+  if (preview.rejectReason === null && !plan.reduceOnly && walk && walk.qty.gt(0) && plan.lockAmount) {
+    const mark = validMark(req.symbol, ctx);
+    const last = ctx.market.lastPrice(req.symbol);
+    if (mark && last) {
+      const need = arrivalNeed(req.side, walk, plan.lockAmount, qty, { mark, last, leverage: plan.leverage }, ctx);
+      // After submit takes the lock, arrival has the lock plus what is free then: what is free now.
+      const available = freeUsdt(s);
+      if (need.gt(available)) preview.rejectReason = shortAtExecution(need, available);
+    }
+  }
   if (plan.brackets && (plan.position || !plan.reduceOnly)) {
     preview.estLiquidationPrice = estLiquidation(s, req, plan, { qty, quote, fee }, plan.brackets);
   }

@@ -552,7 +552,7 @@ describe('funds', () => {
     market.setBook('BTCUSDT', { asks: [{ price: D('80100'), qty: D('1') }], bids: [] });
     // IM 400.6 + open loss 10 + fee 4.006
     expect(rejectReason(arriveNow(engine, order, ctx))).toBe(
-      'Insufficient margin at execution: price moved (need 414.606, available 405)',
+      'Insufficient margin at execution (need 414.606, available 405)',
     );
     expect(s(lev().free)).toBe('405');
     expect(s(lev().locked)).toBe('0');

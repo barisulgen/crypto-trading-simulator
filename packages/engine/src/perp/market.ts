@@ -361,12 +361,8 @@ export function arriveMarket(s: PerpState, order: PerpOrder, ctx: PerpCtx): Perp
     const need = costOf(order.side, walk, walk.qty, { mark, last, leverage: order.leverage }, ctx);
     const available = order.lockAmount.plus(freeUsdt(s));
     if (need.gt(available)) {
-      return rejectPending(
-        s,
-        order,
-        `Insufficient margin at execution: price moved (need ${need}, available ${available})`,
-        ctx,
-      );
+      // The lock was this cost at submit: the book, mark, last price or free USDT changed since.
+      return rejectPending(s, order, `Insufficient margin at execution (need ${need}, available ${available})`, ctx);
     }
   }
 

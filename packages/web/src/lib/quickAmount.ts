@@ -200,6 +200,8 @@ export interface PerpQuickInput {
 export const PERP_LAST_PRICE_BUFFER = '1.0015';
 /** Three 8-decimal round-ups (initial margin, open loss, fee): at most this much above the exact cost. */
 const ROUND_UPS = '0.00000003';
+/** Decimals kept of the exact quantity before it is floored to the step or valued in dollars. */
+const DP_RAW = '0.000000000001';
 
 const maxDec = (...vs: string[]) => vs.reduce((a, b) => (cmpDec(a, b) >= 0 ? a : b));
 
@@ -230,19 +232,28 @@ function unitCostTimesLeverage(side: Side, im: string, ol: string, mark: string,
 }
 
 /**
- * The deepest price a quantity reaches on the book side it takes, beyond the visible levels the
- * last one: no better than the walk's average, so a cost at it is never below the engine's.
- * Null on an empty side.
+ * The deepest price a quantity reaches on the book side it takes: no better than the walk's
+ * average, so a cost at it is never below the engine's. Null when the quantity goes past the
+ * visible levels (the real book goes deeper, at prices not known here) or the side is empty.
  */
 function worstFill(levels: WireLevel[], qty: string): string | null {
-  const last = levels.at(-1);
-  if (!last) return null;
   let left = qty;
   for (const level of levels) {
     if (cmpDec(left, level.qty) <= 0) return level.price;
     left = subDec(left, level.qty);
   }
-  return last.price;
+  return null;
+}
+
+/** The quantity the visible levels hold in all. */
+function visibleDepth(levels: WireLevel[]): string {
+  return levels.reduce((sum, l) => addDec(sum, l.qty), '0');
+}
+
+/** Rounded up to the cent. */
+function ceilCents(value: string): string {
+  const down = floorToStep(value, CENT);
+  return cmpDec(down, value) === 0 ? down : addDec(down, CENT);
 }
 
 /**
@@ -251,62 +262,92 @@ function worstFill(levels: WireLevel[], qty: string): string | null {
  *
  * - Opening order: the largest quantity whose cost as the engine reckons it (initial margin and
  *   fee at imPrice, open loss at olPrice, each rounded up to 8 decimals) is at most the share of
- *   the free leverage USDT, floored to the step. A market order is priced at the deepest book
- *   level the quantity reaches (worked out twice: once from the best price, then again from the
- *   level that quantity reaches); a limit at its price, else the best price on its side. Needs the
- *   live mark and the last price, as the engine does. In dollars: that quantity before the step
- *   floor, at the price the server converts dollars at (the mark for a market order, the limit
- *   price for a limit), floored to the cent, so the coins the server makes of it never exceed it.
- * - Reduce-only: the share of the position's size floored to the step; in dollars that quantity
- *   at the limit price (else the mark), floored to the cent. At 100 % the order sends the coins
- *   themselves (sellAll), so it reduces the whole position whatever the price does meanwhile.
+ *   the free leverage USDT, floored to the step. Needs the live mark and the last price, as the
+ *   engine does.
+ *   - Market: priced at the deepest book level the quantity reaches (worked out twice: once from
+ *     the best price, then from the level that quantity reaches). It never goes past the visible
+ *     levels: beyond them the cost is not known, so it is capped at what they hold.
+ *   - Limit and post-only: the lock at the limit price (else the best price on the order's side).
+ *     When that price is marketable now, the part that fills at once is charged at arrival like a
+ *     market order (imPrice at no less than the buffered last price, open loss on its fill), so the
+ *     quantity also fits at those prices: for a buy the deepest ask it reaches (the limit price
+ *     beyond the visible levels), for a sell the best bid for imPrice and the deepest bid it
+ *     reaches, not below the limit, for the open loss.
+ *   - In dollars: that quantity before the step floor, at the price the server converts dollars at
+ *     (the mark for a market order, the limit price for a limit), floored to the cent, so the
+ *     coins the server makes of it never exceed it.
+ * - Reduce-only: the share of the position's size floored to the step; in dollars the share before
+ *   the step floor at the limit price (else the mark), rounded up to the cent when the server's
+ *   conversion of that still comes to the coin figure (else down). At 100 % the order sends the
+ *   coins themselves (sellAll), so it reduces the whole position whatever the price does meanwhile.
  */
 export function perpQuickAmount(i: PerpQuickInput): QuickResult | null {
   const share = mulDec(i.free, FRACTION[i.pct]);
   if (i.reduce) {
-    const qty = floorToStep(mulDec(i.reduce.qty, FRACTION[i.pct]), i.step);
+    const exact = mulDec(i.reduce.qty, FRACTION[i.pct]);
+    const qty = floorToStep(exact, i.step);
     if (i.unit === 'coin') return { amount: qty, belowStep: isZero(qty), belowCent: false };
     if (isZero(qty)) return { amount: '0', belowStep: true, belowCent: false };
     const at = (i.type === 'market' ? null : validPrice(i.price)) ?? i.mark;
     if (at === null) return null;
-    const c = cents(mulDec(qty, at));
+    const up = ceilCents(mulDec(exact, at));
+    const value = cmpDec(floorDivToStep(up, at, i.step), qty) === 0 ? up : mulDec(exact, at);
+    const c = cents(value);
     return { amount: c.amount, belowStep: false, belowCent: c.zero, ...(i.pct === 100 ? { sellAll: qty } : {}) };
   }
 
   const { mark, last } = i;
   if (mark === null || last === null) return null;
-  const levels = i.side === 'buy' ? i.asks : i.bids;
+  const buy = i.side === 'buy';
+  const levels = buy ? i.asks : i.bids;
   const best = levels[0]?.price;
   // Kept below the share by the most the round-ups can add, so the rounded cost never exceeds it.
   const budget = cmpDec(share, ROUND_UPS) > 0 ? subDec(share, ROUND_UPS) : '0';
   const lev = String(i.leverage);
   const budgetTimesLeverage = mulDec(budget, lev);
-  const sized = (im: string, ol: string) => {
-    const denom = unitCostTimesLeverage(i.side, im, ol, mark, lev, i.taker);
-    return { qty: floorDivToStep(budgetTimesLeverage, denom, i.step), denom };
-  };
+  const denomOf = (im: string, ol: string) => unitCostTimesLeverage(i.side, im, ol, mark, lev, i.taker);
+  const qtyAt = (denom: string) => floorDivToStep(budgetTimesLeverage, denom, i.step);
+  const larger = (a: string, b: string) => (cmpDec(a, b) >= 0 ? a : b);
 
-  let fit: { qty: string; denom: string };
+  let denom: string;
+  /** The most the quantity may be, whatever the cost (the visible depth for a market order). */
+  let cap: string | null = null;
   if (i.type === 'market') {
     if (best === undefined) return null;
     const first = costPrices(i.side, 'market', best, mark, last);
-    const reach = sized(first.imPrice, first.olPrice).qty;
-    const worst = worstFill(levels, reach) ?? best;
+    const depth = floorToStep(visibleDepth(levels), i.step);
+    const reach = qtyAt(denomOf(first.imPrice, first.olPrice));
+    const reached = worstFill(levels, reach);
+    // Past the visible levels the cost is not known: no more than they hold.
+    if (reached === null) cap = depth;
+    const worst = reached ?? levels.at(-1)!.price;
     // A smaller quantity fills no worse than `worst`: a buy's imPrice and open loss are highest
     // there, a sell's open loss; a sell's imPrice is highest at the best bid.
-    const im = i.side === 'buy' ? costPrices('buy', 'market', worst, mark, last).imPrice : first.imPrice;
-    fit = sized(im, worst);
+    const im = buy ? costPrices('buy', 'market', worst, mark, last).imPrice : first.imPrice;
+    denom = denomOf(im, worst);
   } else {
-    const fill = validPrice(i.price) ?? best;
-    if (fill === undefined) return null;
-    const p = costPrices(i.side, i.type, fill, mark, last);
-    fit = sized(p.imPrice, p.olPrice);
+    const price = validPrice(i.price) ?? best;
+    if (price === undefined) return null;
+    const lock = costPrices(i.side, i.type, price, mark, last);
+    denom = denomOf(lock.imPrice, lock.olPrice);
+    const marketable = best !== undefined && (buy ? cmpDec(best, price) <= 0 : cmpDec(best, price) >= 0);
+    if (marketable) {
+      // Only levels at or through the limit fill at once; past the visible ones, the limit bounds them.
+      const reach = qtyAt(denom);
+      const reached = worstFill(levels, reach);
+      const deepest =
+        reached === null ? price : buy ? (cmpDec(reached, price) <= 0 ? reached : price) : larger(reached, price);
+      const taker = costPrices(i.side, 'market', buy ? deepest : best, mark, last);
+      denom = larger(denom, denomOf(taker.imPrice, deepest));
+    }
   }
+  const raw = floorDivToStep(budgetTimesLeverage, denom, DP_RAW);
+  const exact = cap !== null && cmpDec(raw, cap) > 0 ? cap : raw;
+  const qty = floorToStep(exact, i.step);
 
-  if (i.unit === 'coin') return { amount: fit.qty, belowStep: isZero(fit.qty), belowCent: false };
+  if (i.unit === 'coin') return { amount: qty, belowStep: isZero(qty), belowCent: false };
   const convert = i.type === 'market' ? mark : (validPrice(i.price) ?? best!);
-  const dollars = floorDivToStep(mulDec(budgetTimesLeverage, convert), fit.denom, CENT);
-  const c = cents(dollars);
+  const c = cents(mulDec(exact, convert));
   return { amount: c.amount, belowStep: false, belowCent: c.zero };
 }
 

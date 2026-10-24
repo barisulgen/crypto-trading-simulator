@@ -13,6 +13,7 @@ import {
   buildPerpRequest,
   leverageLock,
   perpMissingInput,
+  perpLiveState,
   perpPreviewMatches,
   perpQuickHint,
   positionSideOf,
@@ -163,9 +164,11 @@ export function PerpEstimate({
   } else if (p.notional === null || p.rejectReason !== null) liq = '-';
   else liq = reduceOnly ? 'None (position closed)' : 'None';
 
+  // Made before a leverage change (or at a leverage set elsewhere): not an estimate of this order.
+  const otherLeverage = leverage !== undefined && p.leverage !== leverage;
   const zeroMargin = p.marginRequired !== null && signOf(p.marginRequired) === 0;
   return (
-    <div className={`flex flex-col gap-2 ${current && staleReason === null ? '' : 'opacity-60'}`}>
+    <div className={`flex flex-col gap-2 ${current && !otherLeverage && staleReason === null ? '' : 'opacity-60'}`}>
       {staleReason !== null && (
         <Note tone="warn">
           <span className="font-semibold">Estimate may be out of date: </span>
@@ -196,8 +199,8 @@ export function PerpEstimate({
           {liq}
         </Row>
       </dl>
-      {leverage !== undefined && p.leverage !== leverage && (
-        <Note tone="warn">Estimated at {p.leverage}x, the leverage the simulator has for this coin.</Note>
+      {otherLeverage && (
+        <Note tone="warn">Estimated at {p.leverage}x, not the {leverage}x shown.</Note>
       )}
       {excess !== null && (
         <Note tone="warn">
@@ -223,6 +226,8 @@ export function PerpEstimate({
     </div>
   );
 }
+
+const MARGIN_MODE_LABEL: Record<'isolated', string> = { isolated: 'Isolated' };
 
 /** A compact button opening a dialog (margin mode, leverage). */
 function Chip({
@@ -290,20 +295,9 @@ export function PerpOrderForm() {
   const base = rules?.base ?? symbol.replace(/USDT$/, '');
   const quote = rules?.quote ?? 'USDT';
   const leverage = perp?.leverage;
-  const liveMark = mark?.fresh && !down ? mark.markPrice : null;
-
+  const marginMode = perp ? MARGIN_MODE_LABEL[perp.marginMode] : '-';
   // Never a live-looking estimate on data that is not live.
-  const feedStale = feed !== undefined && !feed.fresh;
-  const markStale = mark !== undefined && !mark.fresh;
-  const staleReason = feedStale
-    ? (feed.reason ?? 'No fresh data from Binance')
-    : markStale
-      ? 'No mark price update for over 10 s'
-      : down
-        ? 'Connection to the simulator lost'
-        : mark === undefined
-          ? 'No mark price yet'
-          : null;
+  const { staleReason, blocked, liveMark } = perpLiveState({ feed, mark, down });
 
   const [side, setSide] = useState<Side>('buy');
   const [type, setType] = useState<PerpOrderType>('market');
@@ -408,7 +402,6 @@ export function PerpOrderForm() {
   useEffect(() => setError(''), [formKey]);
 
   const warn = shown && preview.key === key && !!preview.preview?.rejectReason;
-  const blocked = feedStale || markStale;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -453,8 +446,8 @@ export function PerpOrderForm() {
       >
         <div className="flex flex-col gap-1">
           <div className="grid grid-cols-2 gap-2">
-            <Chip label="Margin mode: Isolated" title="Margin mode" onClick={() => setDialog('margin')}>
-              Isolated
+            <Chip label={`Margin mode: ${marginMode}`} title="Margin mode" onClick={() => setDialog('margin')}>
+              {marginMode}
             </Chip>
             <Chip
               label={`Leverage ${leverage ?? '-'}x`}

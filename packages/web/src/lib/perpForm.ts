@@ -1,7 +1,7 @@
 // The perp order form's pure parts: what it sends, which field is still blank, when reduce-only is
 // forced, why leverage is locked, the largest position a leverage allows, and the tiers note.
 import type { PerpOrderRequest, PositionSide, Side, TierSource } from '@sim/engine';
-import type { WirePerpOrder, WirePosition } from './api.ts';
+import type { PerpMark, WirePerpOrder, WirePosition } from './api.ts';
 import { fmtNum, tickDecimals } from './format.ts';
 import { cmpDec, floorDivToStep, subDec } from './market.ts';
 import { hasPrice } from './orderForm.ts';
@@ -136,6 +136,35 @@ export function perpQuickHint(state: QuickState, step: string, base: string): st
   if (state.belowStep) return `Less than one step (${fmtNum(step, tickDecimals(step))} ${base})`;
   if (state.sellAll !== undefined) return `Reduces all ${state.sellAll} ${base} (the whole position)`;
   return null;
+}
+
+// ---- live data ----
+
+/**
+ * What the form may treat as live. `staleReason` (null when everything is live) dims the estimate
+ * and hides its liquidation price: the perp feed or the mark stale, our socket down, or no mark
+ * yet. `blocked` disables submit only for the server's own state (feed or mark stale); with our
+ * socket down the order still goes over HTTP and the server decides. `liveMark` is the mark only
+ * while it is fresh and our socket is open.
+ */
+export function perpLiveState(p: {
+  feed: { fresh: boolean; reason: string | null } | undefined;
+  mark: PerpMark | undefined;
+  down: boolean;
+}): { staleReason: string | null; blocked: boolean; liveMark: string | null } {
+  const feedStale = p.feed !== undefined && !p.feed.fresh;
+  const markStale = p.mark !== undefined && !p.mark.fresh;
+  const staleReason = feedStale
+    ? (p.feed?.reason ?? 'No fresh data from Binance')
+    : markStale
+      ? 'No mark price update for over 10 s'
+      : p.down
+        ? 'Connection to the simulator lost'
+        : p.mark === undefined
+          ? 'No mark price yet'
+          : null;
+  const liveMark = p.mark?.fresh && !p.down ? p.mark.markPrice : null;
+  return { staleReason, blocked: feedStale || markStale, liveMark };
 }
 
 // ---- leverage ----

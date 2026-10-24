@@ -376,7 +376,7 @@ describe('a marketable opening limit is re-priced at arrival like a market order
     market.setLastPrice('BTCUSDT', D('80320'));
     // The walk at 80320 costs IM at max(80320, 80320, 80320 × 1.0015 = 80440.48) = 804.4048 + fee 0.4022024.
     expect(rejectReason(arriveNow(engine, order, ctx))).toBe(
-      'Insufficient margin at execution: price moved (need 804.8070024, available 801.61)',
+      'Insufficient margin at execution: the part that fills at once is charged at market terms (need 804.8070024, available 801.61)',
     );
     expect(s(lev().free)).toBe('801.61');
     expect(s(lev().locked)).toBe('0');
@@ -389,7 +389,7 @@ describe('a marketable opening limit is re-priced at arrival like a market order
     expect(s(order.lockAmount)).toBe('1213.57575');
     // Taker 0.2 at the market cost 809.212 (IM at 80120) + the resting 0.1's share 404.52525.
     expect(rejectReason(arriveNow(engine, order, ctx))).toBe(
-      'Insufficient margin at execution: price moved (need 1213.73725, available 1213.6)',
+      'Insufficient margin at execution: the part that fills at once is charged at market terms (need 1213.73725, available 1213.6)',
     );
     expect(s(lev().free)).toBe('1213.6');
     expect(s(lev().locked)).toBe('0');
@@ -645,6 +645,25 @@ describe('limit preview', () => {
     expect(s(p.fee)).toBe('9.6001');
     expect(p.estAvgPrice?.toFixed(8)).toBe('80001.66666667');
     expect(s(p.marginRequired)).toBe('1213.57575');
+  });
+
+  it('a marketable limit that arrival would refuse previews that refusal, and submit then gets it', () => {
+    // Free covers the lock at the limit price (1213.57575), not the taker part at market terms.
+    const { ctx, engine } = setup('1213.6');
+    const req = limit('buy', '80005', '0.3');
+    const reason =
+      'Insufficient margin at execution: the part that fills at once is charged at market terms (need 1213.73725, available 1213.6)';
+    expect(engine.preview(req, ctx).rejectReason).toBe(reason);
+    const order = placed(engine.submit(req, ctx));
+    expect(rejectReason(arriveNow(engine, order, ctx))).toBe(reason);
+  });
+
+  it('a marketable limit whose funds cover the arrival check previews no problem, and fills', () => {
+    const { ctx, engine } = setup('1213.74');
+    const req = limit('buy', '80005', '0.3');
+    expect(engine.preview(req, ctx).rejectReason).toBeNull();
+    const order = placed(engine.submit(req, ctx));
+    expect(find(arriveNow(engine, order, ctx), 'fill').fill.liquidity).toBe('taker');
   });
 
   it('a marketable post-only previews its rejection', () => {
