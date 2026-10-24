@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { D, liquidationPrice, maxRemovableMargin, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import { btcBrackets } from '../../engine/test/perpFixtures.ts';
 import Fastify from 'fastify';
@@ -18,9 +18,11 @@ import type { Candle } from '../src/market/candles.ts';
 import {
   CATCHING_UP_REFUSAL,
   EngineRunner,
+  GAP_NOT_APPLIED_REFUSAL,
   LEVERAGE_TRANSFER_REFUSAL,
   LEVERAGE_TRANSFER_STALE_REFUSAL,
   MARGIN_STALE_REFUSAL,
+  RefusedError,
 } from '../src/runner.ts';
 import { FakeClock, FakeHealth, FakeHistory, settle, TestMarket, TestPerpMarket } from './helpers.ts';
 
@@ -973,6 +975,17 @@ describe('perp REST', () => {
     ]);
     ws.terminate();
     release();
+  });
+
+  it('data back but its gap not yet applied: an order is refused with a 409 and the reason, like the other gate refusals', async () => {
+    const t = await perpApp();
+    vi.spyOn(t.runner, 'submitPerp').mockImplementation(() => {
+      throw new RefusedError(GAP_NOT_APPLIED_REFUSAL);
+    });
+    expect(await t.call('POST', '/api/perp/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.01' })).toMatchObject({
+      status: 409,
+      body: { error: GAP_NOT_APPLIED_REFUSAL },
+    });
   });
 });
 

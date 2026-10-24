@@ -24,6 +24,7 @@ import { INTERVALS } from '../market/candles.ts';
 import type { Candle } from '../market/candles.ts';
 import {
   CATCHING_UP_REFUSAL,
+  GAP_NOT_APPLIED_REFUSAL,
   LEVERAGE_TRANSFER_REFUSAL,
   LEVERAGE_TRANSFER_STALE_REFUSAL,
   MARGIN_STALE_REFUSAL,
@@ -72,6 +73,7 @@ const RECENT_ORDERS = 100;
 /** Refusals that are the account's state, not the server's: the request may be repeated once it changes. */
 const CONFLICTS: ReadonlySet<string> = new Set([
   CATCHING_UP_REFUSAL,
+  GAP_NOT_APPLIED_REFUSAL,
   LEVERAGE_TRANSFER_REFUSAL,
   LEVERAGE_TRANSFER_STALE_REFUSAL,
   MARGIN_STALE_REFUSAL,
