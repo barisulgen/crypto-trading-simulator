@@ -427,13 +427,14 @@ describe('EngineRunner', () => {
     expect(t.orderRow(order.id)!.status).toBe('filled');
   });
 
-  it('restart: a cancel in flight when the server stopped reached the exchange meanwhile: cancelled during startup recovery', () => {
+  it('restart: a cancel in flight when the server stopped waits for the startup gap to be caught up, then is delivered', async () => {
     const a = setup();
     a.runner.start();
     a.runner.deposit('spot', D('1000'));
     const limit = submittedOrder(a.runner.submit(limitBuy('99.50', '1')));
     a.clock.advance(100);
     expect(a.runner.cancel(limit.id).ok).toBe(true);
+    const limitCancelAt = a.clock.now + 100;
     // A pending order whose cancel is in flight too: cancelled, never re-sent.
     const pending = submittedOrder(a.runner.submit(limitBuy('99.40', '1')));
     expect(a.runner.cancel(pending.id).ok).toBe(true);
@@ -441,18 +442,25 @@ describe('EngineRunner', () => {
 
     a.clock.advance(60_000);
     const b = setup({ db: a.db, clock: a.clock }); // not started: recovery alone
+    // The startup gap's trades may have filled them before their cancels arrived: nothing yet.
+    for (const id of [limit.id, pending.id]) expect(b.orderRow(id)!.status).not.toBe('cancelled');
+    expect(b.eventsOf('order_cancelled')).toEqual([]);
+    b.runner.start(); // fresh: the startup gap is caught up (no history here), then the key is live
+    await settle();
+    const liveAt = b.clock.now;
     for (const id of [limit.id, pending.id]) {
       expect(b.engine.state.orders.has(id)).toBe(false); // finished: saved, then out of memory
       expect(b.orderRow(id)!.status).toBe('cancelled');
     }
+    // The open order's cancel by the catch-up, at its own arrival; the pending one's by the live path.
     expect(b.eventsOf('order_cancelled').map((e) => [e.payload.order.id, e.payload.reason, e.time])).toEqual([
-      [limit.id, 'user', b.clock.now],
-      [pending.id, 'user', b.clock.now],
+      [limit.id, 'user', limitCancelAt],
+      [pending.id, 'user', liveAt],
     ]);
     expect(b.engine.state.ledger.balances.spot.USDT!.locked.toString()).toBe('0');
-    b.runner.start();
     b.clock.advance(5000);
     expect(b.orderRow(pending.id)!.status).toBe('cancelled');
+    expect(b.eventsOf('order_placed').filter((e) => e.payload.order.id === pending.id)).toHaveLength(1);
     expect(b.fatal).toEqual([]);
   });
 

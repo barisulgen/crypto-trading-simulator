@@ -928,13 +928,14 @@ export class EngineRunner implements FundingSim {
   }
 
   /**
-   * Startup, for each market: first, a cancel in flight whose arrival time passed while the server
-   * was down has reached the exchange, so arriveCancel is applied now (one still to arrive, or one
-   * waiting for the exchange rules, gets its arriveCancel scheduled; onFresh delivers the latter).
-   * Then pending market orders are rejected (rejectRestartedMarket); other pending orders are sent
-   * again once their market and symbol's data is first fresh, with a fresh arrival delay
-   * (rearmWhenFresh). Triggered orders with an arrival time get their arrive() scheduled;
-   * triggered orders and attached pairs waiting for data (arrivesAt null) are left to onFresh.
+   * Startup, for each market: pending market orders are rejected (rejectRestartedMarket); other
+   * pending orders are sent again once their market and symbol's data is first fresh, with a fresh
+   * arrival delay (rearmWhenFresh). Triggered orders with an arrival time get their arrive()
+   * scheduled; triggered orders and attached pairs waiting for data (arrivesAt null) are left to
+   * onFresh. A cancel in flight gets its arriveCancel scheduled like any other (scheduleCancel):
+   * every key starts with a gap open, so it waits until that gap has been caught up, whose run
+   * delivers it at its own arrival time, after any trade of the gap that filled the order first.
+   * The cancel of an order held back to be sent again is delivered before it is (heldBack).
    */
   private recover(): void {
     const ctx = this.ctx();
@@ -942,11 +943,6 @@ export class EngineRunner implements FundingSim {
     const events: SimEvent[] = [];
     for (const market of ['spot', 'perp'] as const) {
       const orders = this.ordersOf(market);
-      for (const { id } of [...orders.values()]) {
-        // Re-read: cancelling one leg of a pair settles its partner too. A pending order is sent
-        // again below, so its old arrival never happened and does not come before the cancel.
-        if (orders.get(id)!.cancelArrivesAt !== null) events.push(...this.d.sim.arriveCancelBeforeResend(market, id, ctx));
-      }
       for (const o of [...orders.values()]) {
         if (o.status !== 'pending') continue;
         if (o.type === 'market') {

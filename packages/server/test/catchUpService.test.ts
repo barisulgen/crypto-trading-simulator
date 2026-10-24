@@ -348,6 +348,25 @@ describe('catch-up: spot', () => {
     expect(t.fatal).toEqual([]);
   });
 
+  it('restart with a cancel in flight: delivered by the startup gap’s catch-up at its time, after a gap trade that filled the order first', async () => {
+    const a = setup();
+    const { orders } = withStop(a, [limit('buy', '99.2', '0.1')]); // the limit arrived at 12:00:00.200
+    const order = orders[0]!;
+    expect(a.runner.cancel(order.id).ok).toBe(true); // arrives at 12:00:00.300
+    a.runner.stop(); // stopped before it arrived; the last heartbeat at 12:00:00
+
+    const b = setup({ db: a.db, clock: new FakeClock(T + 5 * MIN) });
+    b.history.candleList[SPOT] = minutes(T - MIN, T + 5 * MIN, '99.5', '100', [candle(T, '99.1', '100')]);
+    b.history.tradeList[SPOT] = [trade(300, '99.15', '1', true, T + 250)]; // through the limit before the cancel arrived
+    expect(b.orderRow(order.id)!.status).toBe('open'); // recovery leaves the cancel for the catch-up
+    b.runner.start();
+    await settle();
+    expect(b.fillsOf(order.id).map((f) => [f.qty, f.price, f.time])).toEqual([['0.1', '99.2', T + 250]]);
+    expect(b.eventsOf('cancel_rejected').map((e) => [e.payload.order.id, e.time])).toEqual([[order.id, T + 300]]);
+    expect(b.orderRow(order.id)!.status).toBe('filled');
+    expect(b.fatal).toEqual([]);
+  });
+
   it('a restart after a done job whose resume may not have finished starts its startup gap at that job’s end, so held trades are replayed', async () => {
     const a = setup();
     withStop(a, [limit('buy', '50', '0.1')]);
