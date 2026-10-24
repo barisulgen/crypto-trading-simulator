@@ -769,6 +769,27 @@ describe('catch-up and funding windows', () => {
     expect(b.eventsOf('funding')).toHaveLength(1);
   });
 
+  it('a funding time in the gap whose record lacks a usable mark price did happen, though a later one is settled: the run keeps its window waiting', async () => {
+    const a = withFunding({ clock: new FakeClock(FT - 3 * MIN) });
+    withLong(a);
+    a.runner.stop(); // the last heartbeat at 12:07
+
+    // Binance recorded FT with a rate but no mark price, and settled a later time (its interval changed).
+    const history = new FakeHistory();
+    history.markList.BTCUSDT = minutes(FT - 4 * MIN, FT + 62 * MIN, '79995', '80005');
+    history.settlements.BTCUSDT = [{ time: FT + HOUR, rate: D('0.0001'), markPrice: D('80000') }];
+    history.unusable.BTCUSDT = [FT];
+    const b = withFunding({ db: a.db, clock: new FakeClock(FT + 62 * MIN), history });
+    b.runner.start();
+    b.funding.start();
+    b.perp.mark(SYMBOL, '80000', FT + 8 * HOUR); // FT is projected back from the next time named
+    await settle();
+    expect(b.runner.gate(PERP)).toBe('live');
+    expect(b.sim.perp.state.funding.pending.map((w) => [w.fundingTime, w.long.max.toString()])).toEqual([[FT, '0.1']]);
+    expect(b.eventsOf('funding').map((e) => e.payload.fundingTime)).toEqual([FT + HOUR]);
+    expect(b.fatal).toEqual([]);
+  });
+
   it('a window a run left open for the live path is closed and settled once, though the funding service never saw its time', async () => {
     const a = withFunding({ clock: new FakeClock(FT - 40_000) });
     withLong(a);
@@ -896,8 +917,10 @@ describe('BinanceHistory', () => {
         { symbol: SYMBOL, fundingTime: T + 8 * HOUR, fundingRate: '-0.0002', markPrice: '' },
       ],
     ]);
-    const settlements = await history.funding(SYMBOL, T - HOUR, T + 9 * HOUR);
+    const { settlements, recorded } = await history.funding(SYMBOL, T - HOUR, T + 9 * HOUR);
     expect(settlements.map((f) => [f.time, f.rate.toString(), f.markPrice.toString()])).toEqual([[T, '0.0001', '80000']]);
+    // Every record's time is kept, usable or not: a record shows its funding time happened.
+    expect(recorded).toEqual([T, T + 8 * HOUR]);
   });
 
   it('the latest trade id: the most recent trade, by neither id nor time', async () => {

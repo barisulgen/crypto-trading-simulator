@@ -238,9 +238,9 @@ class PerpCatchUp {
    * were not fetched.
    */
   private neverHappened(time: number): boolean {
-    const { funding, from, to } = this.input;
+    const { funding, fundingRecords, from, to } = this.input;
     if (funding === undefined || time < from - FUNDING_WINDOW_MS || time > to) return false;
-    return neverSettled(time, funding.map((f) => f.time));
+    return neverSettled(time, funding.map((f) => f.time), fundingRecords);
   }
 
   /**

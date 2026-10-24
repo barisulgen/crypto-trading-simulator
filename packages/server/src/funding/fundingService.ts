@@ -298,8 +298,8 @@ export class FundingService {
   /**
    * One fundingRate poll, from 60 s before T to 60 s after it or now if later; the settlement found
    * is applied, otherwise the next poll is scheduled. When the answer holds a later funding time's
-   * settlement and none at T, T never happened (a projected time whose interval changed): its
-   * window is dropped and the chain ends. While the symbol's windows are left to catch-up the chain
+   * settlement and no record at all at T (not even one without a usable mark price), T never
+   * happened (a projected time whose interval changed): its window is dropped and the chain ends. While the symbol's windows are left to catch-up the chain
    * stops (before polling, or before applying): catch-up settles the window itself, or caughtUp
    * polls it again.
    */
@@ -317,7 +317,7 @@ export class FundingService {
       const rows = await this.d.rest.fundingRate({ symbol: ref.symbol, startTime: T - QUERY_MS, endTime, limit: QUERY_LIMIT });
       this.failing.delete(k);
       settlement = findSettlement(rows, T);
-      never = settlement === null && neverSettled(T, settlementTimes(rows));
+      never = settlement === null && neverSettled(T, settlementTimes(rows), recordTimes(rows));
     } catch (e) {
       if (!this.failing.has(k)) {
         this.failing.add(k);
@@ -396,6 +396,18 @@ export class FundingService {
 
 const refKey = (r: FundingRef) => `${r.symbol}@${r.fundingTime}`;
 const iso = (t: number) => new Date(t).toISOString();
+
+/**
+ * The funding times of every fundingRate record, usable as a settlement or not: a record at a time,
+ * even one without a usable mark price, shows that time happened (see neverSettled).
+ */
+function recordTimes(rows: unknown): number[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.flatMap((r) => {
+    const time = Number(r?.fundingTime);
+    return Number.isSafeInteger(time) ? [time] : [];
+  });
+}
 
 /** The funding times of the usable settlements among fundingRate records (see findSettlement). */
 function settlementTimes(rows: unknown): number[] {

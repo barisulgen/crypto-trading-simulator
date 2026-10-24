@@ -51,6 +51,12 @@ export interface CatchUpInput {
   markCandles?: Candle1m[];
   funding?: { time: number; rate: Decimal; markPrice: Decimal }[];
   /**
+   * Perps: the time of every funding record fetched with `funding`, usable as a settlement or not
+   * (one with a rate but no mark price, say). A record within 60 s of a funding time shows that time
+   * happened, so it is never judged to have been skipped.
+   */
+  fundingRecords?: number[];
+  /**
    * Perps: funding times whose window the run models though no settlement is given for them (not
    * published yet, or one whose window reaches past the end of the gap). Each window whose opening
    * (15 s before its funding time) falls before `to` opens then, seeded with the position the walk

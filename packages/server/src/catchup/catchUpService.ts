@@ -335,7 +335,9 @@ export class CatchUpService {
     if (market === 'perp') {
       if (needs.markCandles) input.markCandles = await h.markCandles(symbol, from, to);
       if (needs.funding) {
-        input.funding = await h.funding(symbol, from - FUNDING_WINDOW_MS, to);
+        const funding = await h.funding(symbol, from - FUNDING_WINDOW_MS, to);
+        input.funding = funding.settlements;
+        input.fundingRecords = funding.recorded;
         input.fundingTimes = await this.d.host.fundingTimes(symbol, from, to);
       }
       if (from < this.d.now() - PERP_TRADES_WINDOW_MS) {

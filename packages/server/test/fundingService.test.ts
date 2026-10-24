@@ -259,6 +259,28 @@ describe('FundingService', () => {
     expect(t.fatal).toEqual([]);
   });
 
+  it('a waiting window whose time has a record without a usable mark price did happen, though a later one is settled: it keeps waiting, never dropped or estimated', async () => {
+    const t = await setup();
+    const earlier = T - 4 * 3_600_000;
+    t.runner.openFundingWindow('BTCUSDT', earlier);
+    t.runner.closeFundingWindow('BTCUSDT', earlier);
+    // Binance recorded the earlier time with a rate but no mark price, then settled T.
+    t.answers.push([...settled(earlier + 3, '0.0001', ''), ...settled(T)]);
+    t.funding.start();
+    t.clock.advance(0);
+    await settle();
+    expect(t.windows().pending.map((w) => w.fundingTime)).toEqual([earlier]);
+    expect(t.fundingEvents()).toEqual([]);
+    expect(t.logs.filter((l) => l.includes('never happened'))).toEqual([]);
+    // Still polled; once its record carries a mark price it is applied, once.
+    t.answers.push(settled(earlier + 3, '0.0001', '80000'));
+    await t.advance(FUNDING_POLL_MS + 1000);
+    expect(t.calls).toHaveLength(2);
+    expect(t.fundingEvents().map((e) => [e.payload.fundingTime, e.payload.amount])).toEqual([[earlier, '-0.8']]);
+    expect(t.windows().pending).toEqual([]);
+    expect(t.fatal).toEqual([]);
+  });
+
   it('timers are armed in steps of at most 60 s, so a wake from sleep is noticed within a minute', async () => {
     const clock = new FakeClock(T - 4 * 3_600_000);
     const delays: number[] = [];

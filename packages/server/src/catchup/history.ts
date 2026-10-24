@@ -12,6 +12,15 @@ export interface Settlement {
   markPrice: Decimal;
 }
 
+/**
+ * The funding records of a span: the usable settlements, and the time of every record, usable or
+ * not (a record shows its funding time happened, though it may have no mark price yet).
+ */
+export interface FundingHistory {
+  settlements: Settlement[];
+  recorded: number[];
+}
+
 /** The market history a catch-up run reads. Every time bound is inclusive, in epoch ms. */
 export interface CatchUpHistory {
   /** The 1-minute last-price candles opening from floorMinute(start) to end, oldest first. */
@@ -22,8 +31,11 @@ export interface CatchUpHistory {
   minuteTrades(market: Market, symbol: string, minute: number): Promise<AggTrade[]>;
   /** The id of the latest trade; null when the market has none. */
   latestTradeId(market: Market, symbol: string): Promise<number | null>;
-  /** The perpetual's funding settlements from start to end, oldest first, each funding time once. */
-  funding(symbol: string, start: number, end: number): Promise<Settlement[]>;
+  /**
+   * The perpetual's funding settlements from start to end, oldest first, each funding time once,
+   * and the times of all its funding records then, usable or not, oldest first, each once.
+   */
+  funding(symbol: string, start: number, end: number): Promise<FundingHistory>;
 }
 
 /** What the history reads of the spot REST client. */
@@ -105,10 +117,12 @@ export class BinanceHistory implements CatchUpHistory {
   /**
    * fundingRate pages of up to 1000 records. A record's time is taken at its whole minute: Binance
    * may record a settlement a few milliseconds past the funding time, which falls on the minute.
-   * Records without a decimal rate and a positive mark price are no settlement and are skipped.
+   * Records without a decimal rate and a positive mark price are no settlement and are skipped as
+   * settlements; every record's time is still kept in `recorded`.
    */
-  async funding(symbol: string, start: number, end: number): Promise<Settlement[]> {
+  async funding(symbol: string, start: number, end: number): Promise<FundingHistory> {
     const byTime = new Map<number, Settlement>();
+    const recorded = new Set<number>();
     let from = start;
     for (;;) {
       const rows = await patiently(() => this.futures.fundingRate({ symbol, startTime: from, endTime: end, limit: PAGE }));
@@ -118,16 +132,20 @@ export class BinanceHistory implements CatchUpHistory {
         const raw = Number(r?.fundingTime);
         if (!Number.isSafeInteger(raw)) throw new Error(`fundingRate for ${symbol}: bad fundingTime`);
         latest = Math.max(latest, raw);
+        const time = Math.round(raw / MINUTE_MS) * MINUTE_MS;
+        recorded.add(time);
         const rate = typeof r.fundingRate === 'string' && /^-?\d+(\.\d+)?$/.test(r.fundingRate) ? D(r.fundingRate) : null;
         const mark = typeof r.markPrice === 'string' && /^\d+(\.\d+)?$/.test(r.markPrice) ? D(r.markPrice) : null;
         if (rate === null || mark === null || !mark.gt(0)) continue;
-        const time = Math.round(raw / MINUTE_MS) * MINUTE_MS;
         if (!byTime.has(time)) byTime.set(time, { time, rate, markPrice: mark });
       }
       if (rows.length < PAGE || latest + 1 > end) break;
       from = latest + 1;
     }
-    return [...byTime.values()].sort((a, b) => a.time - b.time);
+    return {
+      settlements: [...byTime.values()].sort((a, b) => a.time - b.time),
+      recorded: [...recorded].sort((a, b) => a - b),
+    };
   }
 
   private async trades(market: Market, q: AggTradesQuery): Promise<AggTrade[]> {

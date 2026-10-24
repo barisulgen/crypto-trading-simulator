@@ -3,7 +3,7 @@ import { D, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import type { AggTrade, BookSnapshot, Candle1m, Decimal, Market, PriceLevel, Side } from '@sim/engine';
 import { FakeMarket } from '../../engine/test/fixtures.ts';
 import { FakePerpMarket } from '../../engine/test/perpFixtures.ts';
-import type { CatchUpHistory, Settlement } from '../src/catchup/history.ts';
+import type { CatchUpHistory, FundingHistory, Settlement } from '../src/catchup/history.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
 import { loadLedger, loadPerpState, loadSpotState, toJson } from '../src/db/store.ts';
@@ -284,6 +284,8 @@ export class FakeHistory implements CatchUpHistory {
   tradeList: Record<string, AggTrade[]> = {};
   latest: Record<string, number | null> = {};
   settlements: Record<string, Settlement[]> = {};
+  /** Funding records per symbol that are no usable settlement (a rate but no mark price, say), by time. */
+  unusable: Record<string, number[]> = {};
   readonly calls: string[] = [];
   readonly failures: Error[] = [];
   /** While set, every call waits for it first: a run in flight the test holds. */
@@ -325,9 +327,12 @@ export class FakeHistory implements CatchUpHistory {
     await this.call(`latest ${market}:${symbol}`);
     return this.latest[`${market}:${symbol}`] ?? null;
   }
-  async funding(symbol: string, start: number, end: number): Promise<Settlement[]> {
+  async funding(symbol: string, start: number, end: number): Promise<FundingHistory> {
     await this.call(`funding ${symbol} ${start} ${end}`);
-    return (this.settlements[symbol] ?? []).filter((f) => f.time >= start && f.time <= end);
+    const settlements = (this.settlements[symbol] ?? []).filter((f) => f.time >= start && f.time <= end);
+    const unusable = (this.unusable[symbol] ?? []).filter((t) => t >= start && t <= end);
+    const recorded = [...new Set([...settlements.map((f) => f.time), ...unusable])].sort((a, b) => a - b);
+    return { settlements, recorded };
   }
 }
 

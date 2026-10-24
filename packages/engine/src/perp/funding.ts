@@ -25,12 +25,16 @@ export const SETTLEMENT_MATCH_MS = 60_000;
 export const LATER_SETTLEMENT_MS = 30 * 60_000;
 
 /**
- * Whether `fundingTime` never happened, judged by the settlement times `settled` that cover it: none
- * within SETTLEMENT_MATCH_MS of it, and one at least LATER_SETTLEMENT_MS after it.
+ * Whether `fundingTime` never happened, judged by the settlement times `settled` that cover it and
+ * the times of every funding record fetched with them, `recorded` (usable as a settlement or not):
+ * no settlement or record within SETTLEMENT_MATCH_MS of it, and a settlement at least
+ * LATER_SETTLEMENT_MS after it. A record at the time, even one without a usable mark price, shows
+ * the time happened: it then waits for its settlement, and its funding is never dropped.
  */
-export function neverSettled(fundingTime: number, settled: readonly number[]): boolean {
+export function neverSettled(fundingTime: number, settled: readonly number[], recorded: readonly number[] = settled): boolean {
   return (
     !settled.some((t) => Math.abs(t - fundingTime) <= SETTLEMENT_MATCH_MS) &&
+    !recorded.some((t) => Math.abs(t - fundingTime) <= SETTLEMENT_MATCH_MS) &&
     settled.some((t) => t >= fundingTime + LATER_SETTLEMENT_MS)
   );
 }

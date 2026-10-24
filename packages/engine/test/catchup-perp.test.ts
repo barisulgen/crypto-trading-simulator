@@ -5,6 +5,7 @@ import { deposit, emptyLedger } from '../src/account/ledger.ts';
 import type { Candle1m, CatchUpInput } from '../src/catchup/types.ts';
 import { PerpEngine } from '../src/perp/engine.ts';
 import { emptyPerpState } from '../src/perp/state.ts';
+import { neverSettled } from '../src/perp/funding.ts';
 import type { PerpEvent, PerpOrder, PerpOrderRequest } from '../src/perp/types.ts';
 import { applyCatchUp, catchUpNeeds, SimEngine } from '../src/sim.ts';
 import type { SimCtx, SimEvent } from '../src/sim.ts';
@@ -810,6 +811,33 @@ describe('perp catch-up: funding times with no settlement given (fundingTimes)',
     expect(t.sim.perp.state.funding.pending.map((w) => w.fundingTime)).toEqual([T(10, 0)]);
     expect(t.sim.perp.state.funding.windows[SYMBOL]).toBeUndefined();
     expect(t.sim.perp.state.funding.applied[SYMBOL]).toEqual([T(8, 0)]);
+  });
+
+  it('a time whose record has a rate but no usable mark price did happen, though a later one is settled: kept waiting for its rate, never dropped', () => {
+    const t = setup();
+    openLong(t);
+    // Binance recorded 07:00 (rate given, mark price missing) and settled 08:00: 07:00 happened, so
+    // its window keeps waiting for a usable settlement and nothing is estimated for it.
+    t.ctx.now = T(5, 51);
+    t.sim.openFundingWindow(SYMBOL, T(7, 0), t.ctx);
+    t.sim.closeFundingWindow(SYMBOL, T(7, 0), t.ctx);
+    const events = run(
+      t,
+      input({ funding: [funding0800], fundingRecords: [T(7, 0), T(8, 0)], fundingTimes: [T(7, 0), T(8, 0), T(10, 0)] }),
+    );
+    expect(ofType(events, 'funding').map((e) => [e.fundingTime, s(e.amount)])).toEqual([[T(8, 0), '-0.79']]);
+    expect(t.sim.perp.state.funding.pending.map((w) => w.fundingTime)).toEqual([T(7, 0), T(10, 0)]);
+    expect(t.sim.perp.state.funding.applied[SYMBOL]).toEqual([T(8, 0)]);
+  });
+
+  it('neverSettled: any record within 60 s of the time, usable or not, shows it happened', () => {
+    const at = T(7, 0);
+    expect(neverSettled(at, [T(8, 0)])).toBe(true);
+    expect(neverSettled(at, [T(8, 0)], [at + 3, T(8, 0)])).toBe(false);
+    expect(neverSettled(at, [T(8, 0)], [at - 60_000, T(8, 0)])).toBe(false);
+    expect(neverSettled(at, [T(8, 0)], [at + 60_001, T(8, 0)])).toBe(true);
+    // A later record that is not a usable settlement does not show the time was skipped.
+    expect(neverSettled(at, [], [T(8, 0)])).toBe(false);
   });
 
   it('a time with no settlement is kept when no later settlement is known, or when it lies before the settlements fetched', () => {
