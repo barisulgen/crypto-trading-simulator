@@ -4,7 +4,7 @@ import type { PerpOrderRequest, PositionSide, Side, TierSource } from '@sim/engi
 import type { PerpMark, WirePerpOrder, WirePosition } from './api.ts';
 import { fmtNum, tickDecimals } from './format.ts';
 import { cmpDec, floorDivToStep, subDec } from './market.ts';
-import { hasPrice } from './orderForm.ts';
+import { CATCHING_UP_REASON, hasPrice } from './orderForm.ts';
 import { validPrice } from './quickAmount.ts';
 import type { QuickState } from './quickAmount.ts';
 
@@ -151,20 +151,25 @@ export function perpLiveState(p: {
   feed: { fresh: boolean; reason: string | null } | undefined;
   mark: PerpMark | undefined;
   down: boolean;
+  /** The symbol's perp data is catching up after a feed gap: the server refuses orders until it is done. */
+  catchingUp?: boolean;
 }): { staleReason: string | null; blocked: boolean; liveMark: string | null } {
   const feedStale = p.feed !== undefined && !p.feed.fresh;
   const markStale = p.mark !== undefined && !p.mark.fresh;
+  const catchingUp = p.catchingUp === true;
   const staleReason = feedStale
     ? (p.feed?.reason ?? 'No fresh data from Binance')
-    : markStale
-      ? 'No mark price update for over 10 s'
-      : p.down
-        ? 'Connection to the simulator lost'
-        : p.mark === undefined
-          ? 'No mark price yet'
-          : null;
+    : catchingUp
+      ? CATCHING_UP_REASON
+      : markStale
+        ? 'No mark price update for over 10 s'
+        : p.down
+          ? 'Connection to the simulator lost'
+          : p.mark === undefined
+            ? 'No mark price yet'
+            : null;
   const liveMark = p.mark?.fresh && !p.down ? p.mark.markPrice : null;
-  return { staleReason, blocked: feedStale || markStale, liveMark };
+  return { staleReason, blocked: feedStale || markStale || catchingUp, liveMark };
 }
 
 // ---- leverage ----

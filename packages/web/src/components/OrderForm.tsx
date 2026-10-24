@@ -6,8 +6,9 @@ import type { OrderType, Side } from '@sim/engine';
 import { api, ApiError } from '../lib/api.ts';
 import type { WirePreview } from '../lib/api.ts';
 import { fmtCost, fmtNum, fmtPrice, fmtProceeds, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
-import { useLive } from '../lib/live.ts';
+import { feedStatus, useLive } from '../lib/live.ts';
 import {
+  CATCHING_UP_REASON,
   ORDER_TYPES,
   buildOrderRequest,
   canAttach,
@@ -16,6 +17,7 @@ import {
   hasTrigger,
   missingInput,
   previewMatches,
+  submitBlock,
 } from '../lib/orderForm.ts';
 import type { OrderFormFields } from '../lib/orderForm.ts';
 import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
@@ -182,6 +184,9 @@ function SpotOrderForm() {
   const base = rules?.base ?? symbol.replace(/USDT$/, '');
   const quote = rules?.quote ?? 'USDT';
   const stale = health !== undefined && !health.fresh;
+  // Catching up after a feed gap: the server refuses orders on the coin until it is done.
+  const catchingUp = useLive((s) => feedStatus(s, 'spot', symbol).state === 'catching_up');
+  const block = submitBlock({ stale, catchingUp });
 
   const [side, setSide] = useState<Side>('buy');
   const [type, setType] = useState<OrderType>('market');
@@ -301,7 +306,7 @@ function SpotOrderForm() {
   }
 
   const buy = side === 'buy';
-  const label = stale ? 'Live data interrupted' : busy ? 'Placing order...' : `${buy ? 'Buy' : 'Sell'} ${base}`;
+  const label = block ?? (busy ? 'Placing order...' : `${buy ? 'Buy' : 'Sell'} ${base}`);
   const tone = warn
     ? 'border border-accent bg-accent-soft text-fg'
     : buy
@@ -468,19 +473,19 @@ function SpotOrderForm() {
           priceDp={tickDecimals(rules?.tickSize ?? '0.01') + 2}
           state={preview}
           current={preview.key === key}
-          staleReason={stale ? (health?.reason ?? 'No fresh data from Binance') : null}
+          staleReason={stale ? (health?.reason ?? 'No fresh data from Binance') : catchingUp ? CATCHING_UP_REASON : null}
           missing={missing}
         />
       </section>
 
       <button
         type="submit"
-        disabled={busy || stale}
+        disabled={busy || block !== null}
         className={`flex h-10 items-center justify-center gap-2 rounded-ctl text-base font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${
-          stale ? 'border border-line bg-raised text-muted' : tone
+          block !== null ? 'border border-line bg-raised text-muted' : tone
         }`}
       >
-        {warn && !stale && (
+        {warn && block === null && (
           <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" className="flex-none text-accent">
             <path d="M7 1l6.5 12h-13z" fill="currentColor" />
             <path d="M7 5.5v3.5M7 10.5v1" stroke="var(--color-on-accent)" strokeWidth="1.4" />

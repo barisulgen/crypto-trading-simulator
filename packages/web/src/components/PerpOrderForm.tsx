@@ -5,9 +5,9 @@ import type { Side } from '@sim/engine';
 import { api, ApiError } from '../lib/api.ts';
 import type { WirePerpPreview } from '../lib/api.ts';
 import { fmtCost, fmtFloor, fmtNum, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
-import { feedOf, useLive } from '../lib/live.ts';
+import { feedOf, feedStatus, useLive } from '../lib/live.ts';
 import { liqPriceAtTick } from '../lib/market.ts';
-import { hasPrice } from '../lib/orderForm.ts';
+import { CATCHING_UP_REASON, hasPrice, submitBlock } from '../lib/orderForm.ts';
 import {
   PERP_ORDER_TYPES,
   buildPerpRequest,
@@ -299,7 +299,9 @@ export function PerpOrderForm() {
   const leverage = perp?.leverage;
   const marginMode = perp ? MARGIN_MODE_LABEL[perp.marginMode] : '-';
   // Never a live-looking estimate on data that is not live.
-  const { staleReason, blocked, liveMark } = perpLiveState({ feed, mark, down });
+  // A catch-up still applying a feed gap: the server refuses orders on the symbol until it is done.
+  const catchingUp = useLive((s) => feedStatus(s, 'perp', symbol).state === 'catching_up');
+  const { staleReason, blocked, liveMark } = perpLiveState({ feed, mark, down, catchingUp });
 
   const [side, setSide] = useState<Side>('buy');
   const [type, setType] = useState<PerpOrderType>('market');
@@ -431,7 +433,8 @@ export function PerpOrderForm() {
       ? `Reduce ${base} ${position.side}`
       : `Reduce-only ${buy ? 'buy' : 'sell'}`
     : `${buy ? 'Long' : 'Short'} ${base}`;
-  const label = blocked ? 'Live data interrupted' : busy ? 'Placing order...' : action;
+  const block = blocked ? submitBlock({ stale: staleReason !== CATCHING_UP_REASON, catchingUp }) : null;
+  const label = block ?? (busy ? 'Placing order...' : action);
   const tone = warn ? 'border border-accent bg-accent-soft text-fg' : buy ? 'bg-up text-panel' : 'bg-down text-panel';
   const maxLeverage = perp?.maxLeverage ?? null;
   const leverageOff = lock !== null || maxLeverage === null || !perp?.brackets;

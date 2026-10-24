@@ -114,6 +114,19 @@ describe('feed indicator', () => {
   });
 });
 
+describe('feed indicator while our connection is down', () => {
+  it('shows each state as last known, dimmed, never as a green Live', () => {
+    const s = state({ catchingUp: ['perp:BTCUSDT'] });
+    const html = renderToStaticMarkup(createElement(FeedStatusList, { data: s, symbols: SYMBOLS, lastKnown: true }));
+    expect(html).not.toContain('text-up');
+    expect(html).toContain('Live (last known)');
+    expect(html).toContain('Catching up (last known)');
+    const live = renderToStaticMarkup(createElement(FeedStatusList, { data: s, symbols: SYMBOLS, lastKnown: false }));
+    expect(live).toContain('text-up');
+    expect(live).not.toContain('last known');
+  });
+});
+
 describe('catching-up indicator', () => {
   it('shows nothing while no feed is catching up', () => {
     expect(renderToStaticMarkup(createElement(CatchUpIndicatorView, { feeds: [] }))).toBe('');

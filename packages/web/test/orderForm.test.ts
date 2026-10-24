@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WirePreview } from '../src/lib/api.ts';
-import { buildOrderRequest, canAttach, createLatest, fillable, missingInput, previewMatches } from '../src/lib/orderForm.ts';
+import { buildOrderRequest, canAttach, createLatest, fillable, missingInput, previewMatches, submitBlock } from '../src/lib/orderForm.ts';
 import type { OrderFormFields } from '../src/lib/orderForm.ts';
 
 const form = (over: Partial<OrderFormFields> = {}): OrderFormFields => ({
@@ -192,5 +192,15 @@ describe('previewMatches', () => {
     expect(previewMatches(key, form({ side: 'sell', symbol: 'ETHUSDT' }))).toBe(false);
     expect(previewMatches(key, form({ side: 'sell', type: 'limit' }))).toBe(false);
     expect(previewMatches(null, form())).toBe(false);
+  });
+});
+
+describe('submit button while the market is not live', () => {
+  it('is off and says why: interrupted, or catching up after a feed gap', () => {
+    expect(submitBlock({ stale: false, catchingUp: false })).toBeNull();
+    expect(submitBlock({ stale: true, catchingUp: false })).toBe('Live data interrupted');
+    expect(submitBlock({ stale: false, catchingUp: true })).toBe('Catching up after a feed gap');
+    // Stale data outranks a pending catch-up.
+    expect(submitBlock({ stale: true, catchingUp: true })).toBe('Live data interrupted');
   });
 });

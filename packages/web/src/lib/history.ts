@@ -19,9 +19,12 @@ import {
   fmtDrift,
   fmtPrice,
   fmtQty,
+  fmtNum,
   fmtUsd,
+  fmtUsdFloor,
   perpTickSize,
   signOf,
+  tickDecimals,
 } from './format.ts';
 import { addDec, cmpDec, fmtDateTime, fmtFundingPct, liqPriceAtTick, subDec } from './market.ts';
 import { fmtPnl } from './positions.ts';
@@ -233,7 +236,8 @@ export const BASIS_WHY: Record<CatchUpBasis, string> = {
   aggtrade_replay: "Replayed from Binance's recorded trades of the gap, filling only where real trades went through the price.",
   history_unavailable:
     "Binance no longer had the gap's trades, so the resting order was cancelled at the start of the gap rather than guessed.",
-  cancel_arrival: 'Your cancel reached the exchange during the gap and took effect at its own arrival time.',
+  cancel_arrival:
+    'Your cancel reached the exchange during the gap and was judged at its own arrival time: it cancelled the order, or arrived after the order had filled or triggered.',
 };
 
 const CLOSE_REASON: Record<PositionCloseReason, string> = {
@@ -379,7 +383,8 @@ function perpFillFields(f: PerpFillWire, o: WirePerpOrder): Field[] {
     { label: 'Role', value: f.liquidity === 'maker' ? 'Maker' : 'Taker' },
     { label: 'Fee', value: `${f.fee} ${f.feeAsset}` },
   ];
-  if (f.marginIn !== null) fields.push({ label: 'Margin in', value: fmtUsd(f.marginIn) });
+  // Money paid in, before the opening fee is taken from it: rounded up.
+  if (f.marginIn !== null) fields.push({ label: 'Margin in (before fee)', value: fmtCost(f.marginIn) });
   if (f.realizedPnl !== null) fields.push({ label: 'Trading P&L', value: fmtPnl(f.realizedPnl), tone: pnlTone(f.realizedPnl) });
   if (f.uncovered !== null) fields.push({ label: 'Uncovered loss', value: fmtCost(f.uncovered), tone: 'down' });
   if (f.triggerPrice !== null) fields.push({ label: 'Trigger', value: fmtPrice(f.symbol, f.triggerPrice, PERP_EXACT) });
@@ -387,25 +392,53 @@ function perpFillFields(f: PerpFillWire, o: WirePerpOrder): Field[] {
 }
 
 /**
- * The note on a close estimated from history that was held to the position's margin: the price
- * capped at the bankruptcy price (with the price it would have had without the cap), or, at an
- * unchanged price, the fee cut to what the margin had left. Null for any other close.
+ * The note on a close estimated from history that was held to the position's margin. A price
+ * capped at the bankruptcy price (shown with the price it would have had without the cap) leaves
+ * the margin all but used up, so its fee was cut too; at an unchanged price only the fee was cut.
+ * `fee` is the fill's fee when known (a fill); a position close does not carry it. Null for any
+ * other close.
  */
 function cappedNote(
   verb: 'filled' | 'closed',
   symbol: string,
   price: string,
   c: { bankruptcyCapped?: true; uncappedPrice?: string },
+  fee: string | null,
 ): EventView['note'] {
   if (!c.bankruptcyCapped) return null;
+  const feeCut =
+    fee !== null
+      ? `the fee was cut to the ${fee} USDT the margin had left`
+      : `the ${verb === 'closed' ? 'closing ' : ''}fee was cut to what the margin had left`;
   if (c.uncappedPrice === undefined || cmpDec(c.uncappedPrice, price) === 0) {
-    return { label: 'Capped', text: 'Held to the position margin: the fee was cut to what the margin had left' };
+    return { label: 'Capped', text: `Held to the position margin: ${feeCut}` };
   }
   const at = (p: string) => fmtAvgPrice(symbol, p, PERP);
   return {
     label: 'Capped',
-    text: `Held to the position margin: ${verb} at the bankruptcy price, ${at(price)}, instead of ${at(c.uncappedPrice)}, the price without the cap`,
+    text: `Held to the position margin: ${verb} at the bankruptcy price, ${at(price)}, instead of ${at(c.uncappedPrice)}, the price without the cap; ${feeCut}`,
   };
+}
+
+/** A non-negative amount rounded up to the cent, as a decimal string ('30.55' for 30.5413253). */
+const centsUp = (v: string) => fmtCost(v).replace(/[$,]/g, '');
+
+/**
+ * A liquidation's split as shown: the margin lost, the fee and the remainder each rounded up to the
+ * cent (the total and the fee as the liquidation alert shows them), and the trading loss the rest,
+ * so the three parts add up to the margin lost shown. When the rounding leaves nothing for the
+ * trading loss, the remainder gives way instead; no part is ever negative.
+ */
+function liquidationParts(p: { marginLost: string; liquidationFee: string; remainder: string }) {
+  const lost = centsUp(p.marginLost);
+  const fee = centsUp(p.liquidationFee);
+  let remainder = centsUp(p.remainder);
+  let trading = subDec(subDec(lost, fee), remainder);
+  if (cmpDec(trading, '0') < 0) {
+    trading = '0';
+    remainder = subDec(lost, fee);
+  }
+  return { lost, trading, fee, remainder };
 }
 
 /** 'Long 0.100 BTC': a position's side and size. */
@@ -413,6 +446,20 @@ const positionText = (p: { symbol: string; side: 'long' | 'short'; qty: string }
   `${SIDE_WORD[p.side]} ${fmtQty(p.symbol, p.qty, PERP)} ${baseOf(p.symbol)}`;
 
 const entryField = (p: PerpPosition): Field => ({ label: 'Entry price', value: fmtAvgPrice(p.symbol, p.entryPrice, PERP) });
+
+/**
+ * A margin change's liquidation price after it: at the tick, rounded towards the mark as every
+ * liquidation price is. An event without the position's side (recorded before it was kept) cannot
+ * be rounded that way, so it reads 'about' the price at the tick plus 2 decimals. Before the
+ * perpetual's tick has loaded, no price is shown.
+ */
+function liquidationAfter(p: { symbol: string; side?: 'long' | 'short'; liquidationPriceAfter: string | null }): string {
+  if (p.liquidationPriceAfter === null) return 'None';
+  const tick = perpTickSize(p.symbol);
+  if (tick === undefined) return '-';
+  if (p.side) return fmtPrice(p.symbol, liqPriceAtTick(p.liquidationPriceAfter, p.side, tick), PERP);
+  return `about ${fmtNum(p.liquidationPriceAfter, tickDecimals(tick) + 2)}`;
+}
 
 /** The estimated badge of an event a catch-up run produced; null for one seen live. */
 function estimatedOf(payload: unknown): EventView['estimated'] {
@@ -537,7 +584,8 @@ function describeKnown(row: HistoryRow): EventView {
       if (perp) {
         const p = row.payload as PerpPayload<'fill'>;
         const label = p.order.status === 'partially_filled' ? 'Partial fill' : 'Fill';
-        return view(label, 'plain', perpFillFields(p.fill, p.order), cappedNote('filled', p.fill.symbol, p.fill.price, p.fill));
+        const note = cappedNote('filled', p.fill.symbol, p.fill.price, p.fill, p.fill.fee);
+        return view(label, 'plain', perpFillFields(p.fill, p.order), note);
       }
       const p = row.payload as Payload<'fill'>;
       return view(p.order.status === 'partially_filled' ? 'Partial fill' : 'Fill', 'plain', fillFields(p.fill, p.order));
@@ -557,15 +605,11 @@ function describeKnown(row: HistoryRow): EventView {
     }
     case 'margin_changed': {
       const p = row.payload as PerpPayload<'margin_changed'>;
-      // At the tick, rounded towards the mark as every liquidation price is; unrounded when the
-      // side or the tick is not known, never rounded the wrong way.
-      const after = p.liquidationPriceAfter;
-      const atTick = after !== null && p.side ? liqPriceAtTick(after, p.side, perpTickSize(p.symbol)) : null;
-      const liq = after === null ? 'None' : fmtPrice(p.symbol, atTick ?? after, PERP_EXACT);
       return view(p.action === 'add' ? 'Margin added' : 'Margin removed', 'plain', [
         { label: 'Amount', value: fmtUsd(p.amount, EXACT) },
-        { label: 'Margin after', value: fmtUsd(p.marginAfter) },
-        { label: 'Liquidation price after', value: liq },
+        // A balance: cut, never rounded up.
+        { label: 'Margin after', value: fmtUsdFloor(p.marginAfter) },
+        { label: 'Liquidation price after', value: liquidationAfter(p) },
       ]);
     }
     case 'position_opened': {
@@ -576,7 +620,7 @@ function describeKnown(row: HistoryRow): EventView {
         { label: 'Leverage', value: `${p.leverage}x` },
         { label: 'Margin mode', value: 'Isolated' },
         entryField(p),
-        { label: 'Margin', value: fmtUsd(p.margin) },
+        { label: 'Margin', value: fmtUsdFloor(p.margin) },
       ]);
     }
     case 'position_closed': {
@@ -600,7 +644,7 @@ function describeKnown(row: HistoryRow): EventView {
           { label: 'Hold time', value: fmtDuration(p.holdMs) },
           { label: 'Reason', value: CLOSE_REASON[p.reason] ?? p.reason },
         ],
-        cappedNote('closed', pos.symbol, p.exitPrice, p),
+        cappedNote('closed', pos.symbol, p.exitPrice, p, null),
       );
     }
     case 'funding': {
@@ -613,25 +657,32 @@ function describeKnown(row: HistoryRow): EventView {
         { label: 'Funding time', value: fmtDateTime(p.fundingTime) },
         // A payment rounded up, a receipt down, as the funding notice rounds them.
         { label: 'Amount', value: fmtPnl(p.amount), tone: pnlTone(p.amount) },
+        // From the margin while the position is open, any shortfall from free leverage USDT; the
+        // event does not say whether there was one.
         paid
-          ? { label: 'Taken from', value: p.target === 'margin' ? 'Position margin' : 'Leverage wallet' }
+          ? {
+              label: 'Taken from',
+              value: p.target === 'margin' ? 'Position margin (any shortfall from the leverage wallet)' : 'Leverage wallet',
+            }
           : { label: 'Paid into', value: 'Leverage wallet' },
       ];
       if (p.uncollected !== null) fields.push({ label: 'Not collected', value: fmtCost(p.uncollected), tone: 'down' });
       return view(paid ? 'Funding paid' : 'Funding received', 'plain', fields);
     }
     case 'liquidation': {
-      // Money lost is rounded up and the mark shown at the tick, as the liquidation alert shows them.
+      // The mark at the tick and the margin lost and fee rounded up, as the liquidation alert shows
+      // them; the parts add up to the margin lost (see liquidationParts).
       const p = row.payload as PerpPayload<'liquidation'>;
+      const split = liquidationParts(p);
       const fields: Field[] = [
         { label: 'Position', value: positionText(p.position) },
         { label: 'Leverage', value: `${p.position.leverage}x` },
         entryField(p.position),
         { label: 'Mark price', value: fmtPrice(p.symbol, p.markPrice, PERP) },
-        { label: 'Margin lost', value: fmtCost(p.marginLost), tone: 'down' },
-        { label: 'Trading loss', value: fmtCost(p.tradingLoss) },
-        { label: 'Liquidation fee', value: fmtCost(p.liquidationFee) },
-        { label: 'Remainder', value: fmtCost(p.remainder) },
+        { label: 'Margin lost', value: fmtUsd(split.lost), tone: 'down' },
+        { label: 'Trading loss', value: fmtUsd(split.trading) },
+        { label: 'Liquidation fee', value: fmtUsd(split.fee) },
+        { label: 'Remainder', value: fmtUsd(split.remainder) },
       ];
       if (p.cancelledOrderIds.length > 0) fields.push({ label: 'Orders cancelled', value: String(p.cancelledOrderIds.length) });
       const note = p.feeRateKnown

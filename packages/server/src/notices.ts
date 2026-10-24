@@ -151,10 +151,10 @@ function catchUpNotice(e: Extract<SimEvent, { type: 'catch_up' }>): Notice {
   return { kind: 'catch_up', level: e.actions.length > 0 ? 'warn' : 'info', text };
 }
 
-/** `Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC` (price at tick decimals + 2; slippage rounded up). */
+/** `Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC` (price at tick decimals + 2, half up; slippage rounded up). */
 function fillText(f: Fill, rules: SpotRules | null): string {
   const verb = f.side === 'buy' ? 'Bought' : 'Sold';
-  const price = rules ? f.price.toFixed(rules.tickSize.decimalPlaces() + 2) : f.price.toString();
+  const price = rules ? f.price.toFixed(rules.tickSize.decimalPlaces() + 2, Decimal.ROUND_HALF_UP) : f.price.toString();
   const slippage = f.slippageUsd.toFixed(2, Decimal.ROUND_UP);
   return `${verb} ${f.qty} ${baseOf(f.symbol, rules)} @ ${price} · slippage $${slippage} · fee ${f.fee} ${f.feeAsset}`;
 }
@@ -180,11 +180,11 @@ function perpFillText(f: PerpFill, events: SimEvent[], lookup: NoticeLookup): st
   return parts.join(' · ');
 }
 
-/** `Funding paid $0.80 on BTCUSDT long (rate 0.0100%)`: a payment rounded up, a receipt down. */
+/** `Funding paid $0.80 on BTCUSDT long (rate 0.0100%)`: a payment rounded up, a receipt down; the rate half up, as the web shows it. */
 function fundingText(e: Extract<PerpEvent, { type: 'funding' }>): string {
   const paid = e.amount.isNegative();
   const amount = e.amount.abs().toFixed(2, paid ? Decimal.ROUND_UP : Decimal.ROUND_DOWN);
-  const rate = e.rate.mul(100).toFixed(4);
+  const rate = e.rate.mul(100).toFixed(4, Decimal.ROUND_HALF_UP);
   const uncollected = e.uncollected === null ? '' : ` · $${usdUp(e.uncollected)} of it could not be collected`;
   return `Funding ${paid ? 'paid' : 'received'} $${amount} on ${e.symbol} ${e.side} (rate ${rate}%)${uncollected}`;
 }
@@ -193,8 +193,13 @@ function tickOf(rules: { tickSize: Decimal } | null): number | null {
   return rules ? rules.tickSize.decimalPlaces() : null;
 }
 
+/**
+ * A price at tick decimals, rounded half up (away from zero), as the web app rounds every price it
+ * shows: the engine's own rounding mode is half-even, which would make a notice and the history
+ * disagree on a price ending in 5.
+ */
 function atTick(price: Decimal, tick: number | null): string {
-  return tick === null ? price.toString() : price.toFixed(tick);
+  return tick === null ? price.toString() : price.toFixed(tick, Decimal.ROUND_HALF_UP);
 }
 
 /** A liquidation price at tick decimals, rounded towards the mark: up for a long, down for a short. */

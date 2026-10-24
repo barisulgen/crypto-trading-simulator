@@ -1,7 +1,10 @@
+import { D } from '@sim/engine';
 import type { CatchUpBasis } from '@sim/engine';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { btcPerpRules } from '../../engine/test/perpFixtures.ts';
+import { noticesFor } from '../../server/src/notices.ts';
 import { LiquidationAlertView } from '../src/components/LiquidationAlert.tsx';
 import type { HistoryRow } from '../src/lib/api.ts';
 import { setPerpRules, setRules } from '../src/lib/format.ts';
@@ -707,7 +710,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       'Delay drift: $0.00',
       'Role: Taker',
       'Fee: 4 USDT',
-      'Margin in: $396.00',
+      'Margin in (before fee): $396.00',
     ]);
     expect(v.note).toBeNull();
   });
@@ -721,7 +724,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     );
     expect(lines(v)).toContain('Trading P&L: -$12.35');
     expect(lines(v)).toContain('Uncovered loss: $1.01');
-    expect(lines(v)).not.toContain('Margin in: $396.00');
+    expect(lines(v).some((l) => l.startsWith('Margin in'))).toBe(false);
     expect(tone(v, 'Trading P&L')).toBe('down');
     expect(tone(v, 'Uncovered loss')).toBe('down');
     const gain = describeEvent(
@@ -747,7 +750,8 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     );
     expect(capped.note).toEqual({
       label: 'Capped',
-      text: 'Held to the position margin: filled at the bankruptcy price, 76,040.000, instead of 70,000.000, the price without the cap',
+      text:
+        'Held to the position margin: filled at the bankruptcy price, 76,040.000, instead of 70,000.000, the price without the cap; the fee was cut to the 0 USDT the margin had left',
     });
     const feeCut = describeEvent(
       perp('fill', {
@@ -755,7 +759,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
         order: order({ side: 'sell' }),
       }),
     );
-    expect(feeCut.note).toEqual({ label: 'Capped', text: 'Held to the position margin: the fee was cut to what the margin had left' });
+    expect(feeCut.note).toEqual({ label: 'Capped', text: 'Held to the position margin: the fee was cut to the 0.5 USDT the margin had left' });
 
     const closed = describeEvent(
       perp('position_closed', {
@@ -772,7 +776,8 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     );
     expect(closed.note).toEqual({
       label: 'Capped',
-      text: 'Held to the position margin: closed at the bankruptcy price, 76,040.000, instead of 70,000.000, the price without the cap',
+      text:
+        'Held to the position margin: closed at the bankruptcy price, 76,040.000, instead of 70,000.000, the price without the cap; the closing fee was cut to what the margin had left',
     });
   });
 
@@ -836,7 +841,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     expect(lines(v)).toEqual(['Leverage: 25x']);
   });
 
-  it('margin changed: added or removed, the amount, the margin after and the liquidation price rounded towards the mark', () => {
+  it('margin changed: added or removed, the amount, the margin after (a balance, cut) and the liquidation price', () => {
     const change = (c: Record<string, unknown>) =>
       describeEvent(
         perp('margin_changed', {
@@ -844,7 +849,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
           side: 'long',
           action: 'add',
           amount: '50',
-          marginAfter: '446',
+          marginAfter: '446.009',
           liquidationPriceAfter: '75845.3212345',
           ...c,
         }),
@@ -854,11 +859,36 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     // A long's liquidation price is rounded up to the tick, a short's down: never further from the mark.
     expect(lines(v)).toEqual(['Amount: $50.00', 'Margin after: $446.00', 'Liquidation price after: 75,845.4']);
     expect(lines(change({ side: 'short', liquidationPriceAfter: '84154.6787' }))).toContain('Liquidation price after: 84,154.6');
-    // Without the side to round by, the price is shown unrounded.
-    expect(lines(change({ side: undefined }))).toContain('Liquidation price after: 75,845.3212345');
     const out = change({ action: 'remove', amount: '20', marginAfter: '376', liquidationPriceAfter: null });
     expect(out.label).toBe('Margin removed');
     expect(lines(out)).toContain('Liquidation price after: None');
+  });
+
+  it('margin changed without its side (recorded before the side was kept): about the price, at the tick plus 2 decimals', () => {
+    const legacy = (liq: string) =>
+      describeEvent(
+        perp('margin_changed', { symbol: 'BTCUSDT', action: 'remove', amount: '20', marginAfter: '426', liquidationPriceAfter: liq }),
+      );
+    // A real unrounded value from the engine.
+    expect(lines(legacy('76044.17670682730923694779116465863453815'))).toContain('Liquidation price after: about 76,044.177');
+    expect(lines(legacy('75843.37349397590361445783132530120481928'))).toContain('Liquidation price after: about 75,843.373');
+  });
+
+  it('margin changed before the perp tick has loaded: no liquidation price, never an unrounded one', () => {
+    setPerpRules({});
+    const row = (side: string | undefined) =>
+      describeEvent(
+        perp('margin_changed', {
+          symbol: 'BTCUSDT',
+          side,
+          action: 'add',
+          amount: '50',
+          marginAfter: '446',
+          liquidationPriceAfter: '76044.17670682730923694779116465863453815',
+        }),
+      );
+    expect(lines(row('long'))).toContain('Liquidation price after: -');
+    expect(lines(row(undefined))).toContain('Liquidation price after: -');
   });
 
   const funding = (f: Record<string, unknown> = {}) =>
@@ -887,7 +917,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       'Mark price: 80,000.0',
       'Funding time: 18 Oct 2026 09:00:00',
       'Amount: -$0.81',
-      'Taken from: Position margin',
+      'Taken from: Position margin (any shortfall from the leverage wallet)',
     ]);
     expect(tone(v, 'Amount')).toBe('down');
     const short = funding({ uncollected: '0.301', target: 'wallet', side: 'short' });
@@ -928,7 +958,8 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       'Entry price: 80,000.000',
       'Mark price: 76,345.4',
       'Margin lost: $396.00',
-      'Trading loss: $365.47',
+      // The parts add up to the margin lost: the fee and remainder rounded up, as the alert shows the fee.
+      'Trading loss: $365.45',
       'Liquidation fee: $25.44',
       'Remainder: $5.11',
       'Orders cancelled: 2',
@@ -1016,6 +1047,116 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     expect(odd.estimated?.why).toBe('Estimated by the catch-up after a data gap.');
   });
 
+  it('margin paid in is rounded up and named as before the fee; a position margin is a balance and is cut', () => {
+    const fillRow = describeEvent(perp('fill', { fill: fill({ marginIn: '395.001' }), order: order() }));
+    expect(lines(fillRow)).toContain('Margin in (before fee): $395.01');
+    const opened = describeEvent(perp('position_opened', { position: position({ margin: '396.009' }) }));
+    expect(lines(opened)).toContain('Margin: $396.00');
+  });
+
+  const cents = (v: string | undefined) => Math.round(Number((v ?? '').replace(/[$,]/g, '')) * 100);
+  const split = (v: EventView) => {
+    const at = (label: string) => cents(v.fields.find((f) => f.label === label)?.value);
+    return { lost: at('Margin lost'), parts: at('Trading loss') + at('Liquidation fee') + at('Remainder') };
+  };
+
+  it('the liquidation split adds up to the margin lost, as shown', () => {
+    const cases: Record<string, string>[] = [
+      { marginLost: '395.21', tradingLoss: '364.6686747', liquidationFee: '30.5413253', remainder: '0' },
+      { marginLost: '396', tradingLoss: '365.462', liquidationFee: '25.4318', remainder: '5.1062' },
+      { marginLost: '10.001', tradingLoss: '0', liquidationFee: '10.001', remainder: '0' },
+      { marginLost: '0.01', tradingLoss: '0', liquidationFee: '0.005', remainder: '0.005' },
+      { marginLost: '1.23456789', tradingLoss: '1.00000001', liquidationFee: '0.11111111', remainder: '0.12345677' },
+    ];
+    for (const c of cases) {
+      const v = describeEvent(liquidation(c));
+      const { lost, parts } = split(v);
+      expect(parts).toBe(lost);
+      // Never a negative part.
+      for (const label of ['Trading loss', 'Liquidation fee', 'Remainder']) {
+        expect(v.fields.find((f) => f.label === label)?.value.startsWith('-')).toBe(false);
+      }
+    }
+    const v = describeEvent(liquidation(cases[0]!));
+    // The total and the fee as the alert shows them (rounded up); the trading loss takes the rest.
+    expect(lines(v)).toContain('Margin lost: $395.21');
+    expect(lines(v)).toContain('Liquidation fee: $30.55');
+    expect(lines(v)).toContain('Trading loss: $364.66');
+    expect(lines(v)).toContain('Remainder: $0.00');
+  });
+
+  describe('the notices and the history agree on every figure they share', () => {
+    const lookup = {
+      spotRules: () => null,
+      perpRules: () => btcPerpRules,
+      liquidationPrice: () => null,
+    };
+    const engineLiquidation = (markPrice: string) => ({
+      type: 'liquidation' as const,
+      market: 'perp' as const,
+      time: T,
+      symbol: 'BTCUSDT',
+      position: {
+        id: 'pos1',
+        symbol: 'BTCUSDT',
+        side: 'long' as const,
+        qty: D('0.1'),
+        entryPrice: D('80000'),
+        leverage: 20,
+        margin: D('396'),
+        openedAt: T,
+        realizedPnl: D('0'),
+        fees: D('4'),
+        funding: D('0'),
+        warnLevel: 0 as const,
+      },
+      markPrice: D(markPrice),
+      marginLost: D('396'),
+      tradingLoss: D('365.462'),
+      liquidationFee: D('25.4318'),
+      remainder: D('5.1062'),
+      feeRateKnown: true,
+      cancelledOrderIds: [],
+    });
+    const wire = (e: object) => JSON.parse(JSON.stringify(e)) as Record<string, unknown>;
+    const plain = (v: string | undefined) => (v ?? '').replace(/,/g, '');
+
+    it('a liquidation mark ending in 5 is rounded half up in both', () => {
+      const e = engineLiquidation('76345.25');
+      const [notice] = noticesFor([e], lookup);
+      const v = describeEvent(perp('liquidation', wire(e)));
+      const mark = v.fields.find((f) => f.label === 'Mark price')?.value;
+      expect(mark).toBe('76,345.3');
+      expect(notice!.text).toContain(`at mark ${plain(mark)} `);
+      expect(notice!.text).toContain(`margin lost ${v.fields.find((f) => f.label === 'Margin lost')?.value}`);
+      expect(notice!.text).toContain(`(fee ${v.fields.find((f) => f.label === 'Liquidation fee')?.value})`);
+    });
+
+    it('a funding rate on a half is rounded half up in both', () => {
+      const e = {
+        type: 'funding' as const,
+        market: 'perp' as const,
+        time: T,
+        symbol: 'BTCUSDT',
+        positionId: 'pos1',
+        fundingTime: T,
+        rate: D('0.0001225'),
+        markPrice: D('80000'),
+        qty: D('0.1'),
+        side: 'long' as const,
+        amount: D('-0.98'),
+        target: 'margin' as const,
+        uncollected: null,
+      };
+      const [notice] = noticesFor([e], lookup);
+      const v = describeEvent(perp('funding', wire(e)));
+      const rate = v.fields.find((f) => f.label === 'Rate')?.value;
+      expect(rate).toBe('0.0123%');
+      expect(notice!.text).toContain(`(rate ${rate})`);
+      expect(notice!.text).toContain(`paid ${v.fields.find((f) => f.label === 'Amount')?.value.replace('-', '')}`);
+    });
+  });
+
   const bases: [string, string][] = [
     [
       'candle_worst_price',
@@ -1032,7 +1173,10 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       'history_unavailable',
       "Binance no longer had the gap's trades, so the resting order was cancelled at the start of the gap rather than guessed.",
     ],
-    ['cancel_arrival', 'Your cancel reached the exchange during the gap and took effect at its own arrival time.'],
+    [
+      'cancel_arrival',
+      'Your cancel reached the exchange during the gap and was judged at its own arrival time: it cancelled the order, or arrived after the order had filled or triggered.',
+    ],
   ];
   for (const [basis, why] of bases) {
     it(`estimated basis ${basis}: one plain sentence`, () => {

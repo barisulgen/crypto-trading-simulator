@@ -122,3 +122,17 @@ export function fillable(p: WirePreview, side: Side): { amount: string; unit: 'c
   if (side === 'buy') return p.receive === null ? null : { amount: addDec(p.receive, fee), unit: 'coin' };
   return p.total === null ? null : { amount: addDec(p.total, fee), unit: 'usd' };
 }
+
+/** Why the estimate is dimmed while the market's data catches up after a feed gap. */
+export const CATCHING_UP_REASON = 'Catching up after a feed gap: trading resumes when it is done';
+
+/**
+ * The submit button's label while it is off for the market's data, or null when trading is open:
+ * stale data first, then a catch-up still applying a feed gap (the server refuses orders until it
+ * is done).
+ */
+export function submitBlock(p: { stale: boolean; catchingUp: boolean }): string | null {
+  if (p.stale) return 'Live data interrupted';
+  if (p.catchingUp) return 'Catching up after a feed gap';
+  return null;
+}

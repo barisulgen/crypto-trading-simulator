@@ -36,7 +36,25 @@ const MARKET_ROWS: { market: Market; label: string }[] = [
   { market: 'perp', label: 'Perp' },
 ];
 
-function StateText({ state, reason }: { state: FeedState; reason: string | null }) {
+const STATE_WORD: Record<Exclude<FeedState, 'unknown'>, string> = {
+  live: 'Live',
+  catching_up: 'Catching up',
+  interrupted: 'Interrupted',
+};
+
+/**
+ * A feed's state in words. `lastKnown`: our own connection is down, so the state is only the last
+ * one received: shown muted and marked so, never as a green Live.
+ */
+function StateText({ state, reason, lastKnown }: { state: FeedState; reason: string | null; lastKnown: boolean }) {
+  if (state === 'unknown') return <span className="text-faint">No status yet</span>;
+  if (lastKnown) {
+    return (
+      <span className="text-muted">
+        {STATE_WORD[state]} (last known) {state === 'interrupted' && reason ? `- ${reason}` : ''}
+      </span>
+    );
+  }
   switch (state) {
     case 'live':
       return <span className="text-up">Live</span>;
@@ -46,27 +64,30 @@ function StateText({ state, reason }: { state: FeedState; reason: string | null 
           <span className="font-semibold text-accent">Catching up</span> - applying the gap
         </span>
       );
-    case 'interrupted':
+    default:
       return (
         <span className="text-fg">
           <span className="text-down">Interrupted</span> {reason ? `- ${reason}` : ''}
         </span>
       );
-    default:
-      return <span className="text-faint">No status yet</span>;
   }
 }
 
-/** Each coin with the state of its spot and its perp feed, and the reason a feed is interrupted. */
+/**
+ * Each coin with the state of its spot and its perp feed, and the reason a feed is interrupted;
+ * with `lastKnown` (our connection is down) every state is dimmed and marked as last known.
+ */
 export function FeedStatusList({
   data,
   symbols,
+  lastKnown = false,
 }: {
   data: Pick<LiveData, 'health' | 'markets' | 'catchingUp'>;
   symbols: readonly string[];
+  lastKnown?: boolean;
 }) {
   return (
-    <ul className="flex flex-col divide-y divide-line border-t border-line">
+    <ul className={`flex flex-col divide-y divide-line border-t border-line ${lastKnown ? 'opacity-70' : ''}`}>
       {symbols.map((s) => (
         <li key={s} className="flex items-start gap-2 py-1.5 text-xs">
           <span className="w-12 flex-none font-semibold">{s.replace(/USDT$/, '')}</span>
@@ -75,7 +96,7 @@ export function FeedStatusList({
               <div key={market} className="flex min-w-0 gap-2">
                 <span className="w-8 flex-none text-faint">{label}</span>
                 <span className="min-w-0 [overflow-wrap:anywhere]">
-                  <StateText {...feedStatus(data, market, s)} />
+                  <StateText {...feedStatus(data, market, s)} lastKnown={lastKnown} />
                 </span>
               </div>
             ))}
@@ -152,7 +173,7 @@ export function FeedIndicator() {
           {conn === 'down' && (
             <p className="mb-2 text-xs text-faint">Prices, balances and the states below are frozen until the connection returns.</p>
           )}
-          <FeedStatusList data={data} symbols={symbols} />
+          <FeedStatusList data={data} symbols={symbols} lastKnown={conn !== 'open'} />
           <p className="mt-2 text-2xs text-faint">
             Trading on an interrupted market waits for fresh data; nothing fills on an old price. A market catching up
             applies what happened during the gap, marked estimated in the history, before trading on it resumes.

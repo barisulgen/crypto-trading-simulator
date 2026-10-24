@@ -578,4 +578,16 @@ describe('perp live state', () => {
       liveMark: null,
     });
   });
+
+  it('catching up after a feed gap blocks submit and says why; a stale feed still names its own reason', () => {
+    expect(perpLiveState({ feed: live, mark: mark(true), down: false, catchingUp: true })).toEqual({
+      staleReason: 'Catching up after a feed gap: trading resumes when it is done',
+      blocked: true,
+      liveMark: '80000',
+    });
+    expect(
+      perpLiveState({ feed: { fresh: false, reason: 'No trades for 12 s' }, mark: mark(true), down: false, catchingUp: true })
+        .staleReason,
+    ).toBe('No trades for 12 s');
+  });
 });
