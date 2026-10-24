@@ -796,6 +796,50 @@ describe('perp catch-up: funding times with no settlement given (fundingTimes)',
     expect(t.sim.perp.state.funding.windows[SYMBOL]).toBeUndefined();
   });
 
+  it('a time with no settlement while a later one is settled never happened (the interval changed): not modelled, its waiting window dropped', () => {
+    const t = setup();
+    openLong(t);
+    // 07:00 was projected by an earlier run and waits for its rate; Binance settled 08:00 and
+    // nothing at 07:00, so 07:00 never happened. 10:00 has no settlement after it yet: kept.
+    t.ctx.now = T(5, 51);
+    t.sim.openFundingWindow(SYMBOL, T(7, 0), t.ctx);
+    t.sim.closeFundingWindow(SYMBOL, T(7, 0), t.ctx);
+    expect(t.sim.perp.state.funding.pending.map((w) => w.fundingTime)).toEqual([T(7, 0)]);
+    const events = run(t, input({ funding: [funding0800], fundingTimes: [T(7, 0), T(8, 0), T(10, 0)] }));
+    expect(ofType(events, 'funding').map((e) => [e.fundingTime, s(e.amount)])).toEqual([[T(8, 0), '-0.79']]);
+    expect(t.sim.perp.state.funding.pending.map((w) => w.fundingTime)).toEqual([T(10, 0)]);
+    expect(t.sim.perp.state.funding.windows[SYMBOL]).toBeUndefined();
+    expect(t.sim.perp.state.funding.applied[SYMBOL]).toEqual([T(8, 0)]);
+  });
+
+  it('a time with no settlement is kept when no later settlement is known, or when it lies before the settlements fetched', () => {
+    const t = setup();
+    openLong(t);
+    t.ctx.now = T(5, 51);
+    t.sim.openFundingWindow(SYMBOL, T(5, 0), t.ctx); // before the gap's settlements were fetched
+    t.sim.closeFundingWindow(SYMBOL, T(5, 0), t.ctx);
+    run(t, input({ funding: [funding0800], fundingTimes: [T(11, 0)] }));
+    expect(t.sim.perp.state.funding.pending.map((w) => w.fundingTime)).toEqual([T(5, 0), T(11, 0)]);
+  });
+
+  it('dropFundingWindow removes the open or waiting window of that time only, moving no money', () => {
+    const t = setup();
+    openLong(t);
+    t.ctx.now = T(5, 51);
+    t.sim.openFundingWindow(SYMBOL, T(7, 0), t.ctx);
+    t.sim.closeFundingWindow(SYMBOL, T(7, 0), t.ctx);
+    t.sim.openFundingWindow(SYMBOL, T(8, 0), t.ctx);
+    t.sim.dropFundingWindow(SYMBOL, T(9, 0), t.ctx);
+    expect(t.sim.perp.state.funding.pending.map((w) => w.fundingTime)).toEqual([T(7, 0)]);
+    expect(t.sim.perp.state.funding.windows[SYMBOL]?.fundingTime).toBe(T(8, 0));
+    t.sim.dropFundingWindow(SYMBOL, T(7, 0), t.ctx);
+    t.sim.dropFundingWindow(SYMBOL, T(8, 0), t.ctx);
+    expect(t.sim.perp.state.funding.pending).toEqual([]);
+    expect(t.sim.perp.state.funding.windows[SYMBOL]).toBeUndefined();
+    expect(s(t.lev().free)).toBe('600');
+    expect(s(t.position()!.margin)).toBe('396');
+  });
+
   it('a funding time whose window opens at or after the end of the gap is left to the live path', () => {
     const t = setup();
     openLong(t);

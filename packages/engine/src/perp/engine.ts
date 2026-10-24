@@ -11,7 +11,7 @@ import {
   UNKNOWN_ORDER_TYPE,
 } from '../spot/engine.ts';
 import type { ActionResult, AggTrade } from '../types.ts';
-import { applyFunding, closeFundingWindow, openFundingWindow } from './funding.ts';
+import { applyFunding, closeFundingWindow, dropFundingWindow, openFundingWindow } from './funding.ts';
 import { arriveLimit, fillAt, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import { checkMark, isolatedModel, liquidateOnMarkRange } from './liquidation.ts';
 import type { LiquidationModel } from './liquidation.ts';
@@ -200,6 +200,11 @@ export class PerpEngine {
   /** Close the symbol's funding window at fundingTime + 15 s; it waits for its settled rate. */
   closeFundingWindow(symbol: string, fundingTime: number, ctx: PerpCtx): void {
     closeFundingWindow(this.s, symbol, fundingTime, ctx);
+  }
+
+  /** Forget the window of a funding time that never happened; no money moves. Returns whether there was one. */
+  dropFundingWindow(symbol: string, fundingTime: number, ctx: PerpCtx): boolean {
+    return dropFundingWindow(this.s, symbol, fundingTime, ctx);
   }
 
   /**

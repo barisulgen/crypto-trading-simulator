@@ -1,4 +1,4 @@
-import { D, FUNDING_WINDOW_MS } from '@sim/engine';
+import { D, FUNDING_WINDOW_MS, neverSettled, SETTLEMENT_MATCH_MS } from '@sim/engine';
 import type { Decimal } from '@sim/engine';
 import type { FundingRateQuery } from '../binance/futuresRest.ts';
 import type { Logger } from '../log.ts';
@@ -13,8 +13,8 @@ export const FUNDING_SLOW_POLL_MS = 300_000;
 /** Timers are armed in steps of at most this, re-reading the clock each time: a wake from sleep is seen within it. */
 const TIMER_STEP_MS = 60_000;
 /** A fundingRate record within this of the funding time is its settlement. */
-const MATCH_MS = 60_000;
-/** The fundingRate query reaches this far either side of the funding time. */
+const MATCH_MS = SETTLEMENT_MATCH_MS;
+/** The fundingRate query reaches this far before the funding time, and at least this far after it (up to now). */
 const QUERY_MS = 60_000;
 const QUERY_LIMIT = 10;
 /** While a symbol's windows are left to catch-up, an open or close that fell due is tried again this often. */
@@ -40,6 +40,8 @@ export interface FundingSim {
   openFundingWindow(symbol: string, fundingTime: number): void;
   closeFundingWindow(symbol: string, fundingTime: number): void;
   applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal): unknown;
+  /** Forget the window of a funding time that never happened (no money moves). Absent: never dropped. */
+  dropFundingWindow?(symbol: string, fundingTime: number): void;
   /**
    * Whether the symbol's perp data is in a gap or catching up after one: what was held across its
    * funding windows is known only once catch-up has run (it models the windows of its gap itself),
@@ -76,7 +78,8 @@ export interface FundingServiceDeps {
  * polled, whoever opened it, so each is settled exactly once. For a catch-up run, the funding times
  * of its gap are the known ones and those projected back from the latest known one by the
  * symbol's funding interval (fundingTimes), so one whose settlement is not published yet is still
- * modelled, and then polled here until it is.
+ * modelled, and then polled here until it is, or until a later settlement shows it never happened
+ * (the interval changed), when its window is dropped.
  */
 export class FundingService {
   private readonly d: FundingServiceDeps;
@@ -141,8 +144,10 @@ export class FundingService {
   /**
    * The funding times of `symbol` from `start` to `end`: the known ones, and those projected back
    * from the latest known one in steps of the symbol's funding interval (fundingInfo; 8 h for a
-   * symbol it does not list). Never estimated: a projected time is only modelled, and settled once
-   * Binance publishes its settlement. With no time known yet, only the known ones (none).
+   * symbol it does not list), which assumes the interval held. Never estimated: a projected time is
+   * only modelled, and settled once Binance publishes its settlement; one the settlements show
+   * never happened is dropped (by the catch-up run, or by its poll). With no time known yet, only
+   * the known ones (none).
    * Throws when the intervals cannot be read (the run is retried).
    */
   async fundingTimes(symbol: string, start: number, end: number): Promise<number[]> {
@@ -291,9 +296,12 @@ export class FundingService {
   }
 
   /**
-   * One fundingRate poll; the settlement found is applied, otherwise the next poll is scheduled.
-   * While the symbol's windows are left to catch-up the chain stops (before polling, or before
-   * applying): catch-up settles the window itself, or caughtUp polls it again.
+   * One fundingRate poll, from 60 s before T to 60 s after it or now if later; the settlement found
+   * is applied, otherwise the next poll is scheduled. When the answer holds a later funding time's
+   * settlement and none at T, T never happened (a projected time whose interval changed): its
+   * window is dropped and the chain ends. While the symbol's windows are left to catch-up the chain
+   * stops (before polling, or before applying): catch-up settles the window itself, or caughtUp
+   * polls it again.
    */
   private async poll(ref: FundingRef): Promise<void> {
     const T = ref.fundingTime;
@@ -303,10 +311,13 @@ export class FundingService {
       return;
     }
     let settlement: { rate: Decimal; markPrice: Decimal } | null = null;
+    let never = false;
     try {
-      const rows = await this.d.rest.fundingRate({ symbol: ref.symbol, startTime: T - QUERY_MS, endTime: T + QUERY_MS, limit: QUERY_LIMIT });
+      const endTime = Math.max(T + QUERY_MS, this.d.now());
+      const rows = await this.d.rest.fundingRate({ symbol: ref.symbol, startTime: T - QUERY_MS, endTime, limit: QUERY_LIMIT });
       this.failing.delete(k);
       settlement = findSettlement(rows, T);
+      never = settlement === null && neverSettled(T, settlementTimes(rows));
     } catch (e) {
       if (!this.failing.has(k)) {
         this.failing.add(k);
@@ -314,8 +325,16 @@ export class FundingService {
       }
     }
     if (!this.started) return;
-    if (settlement !== null && this.deferred(ref.symbol)) {
+    if ((settlement !== null || never) && this.deferred(ref.symbol)) {
       this.polling.delete(k);
+      return;
+    }
+    if (never) {
+      this.polling.delete(k);
+      this.d.logger.warn(
+        `Funding ${ref.symbol} at ${iso(T)} never happened: Binance settled a later funding time and none at it (its interval changed); dropped, nothing applied`,
+      );
+      this.safely(ref, () => this.d.sim.dropFundingWindow?.(ref.symbol, T));
       return;
     }
     if (settlement !== null) {
@@ -377,6 +396,15 @@ export class FundingService {
 
 const refKey = (r: FundingRef) => `${r.symbol}@${r.fundingTime}`;
 const iso = (t: number) => new Date(t).toISOString();
+
+/** The funding times of the usable settlements among fundingRate records (see findSettlement). */
+function settlementTimes(rows: unknown): number[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.flatMap((r) => {
+    const time = Number(r?.fundingTime);
+    return Number.isSafeInteger(time) && findSettlement([r], time) !== null ? [time] : [];
+  });
+}
 
 /**
  * The settlement of funding time T among fundingRate records: one within 60 s of T with a decimal

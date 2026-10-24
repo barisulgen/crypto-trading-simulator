@@ -13,6 +13,28 @@ import type { PerpCtx, PerpEvent, PositionSide } from './types.ts';
 /** How far either side of the funding time the window reaches. */
 export const FUNDING_WINDOW_MS = 15_000;
 
+/** A settlement within this of a funding time is that time's. */
+export const SETTLEMENT_MATCH_MS = 60_000;
+
+/**
+ * A settlement at least this long after a funding time is another funding time's (intervals are an
+ * hour or more). Binance publishes settlements in order, so once such a later one is published and
+ * none at the earlier time, the earlier time never happened: its interval changed after the time
+ * was projected or announced.
+ */
+export const LATER_SETTLEMENT_MS = 30 * 60_000;
+
+/**
+ * Whether `fundingTime` never happened, judged by the settlement times `settled` that cover it: none
+ * within SETTLEMENT_MATCH_MS of it, and one at least LATER_SETTLEMENT_MS after it.
+ */
+export function neverSettled(fundingTime: number, settled: readonly number[]): boolean {
+  return (
+    !settled.some((t) => Math.abs(t - fundingTime) <= SETTLEMENT_MATCH_MS) &&
+    settled.some((t) => t >= fundingTime + LATER_SETTLEMENT_MS)
+  );
+}
+
 /** What the symbol's position holds on `side` right now: max = min = its size, or 0 if none. */
 function heldNow(s: PerpState, symbol: string, side: PositionSide): FundingSide {
   const p = s.positions[symbol];
@@ -51,6 +73,23 @@ export function closeFundingWindow(s: PerpState, symbol: string, fundingTime: nu
   if (open?.fundingTime !== fundingTime) return;
   delete s.funding.windows[symbol];
   s.funding.pending.push(open);
+}
+
+/**
+ * Forget the symbol's window for `fundingTime`, open or waiting for its rate: a funding time that
+ * never happened (see neverSettled). No money moves; returns whether there was one.
+ */
+export function dropFundingWindow(s: PerpState, symbol: string, fundingTime: number, _ctx: PerpCtx): boolean {
+  const f = s.funding;
+  const matches = (w: FundingWindow) => w.symbol === symbol && w.fundingTime === fundingTime;
+  const before = f.pending.length;
+  f.pending = f.pending.filter((w) => !matches(w));
+  const open = f.windows[symbol];
+  if (open && matches(open)) {
+    delete f.windows[symbol];
+    return true;
+  }
+  return f.pending.length < before;
 }
 
 /**

@@ -187,6 +187,10 @@ export class SimEngine {
     this.perp.closeFundingWindow(symbol, fundingTime, ctxFor(ctx, 'perp'));
   }
 
+  dropFundingWindow(symbol: string, fundingTime: number, ctx: SimCtx): boolean {
+    return this.perp.dropFundingWindow(symbol, fundingTime, ctxFor(ctx, 'perp'));
+  }
+
   applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal, ctx: SimCtx): PerpEvent[] {
     return this.perp.applyFunding(symbol, fundingTime, rate, markPrice, ctxFor(ctx, 'perp'));
   }

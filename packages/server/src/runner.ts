@@ -500,6 +500,15 @@ export class EngineRunner implements FundingSim {
     });
   }
 
+  /** Forget the window of a funding time that never happened; no money moves. */
+  dropFundingWindow(symbol: string, fundingTime: number): void {
+    this.refuseTrading();
+    this.apply((ctx) => {
+      this.d.sim.dropFundingWindow(symbol, fundingTime, ctx);
+      return [];
+    });
+  }
+
   /** The funding Binance settled at `fundingTime`, at its settled rate and mark price. Applied once per time. */
   applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal): PerpEvent[] {
     this.refuseTrading();

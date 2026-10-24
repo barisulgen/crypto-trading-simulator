@@ -237,6 +237,28 @@ describe('FundingService', () => {
     expect(t.logs.filter((l) => l.includes('left to catch-up'))).toHaveLength(1);
   });
 
+  it('a waiting window whose time never happened (a later settlement published, none at it) is dropped: no endless polling', async () => {
+    const t = await setup();
+    const projected = T - 8 * 3_600_000; // projected over a gap; the interval was really 4 h, then changed
+    t.runner.openFundingWindow('BTCUSDT', projected);
+    t.runner.closeFundingWindow('BTCUSDT', projected);
+    expect(t.windows().pending.map((w) => w.fundingTime)).toEqual([projected]);
+    t.answers.push(settled(T - 4 * 3_600_000)); // only the later time is settled
+    t.funding.start(); // the waiting window is polled at once
+    t.clock.advance(0);
+    await settle();
+    // Asked from just before its time up to now, so a later settlement shows.
+    expect(t.calls.map((c) => [c.q.startTime, c.q.endTime])).toEqual([[projected - 60_000, t.clock.now]]);
+    expect(t.windows().pending).toEqual([]);
+    const saved = t.db.prepare('SELECT funding FROM perp_state').get() as { funding: string };
+    expect(JSON.parse(saved.funding).pending).toEqual([]);
+    expect(t.fundingEvents()).toEqual([]);
+    expect(t.logs.filter((l) => l.includes('never happened'))).toHaveLength(1);
+    await t.advance(FUNDING_POLL_MS * 3);
+    expect(t.calls).toHaveLength(1);
+    expect(t.fatal).toEqual([]);
+  });
+
   it('timers are armed in steps of at most 60 s, so a wake from sleep is noticed within a minute', async () => {
     const clock = new FakeClock(T - 4 * 3_600_000);
     const delays: number[] = [];

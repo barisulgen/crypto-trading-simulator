@@ -1,6 +1,6 @@
 import type { Decimal } from '../decimal.ts';
 import type { PerpEngine } from '../perp/engine.ts';
-import { FUNDING_WINDOW_MS } from '../perp/funding.ts';
+import { FUNDING_WINDOW_MS, neverSettled } from '../perp/funding.ts';
 import { liquidateOnMarkRange } from '../perp/liquidation.ts';
 import { bracketsOrNull } from '../perp/market.ts';
 import { cancelOrder, remainingQty } from '../perp/orders.ts';
@@ -115,11 +115,13 @@ class PerpCatchUp {
     for (const f of input.funding ?? []) {
       if (f.time < input.to && !byTime.has(f.time)) byTime.set(f.time, { time: f.time, settlement: f });
     }
-    // A time with no settlement is modelled only when its window overlaps the gap: one that closed
-    // before the gap began was the live path's.
+    // A time with no settlement is modelled only when its window overlaps the gap (one that closed
+    // before the gap began was the live path's) and the settlements show it may still happen.
     for (const time of input.fundingTimes ?? []) {
       const overlaps = time - FUNDING_WINDOW_MS < input.to && time + FUNDING_WINDOW_MS > input.from;
-      if (Number.isSafeInteger(time) && overlaps && !byTime.has(time)) byTime.set(time, { time, settlement: null });
+      if (Number.isSafeInteger(time) && overlaps && !byTime.has(time) && !this.neverHappened(time)) {
+        byTime.set(time, { time, settlement: null });
+      }
     }
     this.funding = [...byTime.values()].sort((a, b) => a.time - b.time);
   }
@@ -127,6 +129,7 @@ class PerpCatchUp {
   run(): (PerpEvent | CatchUpEvent)[] {
     const { from, to } = this.input;
     if (!this.anythingOpen()) return [];
+    this.dropNeverHappened();
     const trades =
       this.input.trades === 'unavailable'
         ? null
@@ -228,6 +231,31 @@ class PerpCatchUp {
   }
 
   // ---- before the walk ----
+
+  /**
+   * Whether the settlements given show that `time` never happened (see neverSettled). Only a time
+   * inside the span they were fetched for, [from − 15 s, to], is judged; none at all when they
+   * were not fetched.
+   */
+  private neverHappened(time: number): boolean {
+    const { funding, from, to } = this.input;
+    if (funding === undefined || time < from - FUNDING_WINDOW_MS || time > to) return false;
+    return neverSettled(time, funding.map((f) => f.time));
+  }
+
+  /**
+   * A window of the symbol, open or waiting for its rate, whose funding time never happened (a time
+   * projected over a gap when the interval changed) is dropped: it would never be settled.
+   */
+  private dropNeverHappened(): void {
+    const f = this.s.funding;
+    const windows = [...f.pending, ...(f.windows[this.symbol] ? [f.windows[this.symbol]!] : [])];
+    for (const w of windows) {
+      if (w.symbol === this.symbol && this.neverHappened(w.fundingTime)) {
+        this.engine.dropFundingWindow(this.symbol, w.fundingTime, this.ctx);
+      }
+    }
+  }
 
   /**
    * Without the gap's trades no limit fill can be replayed, so every resting limit and post-only
