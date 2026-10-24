@@ -1,8 +1,9 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { D, Decimal, assumedPrice, orderCost } from '@sim/engine';
 import { PerpEstimate } from '../src/components/PerpOrderForm.tsx';
-import type { WirePerpOrder, WirePerpPreview, WirePosition } from '../src/lib/api.ts';
+import type { WireLevel, WirePerpOrder, WirePerpPreview, WirePosition } from '../src/lib/api.ts';
 import {
   buildPerpRequest,
   leverageLock,
@@ -14,7 +15,8 @@ import {
   tiersText,
 } from '../src/lib/perpForm.ts';
 import type { PerpFormFields } from '../src/lib/perpForm.ts';
-import { marginShareNotional, perpQuickAmount, perpSizingPrice } from '../src/lib/quickAmount.ts';
+import { floorDivToStep } from '../src/lib/market.ts';
+import { perpQuickAmount } from '../src/lib/quickAmount.ts';
 import type { PerpQuickInput } from '../src/lib/quickAmount.ts';
 
 const form = (over: Partial<PerpFormFields> = {}): PerpFormFields => ({
@@ -31,44 +33,132 @@ const form = (over: Partial<PerpFormFields> = {}): PerpFormFields => ({
   ...over,
 });
 
+const lv = (price: string, qty: string): WireLevel => ({ price, qty });
+
+/** A deep one-level book: any quick quantity fills at the best price. */
+const BOOK = { bids: [lv('79990', '100')], asks: [lv('80010', '100')] };
+
 const quick = (over: Partial<PerpQuickInput> = {}): PerpQuickInput => ({
   unit: 'usd',
   pct: 100,
   free: '600',
   leverage: 20,
   taker: '0.0005',
+  side: 'buy',
+  type: 'limit',
   price: '80000',
+  ...BOOK,
+  mark: '80000',
+  last: '80000',
   step: '0.001',
   reduce: null,
   ...over,
 });
 
+/**
+ * The engine's own cost of opening `qty` (orderCost at the engine's assumedPrice), for an order
+ * filling at `fill` (a market order's walk average, a limit's price).
+ */
+function engineCost(i: PerpQuickInput, qty: string, fill: string): string {
+  const mark = D(i.mark!);
+  const imPrice =
+    i.type === 'market'
+      ? assumedPrice({ type: 'market', side: i.side, walkAvg: D(fill), mark, last: D(i.last!) })
+      : assumedPrice({ type: 'limit', side: i.side, price: D(fill), mark, last: D(i.last!) });
+  return orderCost({
+    side: i.side,
+    qty: D(qty),
+    imPrice,
+    olPrice: D(fill),
+    mark,
+    leverage: i.leverage,
+    takerRate: D(i.taker),
+  }).total.toString();
+}
+
+const atMost = (a: string, b: string) => D(a).lte(D(b));
+const plusStep = (q: string, step: string) => D(q).plus(step).toString();
+
 const position = (side: 'long' | 'short', qty = '0.5') => ({ symbol: 'BTCUSDT', side, qty }) as WirePosition;
 const order = (over: Partial<WirePerpOrder>) =>
   ({ symbol: 'BTCUSDT', side: 'buy', reduceOnly: false, status: 'open', ...over }) as WirePerpOrder;
 
-describe('perp quick amounts: free leverage USDT used as margin', () => {
-  it('100 % of free 600 at 20x with taker 0.0005 is 600 × 20 ÷ 1.01, rounded down to 8 dp', () => {
-    expect(marginShareNotional('600', 100, 20, '0.0005')).toBe('11881.18811881');
-  });
-
-  it('in USDT the notional is floored to the cent', () => {
+describe('perp quick amounts: the share of free leverage USDT the engine would lock', () => {
+  it("the brief's 600 at 20x case holds for a limit buy at or below the mark (its own price, no open loss)", () => {
+    // 600 × 20 ÷ 1.01 = 11881.188118811..., less the 3e-8 kept back for the engine's three 8 dp round-ups.
     expect(perpQuickAmount(quick())).toEqual({ amount: '11881.18', belowStep: false, belowCent: false });
-  });
-
-  it('in coins the notional is then floored to the step at the price', () => {
-    // 11881.18811881 / 80000 = 0.14851..., floored to the 0.001 step.
+    // 0.14851... floored to the 0.001 step.
     expect(perpQuickAmount(quick({ unit: 'coin' }))).toEqual({ amount: '0.148', belowStep: false, belowCent: false });
-  });
-
-  it('25 % takes a quarter of the free USDT', () => {
-    // 150 × 20 ÷ 1.01 = 2970.29702970...
-    expect(marginShareNotional('600', 25, 20, '0.0005')).toBe('2970.2970297');
     expect(perpQuickAmount(quick({ pct: 25 }))?.amount).toBe('2970.29');
   });
 
-  it('coins without a price cannot be sized; nothing free reads as below a step / a cent', () => {
-    expect(perpQuickAmount(quick({ unit: 'coin', price: null }))).toBeNull();
+  const cases: [string, Partial<PerpQuickInput>, string, string][] = [
+    // Reserved at last × 1.0015 = 80120 (above the ask), plus 20 of open loss a coin against the mark.
+    ['market buy', { type: 'market', side: 'buy', mark: '79990' }, '80010', '0.147'],
+    // Reserved at 80120 as well (above the mark and the bid), plus 10 of open loss a coin.
+    ['market sell', { type: 'market', side: 'sell' }, '79990', '0.147'],
+    // Reserved at its own price, below the mark: no buffer and no open loss.
+    ['limit buy', { type: 'limit', side: 'buy', price: '79000' }, '79000', '0.15'],
+    // A limit sell above the buffered last: reserved at its price.
+    ['limit sell', { type: 'limit', side: 'sell', price: '80500' }, '80500', '0.147'],
+  ];
+  for (const [name, over, fill, qty] of cases) {
+    it(`${name}: 100 % costs the engine at most the free USDT, one step more costs more`, () => {
+      const i = quick({ unit: 'coin', ...over });
+      const q = perpQuickAmount(i)!.amount;
+      expect(q).toBe(qty);
+      expect(atMost(engineCost(i, q, fill), i.free)).toBe(true);
+      expect(atMost(engineCost(i, plusStep(q, i.step), fill), i.free)).toBe(false);
+    });
+  }
+
+  it('every share fits, at every leverage', () => {
+    for (const leverage of [1, 5, 20, 75, 125]) {
+      for (const pct of [25, 50, 75, 100] as const) {
+        const i = quick({ unit: 'coin', type: 'market', pct, leverage, free: '1234.56789', mark: '79990' });
+        const q = perpQuickAmount(i)!.amount;
+        const share = D(i.free).mul(pct).div(100).toString();
+        expect(atMost(engineCost(i, q, '80010'), share)).toBe(true);
+        expect(atMost(engineCost(i, plusStep(q, i.step), '80010'), share)).toBe(false);
+      }
+    }
+  });
+
+  it('a market order that walks the book is priced at the deepest level it reaches, so it still fits', () => {
+    const asks = [lv('80010', '0.05'), lv('80050', '0.05'), lv('80300', '10')];
+    const i = quick({ unit: 'coin', type: 'market', asks, mark: '79990' });
+    const q = perpQuickAmount(i)!.amount;
+    // The engine's walk average for q over those levels.
+    let left = D(q);
+    let quote = D(0);
+    for (const l of asks) {
+      const take = Decimal.min(left, D(l.qty));
+      quote = quote.plus(take.mul(l.price));
+      left = left.minus(take);
+    }
+    const avg = quote.div(q).toString();
+    expect(atMost(engineCost(i, q, avg), i.free)).toBe(true);
+  });
+
+  it('in USDT the server turns the amount into the same coins as the coin amount', () => {
+    for (const over of cases.map((c) => c[1])) {
+      const coin = perpQuickAmount(quick({ unit: 'coin', ...over }))!.amount;
+      const i = quick({ unit: 'usd', ...over });
+      const usd = perpQuickAmount(i)!.amount;
+      // The server converts dollars at the mark (market) or the limit price (limit), floored to the step.
+      const at = i.type === 'market' ? i.mark! : i.price;
+      expect(floorDivToStep(usd, at, i.step)).toBe(coin);
+    }
+  });
+
+  it('without a live mark, a last price or a price there is nothing to size an opening order with', () => {
+    expect(perpQuickAmount(quick({ mark: null }))).toBeNull();
+    expect(perpQuickAmount(quick({ last: null }))).toBeNull();
+    expect(perpQuickAmount(quick({ type: 'market', asks: [] }))).toBeNull();
+    expect(perpQuickAmount(quick({ type: 'limit', price: '', asks: [] }))).toBeNull();
+  });
+
+  it('nothing free reads as below a step / a cent', () => {
     expect(perpQuickAmount(quick({ unit: 'coin', free: '0' }))).toEqual({
       amount: '0',
       belowStep: true,
@@ -87,31 +177,19 @@ describe('perp quick amounts: free leverage USDT used as margin', () => {
     expect(perpQuickAmount(quick({ unit: 'coin', pct: 100, reduce }))?.amount).toBe('0.503');
   });
 
-  it('reduce-only in USDT values the share at the price, floored to the cent; 100 % sends the coins', () => {
+  it('reduce-only in USDT values the share at the limit price, else the mark; 100 % sends the coins', () => {
     const reduce = { qty: '0.5' };
     expect(perpQuickAmount(quick({ pct: 50, reduce, price: '80000.15' }))).toEqual({
       amount: '20000.03',
       belowStep: false,
       belowCent: false,
     });
-    expect(perpQuickAmount(quick({ pct: 100, reduce }))).toEqual({
+    expect(perpQuickAmount(quick({ pct: 100, reduce, type: 'market' }))).toEqual({
       amount: '40000.00',
       belowStep: false,
       belowCent: false,
       sellAll: '0.5',
     });
-  });
-
-  it('sizes at the order price or the best price, never below a known mark', () => {
-    const book = { bestBid: '79990', bestAsk: '80010' };
-    expect(perpSizingPrice({ type: 'market', side: 'buy', price: '', ...book, mark: '80000' })).toBe('80010');
-    expect(perpSizingPrice({ type: 'market', side: 'sell', price: '', ...book, mark: '80000' })).toBe('80000');
-    expect(perpSizingPrice({ type: 'limit', side: 'buy', price: '79000,5', ...book, mark: '80000' })).toBe('80000');
-    expect(perpSizingPrice({ type: 'limit', side: 'buy', price: '81000', ...book, mark: '80000' })).toBe('81000');
-    expect(perpSizingPrice({ type: 'post_only', side: 'sell', price: '', ...book, mark: null })).toBe('79990');
-    expect(
-      perpSizingPrice({ type: 'market', side: 'buy', price: '', bestBid: undefined, bestAsk: undefined, mark: null }),
-    ).toBeNull();
   });
 });
 

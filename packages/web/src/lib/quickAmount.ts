@@ -176,78 +176,138 @@ export interface PerpQuickInput {
   leverage: number;
   /** Taker fee rate ('0.0005'). */
   taker: string;
-  /**
-   * The price coins are counted at: for an opening order see perpSizingPrice; for a reduce-only
-   * one the price the server converts dollars at (the limit price, else the mark). Null when none.
-   */
-  price: string | null;
+  side: Side;
+  type: PerpOrderRequest['type'];
+  /** The limit price field as typed (limit, post-only). */
+  price: string;
+  /** The perp book: bids best (highest) first, asks best (lowest) first. */
+  bids: WireLevel[];
+  asks: WireLevel[];
+  /** The live mark price; null while it is stale or not received. */
+  mark: string | null;
+  /** The last trade price; null before the first. */
+  last: string | null;
   /** The quantity step for this order type (see amountStep). */
   step: string;
   /** Reduce-only: the position the percentages are shares of; null for an opening order. */
   reduce: { qty: string } | null;
 }
 
-const DP8 = '0.00000001';
+/**
+ * Mirrors the engine's last-price buffer: every perp order except a limit buy reserves its margin
+ * at no less than the last price × 1.0015.
+ */
+export const PERP_LAST_PRICE_BUFFER = '1.0015';
+/** Three 8-decimal round-ups (initial margin, open loss, fee): at most this much above the exact cost. */
+const ROUND_UPS = '0.00000003';
+
+const maxDec = (...vs: string[]) => vs.reduce((a, b) => (cmpDec(a, b) >= 0 ? a : b));
 
 /**
- * The notional a share of the free leverage USDT opens when all of it goes to the order's cost:
- * initial margin plus the taker fee, share × free × leverage ÷ (1 + leverage × taker), rounded
- * down to 8 decimals.
+ * The engine's prices for an opening order's cost: imPrice, at which the initial margin and the
+ * fee are reserved, and olPrice, the fill price whose loss against the mark is charged up front.
+ * `fill` is the price the order is assumed to fill at (a market order's walk average, a limit's
+ * price). A limit buy reserves at its price; every other order at no less than the buffered last
+ * price, and a sell at no less than the mark either.
  */
-export function marginShareNotional(free: string, pct: Pct, leverage: number, taker: string): string {
-  const lev = String(leverage);
-  const budget = mulDec(mulDec(free, FRACTION[pct]), lev);
-  return floorDivToStep(budget, addDec('1', mulDec(lev, taker)), DP8);
+function costPrices(side: Side, type: PerpOrderRequest['type'], fill: string, mark: string, last: string) {
+  const buffered = mulDec(last, PERP_LAST_PRICE_BUFFER);
+  let imPrice: string;
+  if (type !== 'market' && side === 'buy') imPrice = fill;
+  else imPrice = side === 'buy' ? maxDec(fill, buffered) : maxDec(fill, mark, buffered);
+  return { imPrice, olPrice: fill };
 }
 
 /**
- * The price an opening perp order's coins are sized at: the limit price as typed (limit, post-only)
- * or else the best price on the order's side, raised to the mark when that is higher, so the
- * coins never come to more than the margin covers at either. Null when there is no price at all.
- * `mark` is the live mark only (null while it is stale).
+ * What one coin of the order costs × leverage, the cost being initial margin (imPrice ÷ L) plus
+ * open loss (the fill's loss against the mark, never negative) plus the taker fee (imPrice × taker):
+ * imPrice + L × (openLoss + imPrice × taker). Exact.
  */
-export function perpSizingPrice(p: {
-  type: PerpOrderRequest['type'];
-  side: Side;
-  price: string;
-  bestBid: string | undefined;
-  bestAsk: string | undefined;
-  mark: string | null;
-}): string | null {
-  const best = p.side === 'buy' ? p.bestAsk : p.bestBid;
-  const own = (p.type === 'market' ? null : validPrice(p.price)) ?? best ?? null;
-  const known = [own, p.mark].filter((v): v is string => v !== null && cmpDec(v, '0') > 0);
-  if (known.length === 0) return null;
-  return known.reduce((a, b) => (cmpDec(a, b) >= 0 ? a : b));
+function unitCostTimesLeverage(side: Side, im: string, ol: string, mark: string, lev: string, taker: string): string {
+  const diff = side === 'buy' ? subDec(ol, mark) : subDec(mark, ol);
+  const openLoss = cmpDec(diff, '0') > 0 ? diff : '0';
+  return addDec(im, mulDec(lev, addDec(openLoss, mulDec(im, taker))));
 }
 
 /**
- * The amount a perp quick-amount button fills in, or null when there is no price to size it with.
+ * The deepest price a quantity reaches on the book side it takes, beyond the visible levels the
+ * last one: no better than the walk's average, so a cost at it is never below the engine's.
+ * Null on an empty side.
+ */
+function worstFill(levels: WireLevel[], qty: string): string | null {
+  const last = levels.at(-1);
+  if (!last) return null;
+  let left = qty;
+  for (const level of levels) {
+    if (cmpDec(left, level.qty) <= 0) return level.price;
+    left = subDec(left, level.qty);
+  }
+  return last.price;
+}
+
+/**
+ * The amount a perp quick-amount button fills in, or null when there is nothing to price it with.
  * Minimums and the maximum position are not checked: the server's preview gives the reason.
  *
- * - Opening order: the notional marginShareNotional gives; in dollars floored to the cent, in
- *   coins divided by the price and floored to the step.
+ * - Opening order: the largest quantity whose cost as the engine reckons it (initial margin and
+ *   fee at imPrice, open loss at olPrice, each rounded up to 8 decimals) is at most the share of
+ *   the free leverage USDT, floored to the step. A market order is priced at the deepest book
+ *   level the quantity reaches (worked out twice: once from the best price, then again from the
+ *   level that quantity reaches); a limit at its price, else the best price on its side. Needs the
+ *   live mark and the last price, as the engine does. In dollars: that quantity before the step
+ *   floor, at the price the server converts dollars at (the mark for a market order, the limit
+ *   price for a limit), floored to the cent, so the coins the server makes of it never exceed it.
  * - Reduce-only: the share of the position's size floored to the step; in dollars that quantity
- *   at the price, floored to the cent. At 100 % the order sends the coins themselves (sellAll),
- *   so it reduces the whole position whatever the price does before it arrives.
+ *   at the limit price (else the mark), floored to the cent. At 100 % the order sends the coins
+ *   themselves (sellAll), so it reduces the whole position whatever the price does meanwhile.
  */
 export function perpQuickAmount(i: PerpQuickInput): QuickResult | null {
+  const share = mulDec(i.free, FRACTION[i.pct]);
   if (i.reduce) {
     const qty = floorToStep(mulDec(i.reduce.qty, FRACTION[i.pct]), i.step);
     if (i.unit === 'coin') return { amount: qty, belowStep: isZero(qty), belowCent: false };
     if (isZero(qty)) return { amount: '0', belowStep: true, belowCent: false };
-    if (i.price === null) return null;
-    const c = cents(mulDec(qty, i.price));
+    const at = (i.type === 'market' ? null : validPrice(i.price)) ?? i.mark;
+    if (at === null) return null;
+    const c = cents(mulDec(qty, at));
     return { amount: c.amount, belowStep: false, belowCent: c.zero, ...(i.pct === 100 ? { sellAll: qty } : {}) };
   }
-  const notional = marginShareNotional(i.free, i.pct, i.leverage, i.taker);
-  if (i.unit === 'usd') {
-    const c = cents(notional);
-    return { amount: c.amount, belowStep: false, belowCent: c.zero };
+
+  const { mark, last } = i;
+  if (mark === null || last === null) return null;
+  const levels = i.side === 'buy' ? i.asks : i.bids;
+  const best = levels[0]?.price;
+  // Kept below the share by the most the round-ups can add, so the rounded cost never exceeds it.
+  const budget = cmpDec(share, ROUND_UPS) > 0 ? subDec(share, ROUND_UPS) : '0';
+  const lev = String(i.leverage);
+  const budgetTimesLeverage = mulDec(budget, lev);
+  const sized = (im: string, ol: string) => {
+    const denom = unitCostTimesLeverage(i.side, im, ol, mark, lev, i.taker);
+    return { qty: floorDivToStep(budgetTimesLeverage, denom, i.step), denom };
+  };
+
+  let fit: { qty: string; denom: string };
+  if (i.type === 'market') {
+    if (best === undefined) return null;
+    const first = costPrices(i.side, 'market', best, mark, last);
+    const reach = sized(first.imPrice, first.olPrice).qty;
+    const worst = worstFill(levels, reach) ?? best;
+    // A smaller quantity fills no worse than `worst`: a buy's imPrice and open loss are highest
+    // there, a sell's open loss; a sell's imPrice is highest at the best bid.
+    const im = i.side === 'buy' ? costPrices('buy', 'market', worst, mark, last).imPrice : first.imPrice;
+    fit = sized(im, worst);
+  } else {
+    const fill = validPrice(i.price) ?? best;
+    if (fill === undefined) return null;
+    const p = costPrices(i.side, i.type, fill, mark, last);
+    fit = sized(p.imPrice, p.olPrice);
   }
-  if (i.price === null) return null;
-  const qty = floorDivToStep(notional, i.price, i.step);
-  return { amount: qty, belowStep: isZero(qty), belowCent: false };
+
+  if (i.unit === 'coin') return { amount: fit.qty, belowStep: isZero(fit.qty), belowCent: false };
+  const convert = i.type === 'market' ? mark : (validPrice(i.price) ?? best!);
+  const dollars = floorDivToStep(mulDec(budgetTimesLeverage, convert), fit.denom, CENT);
+  const c = cents(dollars);
+  return { amount: c.amount, belowStep: false, belowCent: c.zero };
 }
 
 export interface AvailableInput {

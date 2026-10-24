@@ -22,7 +22,7 @@ import {
 import type { PerpFormFields, PerpOrderType } from '../lib/perpForm.ts';
 import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
 import type { PreviewState } from '../lib/previewLoop.ts';
-import { NO_QUICK, amountStep, perpQuickAmount, perpSizingPrice, quickStep, validPrice } from '../lib/quickAmount.ts';
+import { NO_QUICK, amountStep, perpQuickAmount, quickStep } from '../lib/quickAmount.ts';
 import type { Pct, QuickEvent, QuickState } from '../lib/quickAmount.ts';
 import { LeverageDialog, MarginModeDialog } from './LeverageDialog.tsx';
 import { QuickAmounts } from './QuickAmounts.tsx';
@@ -352,25 +352,22 @@ export function PerpOrderForm() {
     const held = s.positions?.find((p) => p.symbol === symbol && p.side !== positionSideOf(side)) ?? null;
     if (reduce.on && !held) return null;
     const m = s.marks[symbol];
-    const markNow = m?.fresh && s.conn === 'open' ? m.markPrice : null;
     const book = s.book?.market === 'perp' && s.book.symbol === symbol ? s.book : null;
-    const at = reduce.on
-      ? ((hasPrice(type) ? validPrice(price) : null) ?? markNow)
-      : perpSizingPrice({
-          type,
-          side,
-          price,
-          bestBid: book?.bids[0]?.price,
-          bestAsk: book?.asks[0]?.price,
-          mark: markNow,
-        });
+    // The latest trade of the perp shown, else its ticker's last price.
+    const lastTrade = s.selected.market === 'perp' && s.selected.symbol === symbol ? s.trades[0]?.price : undefined;
     return perpQuickAmount({
       unit: amountIn,
       pct,
       free: s.account.balances.leverage.USDT?.free ?? '0',
       leverage,
       taker,
-      price: at,
+      side,
+      type,
+      price,
+      bids: book?.bids ?? [],
+      asks: book?.asks ?? [],
+      mark: m?.fresh && s.conn === 'open' ? m.markPrice : null,
+      last: lastTrade ?? s.perpTickers[symbol]?.last ?? null,
       step: amountStep(rules, type),
       reduce: reduce.on && held ? { qty: held.qty } : null,
     });
