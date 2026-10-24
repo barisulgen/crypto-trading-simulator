@@ -36,11 +36,13 @@ const COLS: Col[] = [
   { label: 'SL / TP' },
 ];
 /**
- * Minimums + gaps + padding fit the 54rem breakpoint (36.5 + 12 x 0.5 + 1.5 rem, plus the actions
- * as a 2 x 2 block of about 8.25 rem); the fr parts share the rest.
+ * Minimums + gaps + padding fit the 54rem breakpoint (37.25 + 12 x 0.5 + 1.5 rem, plus the actions
+ * as a 2 x 2 block of about 8.25 rem); the fr parts share the rest. The coin column is at least as
+ * wide as its widest word, the "Catching" of the Catching up badge, so the badge keeps the column
+ * gap to the side next to it.
  */
 const TEMPLATE =
-  'minmax(2.5rem,0.7fr) 2.25rem 2rem minmax(2.75rem,0.9fr) minmax(3.25rem,1fr) minmax(3.25rem,1fr) minmax(4.25rem,1.2fr) minmax(3.25rem,0.9fr) minmax(3rem,0.8fr) minmax(3.5rem,1fr) minmax(2.75rem,0.8fr) minmax(3.75rem,1fr) max-content';
+  'minmax(3.25rem,0.7fr) 2.25rem 2rem minmax(2.75rem,0.9fr) minmax(3.25rem,1fr) minmax(3.25rem,1fr) minmax(4.25rem,1.2fr) minmax(3.25rem,0.9fr) minmax(3rem,0.8fr) minmax(3.5rem,1fr) minmax(2.75rem,0.8fr) minmax(3.75rem,1fr) max-content';
 
 /** The text colour of a margin ratio by its level (amber is marked by a dot: amber text is not readable on white). */
 const RATIO_CLASS: Record<RiskLevel, string> = {
