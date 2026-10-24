@@ -1,7 +1,8 @@
 // Pure helpers behind the chart, the order book and the trades list. Book arithmetic stays on
 // decimal strings (scaled BigInt); only chart bars and depth-bar widths become JS numbers, and
 // those are display only.
-import type { Candle, Interval, WireFill, WireLevel } from './api.ts';
+import type { Candle, Interval, WireFill, WireFillRow, WireLevel } from './api.ts';
+import { fmtNum } from './format.ts';
 
 // ---- exact decimal strings ----
 
@@ -228,7 +229,7 @@ export function bucketTime(ms: number, interval: Interval): number {
 export interface FillMarker {
   time: number;
   position: 'belowBar' | 'aboveBar';
-  shape: 'arrowUp' | 'arrowDown';
+  shape: 'arrowUp' | 'arrowDown' | 'square';
   color: string;
   text: string;
 }
@@ -259,6 +260,120 @@ export function fillMarkers(
         text: fmtQty(f.qty),
       };
     });
+}
+
+/** A liquidation as the perp chart marks it: when, the side of the position and the quantity it held. */
+export interface LiquidationMark {
+  time: number;
+  side: 'long' | 'short';
+  qty: string;
+}
+
+/** What a perp fill did to its position; 'fill' when the fills loaded cannot tell. */
+type PerpFillKind = 'entry' | 'increase' | 'reduce' | 'close' | 'fill';
+
+const PERP_FILL_LABEL: Record<PerpFillKind, string> = {
+  entry: 'Open ',
+  increase: 'Add ',
+  reduce: 'Reduce ',
+  close: 'Close ',
+  fill: '',
+};
+
+/**
+ * What each perp fill did to its position, from the fills of one symbol, newest first (as GET
+ * /api/fills returns them). An opening fill (it realises no P&L) is the entry when it is the
+ * position's first, else an increase; a reducing fill is the close when it empties the position,
+ * else a reduction. `complete` false says the list stopped at its limit: the position holding the
+ * oldest fill may have older fills not loaded, so its fills are only 'fill', never guessed.
+ */
+function perpFillKinds(fills: WireFillRow[], complete: boolean): Map<string, PerpFillKind> {
+  const oldest = fills.at(-1);
+  const partial = !complete && oldest ? oldest.positionId : null;
+  const held = new Map<string, string>();
+  const kinds = new Map<string, PerpFillKind>();
+  for (const f of [...fills].reverse()) {
+    const pos = f.positionId ?? '';
+    if (pos === partial || f.positionId === null) {
+      kinds.set(f.id, 'fill');
+      continue;
+    }
+    const before = held.get(pos);
+    if (f.realizedPnl === null) {
+      kinds.set(f.id, before === undefined ? 'entry' : 'increase');
+      held.set(pos, addDec(before ?? '0', f.qty));
+    } else {
+      const after = subDec(before ?? '0', f.qty);
+      kinds.set(f.id, cmpDec(after, '0') <= 0 ? 'close' : 'reduce');
+      held.set(pos, after);
+    }
+  }
+  return kinds;
+}
+
+/**
+ * Chart markers for the owner's perp fills and liquidations. Fills are arrows as on the spot chart
+ * (buys up below the bar, sells down above) labelled Open, Add, Reduce or Close and the quantity;
+ * a liquidation is a red square on the side of the forced trade (a long's above, a short's below)
+ * labelled 'Liq.' and the quantity held. `fills` are one symbol's, newest first; `complete` false
+ * when that list stopped at its limit. Anything outside [range.from, range.to] is left out.
+ */
+export function perpMarkers(
+  fills: WireFillRow[],
+  liquidations: LiquidationMark[],
+  opts: { complete: boolean },
+  interval: Interval,
+  range: { from: number; to: number },
+  colors: { up: string; down: string },
+  fmtQty: (qty: string) => string,
+): FillMarker[] {
+  const kinds = perpFillKinds(fills, opts.complete);
+  const out: { at: number; time: number; marker: Omit<FillMarker, 'time'> }[] = [];
+  for (const f of fills) {
+    const buy = f.side === 'buy';
+    out.push({
+      at: bucketTime(f.time, interval),
+      time: f.time,
+      marker: {
+        position: buy ? 'belowBar' : 'aboveBar',
+        shape: buy ? 'arrowUp' : 'arrowDown',
+        color: buy ? colors.up : colors.down,
+        text: `${PERP_FILL_LABEL[kinds.get(f.id) ?? 'fill']}${fmtQty(f.qty)}`,
+      },
+    });
+  }
+  for (const l of liquidations) {
+    out.push({
+      at: bucketTime(l.time, interval),
+      time: l.time,
+      marker: {
+        position: l.side === 'long' ? 'aboveBar' : 'belowBar',
+        shape: 'square',
+        color: colors.down,
+        text: `Liq. ${fmtQty(l.qty)}`,
+      },
+    });
+  }
+  return out
+    .filter(({ at }) => at >= range.from && at <= range.to)
+    .sort((a, b) => a.at - b.at || a.time - b.time)
+    .map(({ at, marker }) => ({ time: at / 1000, ...marker }));
+}
+
+// ---- funding ----
+
+/** Time left until a moment, as HH:MM:SS ('03:12:45'); a started second counts whole, never below zero. */
+export function fmtCountdown(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  return `${pad(h)}:${pad(m)}:${pad(total % 60)}`;
+}
+
+/** A funding rate as a percent to 4 decimals, rounded half away from zero: '0.00005355' -> '0.0054%'. */
+export function fmtFundingPct(rate: string | null | undefined): string {
+  if (rate === null || rate === undefined) return '-';
+  return `${fmtNum(mulDec(rate, '100'), 4)}%`;
 }
 
 // ---- time ----

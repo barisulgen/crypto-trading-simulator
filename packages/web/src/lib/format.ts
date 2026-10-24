@@ -86,10 +86,24 @@ export interface SizeRules {
 }
 
 let rulesBySymbol: Record<string, SizeRules> = {};
+/** The perpetuals' own rules: their tick and step sizes differ from the spot pair's. */
+let perpRulesBySymbol: Record<string, SizeRules> = {};
 
 export function setRules(rules: Record<string, SizeRules>): void {
   rulesBySymbol = rules;
 }
+
+export function setPerpRules(rules: Record<string, SizeRules>): void {
+  perpRulesBySymbol = rules;
+}
+
+/** Which market's rules size a figure: spot unless it says perp. */
+interface InMarket {
+  market?: 'spot' | 'perp';
+}
+
+const rulesOf = (symbol: string, opts: InMarket): SizeRules | undefined =>
+  (opts.market === 'perp' ? perpRulesBySymbol : rulesBySymbol)[symbol];
 
 /** Decimals of a value as given, trailing zeros trimmed (fallback before the rules load). */
 function ownDecimals(value: string): number {
@@ -112,10 +126,10 @@ interface Exact {
 
 const decimals = (value: string, dp: number, opts: Exact) => (opts.exact ? Math.max(dp, allDecimals(value)) : dp);
 
-/** A price with the symbol's tick-size decimals. */
-export function fmtPrice(symbol: string, value: Value, opts: Exact = {}): string {
+/** A price with the symbol's tick-size decimals (of the perpetual with `market: 'perp'`). */
+export function fmtPrice(symbol: string, value: Value, opts: Exact & InMarket = {}): string {
   if (value === null || value === undefined) return DASH;
-  const tick = rulesBySymbol[symbol]?.tickSize;
+  const tick = rulesOf(symbol, opts)?.tickSize;
   return fmtNum(value, decimals(value, tick !== undefined ? tickDecimals(tick) : ownDecimals(value), opts));
 }
 
@@ -126,10 +140,10 @@ export function fmtAvgPrice(symbol: string, value: Value): string {
   return fmtNum(value, tick !== undefined ? tickDecimals(tick) + 2 : ownDecimals(value));
 }
 
-/** A coin quantity with the symbol's step-size decimals. */
-export function fmtQty(symbol: string, value: Value, opts: Exact = {}): string {
+/** A coin quantity with the symbol's step-size decimals (of the perpetual with `market: 'perp'`). */
+export function fmtQty(symbol: string, value: Value, opts: Exact & InMarket = {}): string {
   if (value === null || value === undefined) return DASH;
-  const step = rulesBySymbol[symbol]?.stepSize;
+  const step = rulesOf(symbol, opts)?.stepSize;
   return fmtNum(value, decimals(value, step !== undefined ? tickDecimals(step) : ownDecimals(value), opts));
 }
 

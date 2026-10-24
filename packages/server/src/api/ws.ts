@@ -44,6 +44,8 @@ export interface HubMarket extends HubFeed {
 
 /** What the hub reads from PerpMarketData. */
 export interface HubPerpMarket extends HubFeed {
+  /** The futures 24 h tickers (last trade price and change), by symbol. */
+  tickers(): Record<string, Ticker>;
   marks(): Record<string, PerpMark>;
 }
 
@@ -97,10 +99,11 @@ interface Client {
 }
 
 /**
- * The browser clients. Every client gets tickers, the revalued account, the perp marks and the
- * positions (each once a second), health (every 5 s and on change) and the runner's account /
- * orders / positions / notice messages; a client that sent `{ type: 'subscribe', market, symbol,
- * interval }` (market defaults to spot) also gets that symbol's klines, book (top 20, at most 4/s)
+ * The browser clients. Every client gets both markets' tickers, the revalued account, the perp
+ * marks (with the index price) and the positions (each once a second), health (every 5 s and on
+ * change) and the runner's account / orders / positions / notice messages; a client that sent
+ * `{ type: 'subscribe', market, symbol, interval }` (market defaults to spot) also gets that
+ * symbol's klines, book (top 20, at most 4/s)
  * and trades from that market only: a perp subscription never carries spot data, nor the reverse,
  * and a new subscribe releases the previous one. Every message is JSON with decimals as strings.
  * Backpressure: live messages are skipped while a client has more than 1 MB unsent and the
@@ -130,7 +133,7 @@ export class ClientHub {
     for (const l of this.listeners) l.feed.on(l.event, l.cb);
     this.every(TICKER_MS, () => {
       if (this.clients.size === 0) return;
-      this.broadcast({ type: 'tickers', tickers: this.d.market.tickers() });
+      this.broadcast(this.tickers());
       this.broadcast({ type: 'account', account: this.d.runner.account() });
       this.broadcast({ type: 'marks', marks: this.d.perpMarket.marks() });
       this.broadcast({ type: 'positions', positions: this.d.runner.positions() });
@@ -162,7 +165,7 @@ export class ClientHub {
     });
     socket.on('close', () => this.remove(socket));
     socket.on('error', () => this.remove(socket));
-    this.sendTo(socket, { type: 'tickers', tickers: this.d.market.tickers() }, true);
+    this.sendTo(socket, this.tickers(), true);
     this.sendTo(socket, { type: 'health', ...this.d.health() }, true);
     this.sendTo(socket, { type: 'account', account: this.d.runner.account() }, true);
     this.sendTo(socket, { type: 'orders', orders: this.d.runner.openOrders(), perpOrders: this.d.runner.openPerpOrders() }, true);
@@ -175,6 +178,11 @@ export class ClientHub {
     if (this.clients.size === 0) return;
     const text = toJson(msg);
     for (const socket of [...this.clients.keys()]) this.write(socket, text);
+  }
+
+  /** Both markets' 24 h tickers: `tickers` spot (as before), `perpTickers` the futures. */
+  private tickers(): object {
+    return { type: 'tickers', tickers: this.d.market.tickers(), perpTickers: this.d.perpMarket.tickers() };
   }
 
   private feed(market: Market): HubFeed {

@@ -3,14 +3,20 @@ import type {
   AccountValue,
   AggTrade,
   Balance,
+  Bracket,
   Decimal,
   FeeSchedule,
   Fill,
+  Market,
   OrderPreview,
+  PerpOrder,
+  PerpRules,
+  Position,
   PriceLevel,
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
+  TierSource,
   Wallet,
 } from '@sim/engine';
 
@@ -23,10 +29,19 @@ export type Wire<T> = T extends Decimal
       ? { [K in keyof T]: Wire<T[K]> }
       : T;
 
-export type { Wallet };
+export type { Market, Wallet };
 export type WireRules = Wire<SpotRules>;
+export type WirePerpRules = Wire<PerpRules>;
 export type WireOrder = Wire<SpotOrder>;
+export type WirePerpOrder = Wire<PerpOrder>;
 export type WireFill = Wire<Fill>;
+/** A row of GET /api/fills: a spot fill has a round trip, a perp fill the position it opened or reduced. */
+export type WireFillRow = WireFill & {
+  market: Market;
+  positionId: string | null;
+  /** Perp fills only: the loss neither the margin nor free leverage USDT could cover; null when none. */
+  uncovered: string | null;
+};
 export type WireAggTrade = Wire<AggTrade>;
 export type WireLevel = Wire<PriceLevel>;
 export type WirePreview = Wire<OrderPreview>;
@@ -42,6 +57,41 @@ export interface Ticker {
 
 export type HealthMap = Record<string, { fresh: boolean; reason: string | null }>;
 
+/** A market and symbol, as the server keys them: 'spot:BTCUSDT', 'perp:BTCUSDT'. */
+export type MarketKey = `${Market}:${string}`;
+
+/** Feed health of every market and symbol, with whether its data is catching up after a gap. */
+export type MarketHealth = Record<string, { fresh: boolean; reason: string | null; catchingUp: boolean }>;
+
+/** A perpetual's mark price, index price and funding, as last received; `fresh` false once the mark is stale. */
+export interface PerpMark {
+  markPrice: string;
+  indexPrice: string;
+  fundingRate: string;
+  /** When the next funding is settled, ms. */
+  nextFundingTime: number;
+  fresh: boolean;
+}
+
+/**
+ * An open isolated position at the last mark received: figures from a stale mark are flagged
+ * (markFresh false) and with no mark at all they are null.
+ */
+export type WirePosition = Wire<Position> & {
+  marginMode: 'isolated';
+  /** The symbol's perp data is catching up after a gap: the figures may still change. */
+  catchingUp: boolean;
+  markPrice: string | null;
+  markFresh: boolean;
+  markAt: number | null;
+  unrealizedPnl: string | null;
+  marginBalance: string | null;
+  maintenanceMargin: string | null;
+  marginRatio: string | null;
+  /** Null when the position can no longer be liquidated by a price move. */
+  liquidationPrice: string | null;
+};
+
 /** Account value plus the raw wallet balances and each held coin's cost basis. */
 export type AccountSnapshot = Wire<AccountValue> & {
   balances: Record<Wallet, Record<string, Wire<Balance>>>;
@@ -50,7 +100,19 @@ export type AccountSnapshot = Wire<AccountValue> & {
 };
 
 export interface NoticeMessage {
-  kind: 'fill' | 'partial_fill' | 'rejected' | 'cancel_rejected' | 'triggered' | 'thin_book' | 'feed_gap' | 'feed_restored';
+  kind:
+    | 'fill'
+    | 'partial_fill'
+    | 'rejected'
+    | 'cancel_rejected'
+    | 'triggered'
+    | 'thin_book'
+    | 'feed_gap'
+    | 'feed_restored'
+    | 'funding'
+    | 'liquidation'
+    | 'margin_warning'
+    | 'catch_up';
   level: 'info' | 'warn' | 'error';
   text: string;
 }
@@ -70,21 +132,36 @@ export interface Meta {
   symbols: string[];
   /** Symbols whose exchange rules are not loaded yet are missing. */
   rules: Record<string, WireRules>;
+  /** Per symbol: perp rules and tiers (null until loaded), the leverage setting and margin mode. */
+  perp?: Record<string, PerpMeta>;
+  /** Where the leverage tiers came from and when they were fetched; null before the first load. */
+  tiers?: { source: TierSource; fetchedAt: number } | null;
   fees: { spot: Wire<FeeSchedule>; perp: Wire<FeeSchedule> };
   testData: boolean;
   season: { id: number; name: string; startedAt: number };
 }
 
+export interface PerpMeta {
+  rules: WirePerpRules | null;
+  maxLeverage: number | null;
+  brackets: Wire<Bracket>[] | null;
+  leverage: number;
+  marginMode: 'isolated';
+}
+
 /** Messages the server sends on /ws. */
 export type ServerMessage =
-  | { type: 'tickers'; tickers: Record<string, Ticker> }
-  | { type: 'health'; health: HealthMap }
+  | { type: 'tickers'; tickers: Record<string, Ticker>; perpTickers?: Record<string, Ticker> }
+  | { type: 'health'; health: HealthMap; markets?: MarketHealth; catchingUp?: string[] }
   | { type: 'account'; account: AccountSnapshot }
-  | { type: 'orders'; orders: WireOrder[] }
+  | { type: 'orders'; orders: WireOrder[]; perpOrders?: WirePerpOrder[] }
+  | { type: 'marks'; marks: Record<string, PerpMark> }
+  | { type: 'positions'; positions: WirePosition[] }
   | ({ type: 'notice' } & NoticeMessage)
-  | { type: 'book'; symbol: string; bids: WireLevel[]; asks: WireLevel[] }
-  | { type: 'trades'; symbol: string; trades: WireAggTrade[] }
-  | { type: 'kline'; symbol: string; interval: Interval; candle: Candle }
+  // Book, trades and klines carry their market (absent means spot).
+  | { type: 'book'; market?: Market; symbol: string; bids: WireLevel[]; asks: WireLevel[] }
+  | { type: 'trades'; market?: Market; symbol: string; trades: WireAggTrade[] }
+  | { type: 'kline'; market?: Market; symbol: string; interval: Interval; candle: Candle }
   | { type: 'error'; error: string };
 
 /** One event of GET /api/history; `payload` is the stored event (decimals as strings). */
@@ -105,7 +182,7 @@ export interface HistoryPage {
 
 export interface HistoryQuery {
   symbol?: string;
-  market?: 'spot' | 'leverage';
+  market?: 'spot' | 'leverage' | 'perp';
   types?: string[];
   from?: number;
   to?: number;
@@ -170,12 +247,15 @@ export const api = {
   account: () => request<AccountSnapshot>('GET', '/api/account'),
   orders: (status: 'open' | 'recent' = 'open') =>
     request<{ orders: WireOrder[] }>('GET', `/api/orders${qs({ status })}`).then((r) => r.orders),
-  fills: (p: { symbol?: string; limit?: number } = {}) =>
-    request<{ fills: WireFill[] }>('GET', `/api/fills${qs(p)}`).then((r) => r.fills),
+  /** One market's fills (spot unless `market` says perp), newest first. */
+  fills: (p: { symbol?: string; limit?: number; market?: Market } = {}) =>
+    request<{ fills: WireFillRow[] }>('GET', `/api/fills${qs(p)}`).then((r) => r.fills),
   history: (p: HistoryQuery = {}) =>
     request<HistoryPage>('GET', `/api/history${qs({ ...p, types: p.types?.join(',') })}`),
-  candles: (symbol: string, interval: Interval, endTime?: number) =>
-    request<{ candles: Candle[] }>('GET', `/api/candles${qs({ symbol, interval, endTime })}`).then((r) => r.candles),
+  candles: (symbol: string, interval: Interval, endTime?: number, market: Market = 'spot') =>
+    request<{ candles: Candle[] }>('GET', `/api/candles${qs({ symbol, interval, endTime, market })}`).then(
+      (r) => r.candles,
+    ),
   /** `amount` is sent exactly as typed; the server parses it ('1,5' is accepted). */
   deposit: (wallet: Wallet, amount: string) =>
     request<{ account: AccountSnapshot }>('POST', '/api/deposit', { wallet, amount }).then((r) => r.account),

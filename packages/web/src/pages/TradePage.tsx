@@ -4,11 +4,13 @@ import { CoinList } from '../components/CoinList.tsx';
 import { OrderBook } from '../components/OrderBook.tsx';
 import { OrderForm } from '../components/OrderForm.tsx';
 import { Panel } from '../components/Panel.tsx';
+import { PerpHeader } from '../components/PerpHeader.tsx';
 import { IntervalPicker, PriceChart } from '../components/PriceChart.tsx';
 import { RecentTrades } from '../components/RecentTrades.tsx';
 import type { Slot } from '../components/Panel.tsx';
 import { fmtPrice } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
+import { replaceRoute, selectionFromParams, selectionParams, useRoute } from '../lib/route.ts';
 
 /** Phone tabs, in order. On desktop every slot is visible in the grid (see .trade-grid). */
 const TABS: { slot: Slot; label: string }[] = [
@@ -20,16 +22,60 @@ const TABS: { slot: Slot; label: string }[] = [
   { slot: 'tabs', label: 'Orders' },
 ];
 
-/** The selected coin and its last price, as the chart panel's title. */
+/** The selected coin (and 'Perp' for its perpetual) with its last price, as the chart panel's title. */
 function SelectedTitle() {
-  const symbol = useLive((s) => s.selected.symbol);
-  const last = useLive((s) => s.tickers[symbol]?.last);
+  const { symbol, market } = useLive((s) => s.selected);
+  const last = useLive((s) => (market === 'perp' ? s.perpTickers : s.tickers)[symbol]?.last);
   return (
-    <span className="flex items-baseline gap-2">
-      <span className="text-sm text-fg">{symbol.replace(/USDT$/, '')}/USDT</span>
-      <span className="text-fg">{fmtPrice(symbol, last)}</span>
+    <span className="flex items-baseline gap-2 whitespace-nowrap">
+      <span className="text-sm text-fg">
+        {symbol.replace(/USDT$/, '')}
+        {/* The narrowest phones drop the quote for the perp tag, so the timeframes still fit. */}
+        <span className={market === 'perp' ? 'hidden min-[24rem]:inline' : ''}>/USDT</span>
+      </span>
+      {market === 'perp' && <span className="text-2xs font-normal text-faint">Perp</span>}
+      <span className="text-fg">{fmtPrice(symbol, last, { market })}</span>
     </span>
   );
+}
+
+/** Until perpetual orders can be placed here, the order slot says so instead of offering a spot form. */
+function PerpOrdersUnavailable() {
+  const symbol = useLive((s) => s.selected.symbol);
+  const select = useLive((s) => s.select);
+  return (
+    <div className="m-auto flex max-w-[16rem] flex-col items-center gap-3 p-6 text-center text-xs text-muted">
+      <p>Perpetual orders cannot be placed from this screen yet.</p>
+      <button type="button" onClick={() => select(symbol, 'spot')} className="text-fg underline underline-offset-2">
+        Trade {symbol.replace(/USDT$/, '')} on Spot
+      </button>
+    </div>
+  );
+}
+
+const FALLBACK_SYMBOLS = ['BTC', 'ETH', 'SOL', 'NEAR', 'XRP', 'BNB', 'DOGE', 'SUI', 'HYPE', 'AVAX'].map(
+  (c) => `${c}USDT`,
+);
+
+/**
+ * Keeps the shown market and coin in the address ('#/?m=perp&s=BTCUSDT'): a hash naming them
+ * (a link, a reload, an edit) selects them, and every switch is written back without adding a
+ * history entry.
+ */
+function useSelectionInHash(): void {
+  const route = useRoute();
+  const symbols = useLive((s) => s.meta?.symbols) ?? FALLBACK_SYMBOLS;
+  const { symbol, market } = useLive((s) => s.selected);
+  const hash = route.params.toString();
+  useEffect(() => {
+    const { selected, select } = useLive.getState();
+    const want = selectionFromParams(new URLSearchParams(hash), symbols, selected);
+    if (want.symbol !== selected.symbol || want.market !== selected.market) select(want.symbol, want.market);
+  }, [hash, symbols]);
+  useEffect(() => {
+    // Read the store, not this render's values: the effect above may have just changed them.
+    replaceRoute('/', selectionParams(useLive.getState().selected));
+  }, [symbol, market, hash]);
 }
 
 /**
@@ -39,8 +85,9 @@ function SelectedTitle() {
  */
 export function TradePage() {
   const [tab, setTab] = useState<Slot>('chart');
-  const symbol = useLive((s) => s.selected.symbol);
+  const { symbol, market } = useLive((s) => s.selected);
   const interval = useLive((s) => s.interval);
+  useSelectionInHash();
   const on = (slot: Slot) => tab === slot;
 
   // Phones: a click on an order-book price opens the order form with that price filled in.
@@ -60,7 +107,8 @@ export function TradePage() {
         </Panel>
 
         <Panel slot="chart" active={on('chart')} title={<SelectedTitle />} actions={<IntervalPicker />}>
-          <PriceChart symbol={symbol} interval={interval} />
+          {market === 'perp' && <PerpHeader symbol={symbol} />}
+          <PriceChart market={market} symbol={symbol} interval={interval} />
         </Panel>
 
         <Panel slot="book" active={on('book')} title="Order book">
@@ -72,7 +120,7 @@ export function TradePage() {
         </Panel>
 
         <Panel slot="form" active={on('form')} title="Place order">
-          <OrderForm />
+          {market === 'perp' ? <PerpOrdersUnavailable /> : <OrderForm />}
         </Panel>
 
         <Panel slot="tabs" active={on('tabs')}>

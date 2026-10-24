@@ -123,13 +123,31 @@ describe('ClientHub heartbeat', () => {
 const trade = (id: number, price: string) => ({ id, price: D(price), qty: D('0.1'), sellerInitiated: false, time: 0 });
 
 describe('ClientHub marks and positions', () => {
+  it("sends the futures tickers with the spot ones, each market's own", () => {
+    const t = setup();
+    t.perpMarket.tickerMap = { BTCUSDT: { last: D('80001.1'), open24h: D('79000'), change24hPct: D('1.26') } };
+    const s = t.connect();
+    t.clock.advance(1000);
+    const tickers = s.sent.filter((m) => m.type === 'tickers');
+    expect(tickers).toHaveLength(2);
+    for (const m of tickers) {
+      expect(m.tickers).toEqual({});
+      expect(m.perpTickers).toEqual({ BTCUSDT: { last: '80001.1', open24h: '79000', change24hPct: '1.26' } });
+    }
+  });
+
   it('pushes marks and positions once a second, never more often', () => {
     const t = setup();
-    t.perpMarket.mark('BTCUSDT', '80000', 1_000_000 + 3_600_000, '0.0001');
+    t.perpMarket.mark('BTCUSDT', '80000', 1_000_000 + 3_600_000, '0.0001', '80012.5');
     const s = t.connect();
     const marks = () => s.sent.filter((m) => m.type === 'marks');
     expect(marks()).toEqual([
-      { type: 'marks', marks: { BTCUSDT: { markPrice: '80000', fundingRate: '0.0001', nextFundingTime: 1_000_000 + 3_600_000, fresh: true } } },
+      {
+        type: 'marks',
+        marks: {
+          BTCUSDT: { markPrice: '80000', indexPrice: '80012.5', fundingRate: '0.0001', nextFundingTime: 1_000_000 + 3_600_000, fresh: true },
+        },
+      },
     ]);
     for (let i = 0; i < 30; i++) {
       t.perpMarket.mark('BTCUSDT', String(80000 + i));

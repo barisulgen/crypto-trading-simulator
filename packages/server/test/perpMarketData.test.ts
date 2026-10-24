@@ -281,6 +281,7 @@ describe('PerpMarketData data', () => {
     expect(Object.keys(marks).sort()).toEqual(['BTCUSDT', 'ETHUSDT']);
     expect(marks.BTCUSDT!.markPrice.toString()).toBe('81328.08443478');
     expect(marks.BTCUSDT!.fundingRate.toString()).toBe('0.00005355');
+    expect(marks.BTCUSDT!.indexPrice.toString()).toBe('81367.24130435');
     expect(marks.BTCUSDT!.nextFundingTime).toBe(1792713600000);
     expect(marks.BTCUSDT!.fresh).toBe(true);
     expect(t.md.lastPrice('BTCUSDT')!.toString()).toBe('100.5');

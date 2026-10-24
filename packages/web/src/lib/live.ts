@@ -6,15 +6,21 @@ import type {
   Candle,
   HealthMap,
   Interval,
+  Market,
+  MarketHealth,
   Meta,
   NoticeMessage,
+  PerpMark,
   ServerMessage,
   Ticker,
   WireAggTrade,
   WireLevel,
   WireOrder,
+  WirePerpOrder,
+  WirePerpRules,
+  WirePosition,
 } from './api.ts';
-import { setRules } from './format.ts';
+import { setPerpRules, setRules } from './format.ts';
 
 const TRADES_KEPT = 100;
 /** An identical notice text arriving within this window bumps the earlier toast's count instead. */
@@ -41,30 +47,46 @@ export interface Notice {
   count: number;
 }
 
+/** The coin and market (spot or its USD-margined perpetual) the trade screen shows. */
 export interface Selection {
   symbol: string;
-  market: 'spot';
+  market: Market;
 }
 
 /** The state the reducer touches (everything the server sends). */
 export interface LiveData {
+  /** Spot 24 h tickers. */
   tickers: Record<string, Ticker>;
-  /** Top of the book of the selected symbol. */
-  book: { symbol: string; bids: WireLevel[]; asks: WireLevel[] } | null;
-  /** Recent trades of the selected symbol, newest first. */
+  /** Futures 24 h tickers (the perpetual's own last price and change). */
+  perpTickers: Record<string, Ticker>;
+  /** Top of the book of the selected market and symbol. */
+  book: { market: Market; symbol: string; bids: WireLevel[]; asks: WireLevel[] } | null;
+  /** Recent trades of the selected market and symbol, newest first. */
   trades: WireAggTrade[];
-  /** Latest kline of the selected symbol and interval. */
-  kline: { symbol: string; interval: Interval; candle: Candle } | null;
+  /** Latest kline of the selected market, symbol and interval. */
+  kline: { market: Market; symbol: string; interval: Interval; candle: Candle } | null;
+  /** Spot feed health by symbol. */
   health: HealthMap;
+  /** Feed health of every market and symbol, keyed 'spot:BTCUSDT' / 'perp:BTCUSDT'. */
+  markets: MarketHealth;
+  /** The market keys whose data is catching up after a gap. */
+  catchingUp: string[];
+  /** Perp mark price, index price and funding by symbol. */
+  marks: Record<string, PerpMark>;
+  /** Open perp positions; null until the server has sent them. */
+  positions: WirePosition[] | null;
   account: AccountSnapshot | null;
-  /** Open orders, newest first. */
+  /** Open spot orders, newest first. */
   orders: WireOrder[];
+  /** Open perp orders, newest first. */
+  perpOrders: WirePerpOrder[];
   notices: Notice[];
   noticeSeq: number;
   /**
    * Bumped whenever fills may have changed, so views showing fills know to reload them: every
-   * fill or partial-fill notice, a change in the open orders (ids, status, filled quantity) and a
-   * change in wallet balances. Not bumped by the 1 s account push when only prices moved.
+   * fill, partial-fill, liquidation or catch-up notice, a change in the open orders of either
+   * market (ids, status, filled quantity) and a change in wallet balances. Not bumped by the 1 s
+   * account push when only prices moved.
    */
   fillSeq: number;
   selected: Selection;
@@ -85,7 +107,8 @@ export interface LiveState extends LiveData {
   reconnects: number;
   /** The last order-book price the owner clicked (the order form prefills its limit price); `seq` changes on every click. */
   priceClick: { price: string; seq: number } | null;
-  select(symbol: string): void;
+  /** Show `symbol` in `market` (default: the market shown now). */
+  select(symbol: string, market?: Market): void;
   setInterval(interval: Interval): void;
   setAccount(account: AccountSnapshot): void;
   pushNotice(level: Notice['level'], text: string): void;
@@ -96,12 +119,18 @@ export interface LiveState extends LiveData {
 export function initialLiveData(): LiveData {
   return {
     tickers: {},
+    perpTickers: {},
     book: null,
     trades: [],
     kline: null,
     health: {},
+    markets: {},
+    catchingUp: [],
+    marks: {},
+    positions: null,
     account: null,
     orders: [],
+    perpOrders: [],
     notices: [],
     noticeSeq: 0,
     fillSeq: 0,
@@ -136,7 +165,7 @@ function mergeTrades(current: WireAggTrade[], incoming: WireAggTrade[]): WireAgg
 }
 
 /** Open orders as far as fills are concerned: which ones, their status and filled quantity. */
-function ordersKey(orders: WireOrder[]): string {
+function ordersKey(orders: (WireOrder | WirePerpOrder)[]): string {
   return orders
     .map((o) => `${o.id}:${o.status}:${o.filledQty}`)
     .sort()
@@ -148,37 +177,72 @@ function balancesKey(a: AccountSnapshot): string {
   return JSON.stringify(a.balances);
 }
 
+/** Notices after which the owner's fills (or the chart's fill and liquidation markers) may have changed. */
+const FILL_NOTICES: ReadonlySet<NoticeMessage['kind']> = new Set(['fill', 'partial_fill', 'liquidation', 'catch_up']);
+
+/**
+ * What showing `next` changes: nothing when it is shown already; otherwise the book, trades and
+ * kline of the previous market and coin are dropped, so none of them is ever shown as the new one's.
+ */
+export function selectionChange(s: Pick<LiveData, 'selected'>, next: Selection): Partial<LiveData> {
+  if (s.selected.symbol === next.symbol && s.selected.market === next.market) return {};
+  return { selected: { symbol: next.symbol, market: next.market }, book: null, trades: [], kline: null };
+}
+
+/**
+ * The feed health of one market's symbol: spot from the per-symbol health, perp from the
+ * per-market one; undefined until the server has said.
+ */
+export function feedOf(
+  s: Pick<LiveData, 'health' | 'markets'>,
+  market: Market,
+  symbol: string,
+): { fresh: boolean; reason: string | null } | undefined {
+  return market === 'spot' ? s.health[symbol] : s.markets[`perp:${symbol}`];
+}
+
+/** Whether a book, trades or kline message is for the market and coin shown (no market means spot). */
+function isSelected(s: LiveData, msg: { market?: Market; symbol: string }): boolean {
+  return msg.symbol === s.selected.symbol && (msg.market ?? 'spot') === s.selected.market;
+}
+
 /** What one server message changes. Pure: `now` is the arrival time. */
 export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<LiveData> {
   switch (msg.type) {
     case 'tickers':
-      return { tickers: msg.tickers };
+      return { tickers: msg.tickers, perpTickers: msg.perpTickers ?? {} };
     case 'health':
-      return { health: msg.health };
+      return { health: msg.health, markets: msg.markets ?? {}, catchingUp: msg.catchingUp ?? [] };
+    case 'marks':
+      return { marks: msg.marks };
+    case 'positions':
+      return { positions: msg.positions };
     case 'account': {
       const moved = s.account !== null && balancesKey(s.account) !== balancesKey(msg.account);
       return moved ? { account: msg.account, fillSeq: s.fillSeq + 1 } : { account: msg.account };
     }
     case 'orders': {
-      const moved = ordersKey(s.orders) !== ordersKey(msg.orders);
-      return moved ? { orders: msg.orders, fillSeq: s.fillSeq + 1 } : { orders: msg.orders };
+      const perpOrders = msg.perpOrders ?? [];
+      const moved =
+        ordersKey(s.orders) !== ordersKey(msg.orders) || ordersKey(s.perpOrders) !== ordersKey(perpOrders);
+      const next = { orders: msg.orders, perpOrders };
+      return moved ? { ...next, fillSeq: s.fillSeq + 1 } : next;
     }
     case 'notice': {
       const notices = addNotice(s, { kind: msg.kind, level: msg.level, text: msg.text }, now);
-      const filled = msg.kind === 'fill' || msg.kind === 'partial_fill';
-      return filled ? { ...notices, fillSeq: s.fillSeq + 1 } : notices;
+      return FILL_NOTICES.has(msg.kind) ? { ...notices, fillSeq: s.fillSeq + 1 } : notices;
     }
     case 'error':
       return addNotice(s, { kind: 'local', level: 'error', text: msg.error }, now);
     case 'book':
-      if (msg.symbol !== s.selected.symbol) return {};
-      return { book: { symbol: msg.symbol, bids: msg.bids, asks: msg.asks } };
+      if (!isSelected(s, msg)) return {};
+      return { book: { market: s.selected.market, symbol: msg.symbol, bids: msg.bids, asks: msg.asks } };
     case 'trades':
-      if (msg.symbol !== s.selected.symbol) return {};
+      if (!isSelected(s, msg)) return {};
       return { trades: mergeTrades(s.trades, msg.trades) };
     case 'kline':
-      if (msg.symbol !== s.selected.symbol || msg.interval !== s.interval) return {};
-      return { kline: { symbol: msg.symbol, interval: msg.interval, candle: msg.candle } };
+      if (!isSelected(s, msg) || msg.interval !== s.interval) return {};
+      return { kline: { market: s.selected.market, symbol: msg.symbol, interval: msg.interval, candle: msg.candle } };
     default:
       return {};
   }
@@ -192,10 +256,8 @@ export const useLive = create<LiveState>()((set) => ({
   loginNotice: '',
   reconnects: 0,
   priceClick: null,
-  select(symbol) {
-    set((s) =>
-      s.selected.symbol === symbol ? {} : { selected: { symbol, market: 'spot' }, book: null, trades: [], kline: null },
-    );
+  select(symbol, market) {
+    set((s) => selectionChange(s, { symbol, market: market ?? s.selected.market }));
     subscribe();
   },
   setInterval(interval) {
@@ -234,15 +296,23 @@ let metaAskedAt = 0;
 function subscribe(): void {
   if (socket?.readyState !== WebSocket.OPEN) return;
   const { selected, interval } = useLive.getState();
-  socket.send(JSON.stringify({ type: 'subscribe', symbol: selected.symbol, interval }));
+  socket.send(JSON.stringify({ type: 'subscribe', market: selected.market, symbol: selected.symbol, interval }));
 }
 
-/** Load /api/meta (coins, rules, fees, season) into the store and the formatters. */
+/** The perp rules loaded so far, by symbol. */
+function perpRulesOf(meta: Meta): Record<string, WirePerpRules> {
+  const out: Record<string, WirePerpRules> = {};
+  for (const [symbol, p] of Object.entries(meta.perp ?? {})) if (p.rules) out[symbol] = p.rules;
+  return out;
+}
+
+/** Load /api/meta (coins, rules of both markets, fees, season) into the store and the formatters. */
 export async function loadMeta(): Promise<void> {
   metaAskedAt = Date.now();
   try {
     const meta = await api.meta();
     setRules(meta.rules);
+    setPerpRules(perpRulesOf(meta));
     useLive.setState({ meta });
   } catch (e) {
     if (!(e instanceof ApiError) || e.status !== 401) {
@@ -251,10 +321,11 @@ export async function loadMeta(): Promise<void> {
   }
 }
 
-/** Whether the loaded meta lacks rules for a configured symbol (or is not loaded at all). */
+/** Whether the loaded meta lacks spot or perp rules for a configured symbol (or is not loaded at all). */
 function rulesMissing(): boolean {
   const meta = useLive.getState().meta;
-  return !meta || Object.keys(meta.rules).length < meta.symbols.length;
+  if (!meta) return true;
+  return Object.keys(meta.rules).length < meta.symbols.length || Object.values(meta.perp ?? {}).some((p) => !p.rules);
 }
 
 function clearSilence(): void {

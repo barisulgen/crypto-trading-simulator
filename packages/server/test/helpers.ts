@@ -9,6 +9,8 @@ import type { Db } from '../src/db/db.ts';
 import { loadLedger, loadPerpState, loadSpotState, toJson } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import type { MarkUpdate } from '../src/market/perpFeed.ts';
+import type { PerpMark } from '../src/market/perpMarketData.ts';
+import type { Ticker } from '../src/market/spotFeed.ts';
 import { FeedHealth } from '../src/market/feedHealth.ts';
 import { LocalBook } from '../src/market/localBook.ts';
 import { MarketData } from '../src/market/marketData.ts';
@@ -216,21 +218,32 @@ export class TestPerpMarket extends FakePerpMarket {
     this.emitter.emit('trade', symbol, t);
   }
   /** Deliver a mark price update (recorded as the market's mark first, as PerpMarketData does). */
-  mark(symbol: string, price: string, nextFundingTime = 0, fundingRate = '0.0001'): void {
+  mark(symbol: string, price: string, nextFundingTime = 0, fundingRate = '0.0001', indexPrice = price): void {
     this.setMarkPrice(symbol, D(price));
     this.markTimes.set(symbol, this.now());
-    const m: MarkUpdate = { markPrice: D(price), indexPrice: D(price), fundingRate: D(fundingRate), nextFundingTime, eventTime: 0 };
+    const m: MarkUpdate = { markPrice: D(price), indexPrice: D(indexPrice), fundingRate: D(fundingRate), nextFundingTime, eventTime: 0 };
     this.markUpdates.set(symbol, m);
     this.emitter.emit('mark', symbol, m);
   }
   private readonly markUpdates = new Map<string, MarkUpdate>();
   /** The last mark update of every symbol that has had one (mark()), as PerpMarketData.marks() reports it. */
-  marks(): Record<string, { markPrice: Decimal; fundingRate: Decimal; nextFundingTime: number; fresh: boolean }> {
-    const out: Record<string, { markPrice: Decimal; fundingRate: Decimal; nextFundingTime: number; fresh: boolean }> = {};
+  marks(): Record<string, PerpMark> {
+    const out: Record<string, PerpMark> = {};
     for (const [s, m] of this.markUpdates) {
-      out[s] = { markPrice: m.markPrice, fundingRate: m.fundingRate, nextFundingTime: m.nextFundingTime, fresh: this.isMarkFresh(s) };
+      out[s] = {
+        markPrice: m.markPrice,
+        indexPrice: m.indexPrice,
+        fundingRate: m.fundingRate,
+        nextFundingTime: m.nextFundingTime,
+        fresh: this.isMarkFresh(s),
+      };
     }
     return out;
+  }
+  /** What tickers() reports (the futures 24 h tickers); empty unless a test sets it. */
+  tickerMap: Record<string, Ticker> = {};
+  tickers(): Record<string, Ticker> {
+    return this.tickerMap;
   }
   /** A depth update changed the symbol's book (the 'book' event PerpMarketData emits). */
   bookUpdate(symbol: string): void {

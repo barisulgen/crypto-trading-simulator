@@ -1,6 +1,6 @@
-// The market's latest trades for the selected coin, newest first.
+// The selected market's latest trades for the selected coin, newest first.
 import { fmtPrice, fmtQty } from '../lib/format.ts';
-import { useLive } from '../lib/live.ts';
+import { feedOf, useLive } from '../lib/live.ts';
 import { fmtClock } from '../lib/market.ts';
 import { Interrupted } from './ui.tsx';
 
@@ -22,9 +22,9 @@ function Aggressor({ buy }: { buy: boolean }) {
 
 /** Price coloured by the aggressor (buyer up, seller down) with a glyph, size, local time. */
 export function RecentTrades() {
-  const symbol = useLive((s) => s.selected.symbol);
+  const { symbol, market } = useLive((s) => s.selected);
   const trades = useLive((s) => s.trades);
-  const health = useLive((s) => s.health[symbol]);
+  const health = useLive((s) => feedOf(s, market, symbol));
   const base = useLive((s) => s.meta?.rules[symbol]?.base) ?? symbol.replace(/USDT$/, '');
 
   return (
@@ -46,9 +46,9 @@ export function RecentTrades() {
               <li key={t.id} className={`${COLS} text-xs leading-[1.125rem]`}>
                 <span className={`flex items-center gap-1 ${buy ? 'text-up' : 'text-down'}`}>
                   <Aggressor buy={buy} />
-                  {fmtPrice(symbol, t.price)}
+                  {fmtPrice(symbol, t.price, { market })}
                 </span>
-                <span className="text-right">{fmtQty(symbol, t.qty)}</span>
+                <span className="text-right">{fmtQty(symbol, t.qty, { market })}</span>
                 <span className="w-[4.5em] text-right text-muted">{fmtClock(t.time)}</span>
               </li>
             );

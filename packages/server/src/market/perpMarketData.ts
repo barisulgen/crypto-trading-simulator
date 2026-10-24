@@ -32,6 +32,8 @@ export interface PerpMarketDataDeps {
 
 export interface PerpMark {
   markPrice: Decimal;
+  /** The index price that came with the mark price (Binance's spot-exchange average). */
+  indexPrice: Decimal;
   fundingRate: Decimal;
   nextFundingTime: number;
   fresh: boolean;
@@ -269,7 +271,13 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
   marks(): Record<string, PerpMark> {
     const out: Record<string, PerpMark> = {};
     for (const [s, m] of this.mark) {
-      out[s] = { markPrice: m.markPrice, fundingRate: m.fundingRate, nextFundingTime: m.nextFundingTime, fresh: this.isMarkFresh(s) };
+      out[s] = {
+        markPrice: m.markPrice,
+        indexPrice: m.indexPrice,
+        fundingRate: m.fundingRate,
+        nextFundingTime: m.nextFundingTime,
+        fresh: this.isMarkFresh(s),
+      };
     }
     return out;
   }

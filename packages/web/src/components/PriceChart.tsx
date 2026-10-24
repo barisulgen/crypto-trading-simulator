@@ -1,4 +1,5 @@
-// Candle chart of the selected coin (lightweight-charts v5) with the owner's fills as markers.
+// Candle chart of the selected coin and market (lightweight-charts v5) with the owner's fills as
+// markers and, on a perpetual with an open position, its entry and liquidation prices.
 import { useEffect, useRef, useState } from 'react';
 import {
   CandlestickSeries,
@@ -10,9 +11,11 @@ import {
   createSeriesMarkers,
 } from 'lightweight-charts';
 import type {
+  AutoscaleInfo,
   CandlestickData,
   DeepPartial,
   IChartApi,
+  IPriceLine,
   ISeriesApi,
   ISeriesMarkersPluginApi,
   ChartOptions,
@@ -21,15 +24,23 @@ import type {
   UTCTimestamp,
 } from 'lightweight-charts';
 import { api, INTERVALS } from '../lib/api.ts';
-import type { Candle, Interval, WireFill } from '../lib/api.ts';
+import type { Candle, HistoryRow, Interval, Market, WireFillRow } from '../lib/api.ts';
 import { fmtQty, tickDecimals } from '../lib/format.ts';
-import { useLive } from '../lib/live.ts';
-import { applyKline, fillMarkers, fmtChartTime, fmtTick, mergeCandles, toBar } from '../lib/market.ts';
+import { feedOf, useLive } from '../lib/live.ts';
+import type { LiveState } from '../lib/live.ts';
+import { applyKline, fillMarkers, fmtChartTime, fmtTick, mergeCandles, perpMarkers, toBar } from '../lib/market.ts';
+import type { LiquidationMark } from '../lib/market.ts';
 import { Button, Segmented } from './ui.tsx';
 
 /** Load older candles when the left edge of the view comes within this many bars of the oldest one. */
 const LOAD_OLDER_WITHIN = 30;
 const FILLS_LIMIT = 500;
+/** Bars of room right of the forming candle, so its fill markers clear the price axis. */
+const RIGHT_OFFSET = 6;
+/** The same with a position's entry and liquidation labels at the right edge. */
+const LABELLED_RIGHT_OFFSET = 16;
+/** Liquidations loaded for the perp chart's markers (the history API's page limit). */
+const LIQUIDATIONS_LIMIT = 200;
 
 /** The 1m-1d timeframe switch (chart panel header). */
 export function IntervalPicker() {
@@ -116,41 +127,114 @@ interface Live {
   palette: Palette;
 }
 
+/** The owner's fills (and, for a perpetual, liquidations) of one market and symbol, for the markers. */
+interface MarkerData {
+  market: Market;
+  symbol: string;
+  /** Newest first, as GET /api/fills returns them. */
+  fills: WireFillRow[];
+  liquidations: LiquidationMark[];
+  /** False when the fill list stopped at its limit (older fills exist). */
+  complete: boolean;
+}
+
+/** A liquidation history row as a chart marker; null if the row is not one. */
+function liquidationMark(row: HistoryRow): LiquidationMark | null {
+  const position = (row.payload as { position?: { side?: unknown; qty?: unknown } } | null)?.position;
+  if (!position || (position.side !== 'long' && position.side !== 'short') || typeof position.qty !== 'string') return null;
+  return { time: row.time, side: position.side, qty: position.qty };
+}
+
 /**
- * Candles of `symbol` at `interval`: history from GET /api/candles, the forming candle from the
- * live `kline` messages, older history loaded as the owner scrolls left, and a marker per fill.
- * Colours follow the light/dark theme; times show in local time. While the coin's feed is stale
- * the last-price line is dimmed.
+ * Candles of `symbol` in `market` at `interval`: history from GET /api/candles, the forming candle
+ * from the live `kline` messages, older history loaded as the owner scrolls left, and a marker
+ * per fill (on a perpetual: entries, increases, reductions, closes and liquidations). With an
+ * open perp position, its entry price is a line and its liquidation price a red line labelled
+ * 'Liq.' and the price. Colours follow the light/dark theme; times show in local time. While the
+ * market's feed is stale the last-price line is dimmed.
  */
-export function PriceChart({ symbol, interval }: { symbol: string; interval: Interval }) {
+export function PriceChart({ market, symbol, interval }: { market: Market; symbol: string; interval: Interval }) {
   const box = useRef<HTMLDivElement>(null);
   const live = useRef<Live | null>(null);
   const candles = useRef<Candle[]>([]);
-  const fills = useRef<WireFill[]>([]);
+  const markerData = useRef<MarkerData | null>(null);
+  const positionLines = useRef<IPriceLine[]>([]);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
   const fillSeq = useLive((s) => s.fillSeq);
   const reconnects = useLive((s) => s.reconnects);
-  const fresh = useLive((s) => s.health[symbol]?.fresh !== false);
-  const tick = useLive((s) => s.meta?.rules[symbol]?.tickSize);
+  const fresh = useLive((s) => feedOf(s, market, symbol)?.fresh !== false);
+  const tick = useLive((s) =>
+    market === 'perp' ? s.meta?.perp?.[symbol]?.rules?.tickSize : s.meta?.rules[symbol]?.tickSize,
+  );
+  // The open position's prices only (not the position, which is pushed anew every second).
+  const position = (s: LiveState) => (market === 'perp' ? s.positions?.find((p) => p.symbol === symbol) : undefined);
+  const entryPrice = useLive((s) => position(s)?.entryPrice ?? null);
+  const liqPrice = useLive((s) => position(s)?.liquidationPrice ?? null);
 
   /** Redraw the fill markers for the candles now loaded. */
   const drawMarkers = () => {
     const l = live.current;
     const first = candles.current[0];
     const last = candles.current.at(-1);
+    const data = markerData.current;
     if (!l) return;
-    if (!first || !last) return l.markers.setMarkers([]);
-    const markers = fillMarkers(
-      // Until this symbol's fills arrive, the list may still hold the previous symbol's.
-      fills.current.filter((f) => f.symbol === symbol),
-      interval,
-      { from: first.time, to: last.time },
-      { up: l.palette.up, down: l.palette.down },
-      (q) => fmtQty(symbol, q),
-    );
+    // Until this market and symbol's fills arrive, the data may still be the previous one's.
+    if (!first || !last || !data || data.market !== market || data.symbol !== symbol) return l.markers.setMarkers([]);
+    const range = { from: first.time, to: last.time };
+    const colors = { up: l.palette.up, down: l.palette.down };
+    const qty = (q: string) => fmtQty(symbol, q, { market });
+    const markers =
+      market === 'perp'
+        ? perpMarkers(data.fills, data.liquidations, { complete: data.complete }, interval, range, colors, qty)
+        : fillMarkers(data.fills, interval, range, colors, qty);
     l.markers.setMarkers(markers.map((m) => ({ ...m, time: m.time as UTCTimestamp }) satisfies SeriesMarker<Time>));
+  };
+  /** The open position's entry line and red liquidation-price line (none without a position). */
+  const drawPositionLines = () => {
+    const l = live.current;
+    if (!l) return;
+    for (const line of positionLines.current) l.series.removePriceLine(line);
+    positionLines.current = [];
+    // The chart draws each title beside the line's price on the axis: 'Liq.' then the price.
+    const entry = { title: 'Entry', color: l.palette.muted, width: 1 as const, style: LineStyle.Dashed };
+    const liq = { title: 'Liq.', color: l.palette.down, width: 2 as const, style: LineStyle.Solid };
+    const lines = [
+      entryPrice !== null && { ...entry, price: entryPrice },
+      liqPrice !== null && { ...liq, price: liqPrice },
+    ].filter((x) => x !== false);
+    for (const line of lines) {
+      positionLines.current.push(
+        l.series.createPriceLine({
+          price: Number(line.price),
+          color: line.color,
+          lineWidth: line.width,
+          lineStyle: line.style,
+          axisLabelVisible: true,
+          title: line.title,
+        }),
+      );
+    }
+    // The price scale stretches to keep both lines in view, however far the liquidation price is.
+    const prices = lines.map((x) => Number(x.price));
+    l.series.applyOptions({
+      autoscaleInfoProvider: (original: () => AutoscaleInfo | null) => {
+        const res = original();
+        if (!res?.priceRange || prices.length === 0) return res;
+        return {
+          ...res,
+          priceRange: {
+            minValue: Math.min(res.priceRange.minValue, ...prices),
+            maxValue: Math.max(res.priceRange.maxValue, ...prices),
+          },
+        };
+      },
+    });
+    // Room right of the latest candle for the line labels, so its fill markers stay clear of them
+    // (changed only when the lines come or go: setting it scrolls the view).
+    const rightOffset = lines.length > 0 ? LABELLED_RIGHT_OFFSET : RIGHT_OFFSET;
+    if (l.chart.timeScale().options().rightOffset !== rightOffset) l.chart.timeScale().applyOptions({ rightOffset });
   };
   /** The last-price line (and its axis label): dimmed while the coin's feed is stale. */
   const styleLastPrice = () => {
@@ -166,6 +250,8 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
   redraw.current = drawMarkers;
   const restyle = useRef(styleLastPrice);
   restyle.current = styleLastPrice;
+  const relines = useRef(drawPositionLines);
+  relines.current = drawPositionLines;
 
   // The chart itself: created once, recoloured on every theme switch.
   useEffect(() => {
@@ -179,8 +265,7 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
         borderColor: palette.line,
         timeVisible: true,
         secondsVisible: false,
-        // Room right of the forming candle, so its fill markers clear the price axis.
-        rightOffset: 6,
+        rightOffset: RIGHT_OFFSET,
         tickMarkFormatter: tickLabel,
       },
     });
@@ -209,12 +294,14 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
       });
       redraw.current();
       restyle.current();
+      relines.current();
     };
     const themeWatch = new MutationObserver(recolour);
     themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     return () => {
       themeWatch.disconnect();
       live.current = null;
+      positionLines.current = [];
       chart.remove();
     };
   }, []);
@@ -231,6 +318,9 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
 
   // A stale feed dims the last-price line: the price may be out of date.
   useEffect(() => restyle.current(), [fresh]);
+
+  // The position's lines follow its entry and liquidation price (and go with the position).
+  useEffect(() => relines.current(), [market, symbol, entryPrice, liqPrice, tick]);
 
   // History, live candles and older pages for this symbol and interval.
   useEffect(() => {
@@ -252,10 +342,12 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
     /** The kline the store holds now, if it belongs to this chart (it may be newer than the history). */
     const withKline = (rows: Candle[]) => {
       const k = useLive.getState().kline;
-      return k && k.symbol === symbol && k.interval === interval ? (applyKline(rows, k.candle) ?? rows) : rows;
+      return k && k.market === market && k.symbol === symbol && k.interval === interval
+        ? (applyKline(rows, k.candle) ?? rows)
+        : rows;
     };
 
-    api.candles(symbol, interval).then(
+    api.candles(symbol, interval, undefined, market).then(
       (rows) => {
         if (!current) return;
         show(withKline(mergeCandles([], rows)));
@@ -272,7 +364,7 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
     // After a reconnect: reload the latest page and merge it in, repairing candles missed while
     // we were offline. An outage longer than one page leaves a gap, so then start over from it.
     const repair = () => {
-      api.candles(symbol, interval).then(
+      api.candles(symbol, interval, undefined, market).then(
         (rows) => {
           if (!current || rows.length === 0) return;
           const latest = mergeCandles([], rows);
@@ -290,7 +382,7 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
     const unsubscribe = useLive.subscribe((s, prev) => {
       if (s.reconnects !== prev.reconnects) repair();
       const k = s.kline;
-      if (k === prev.kline || !k || k.symbol !== symbol || k.interval !== interval) return;
+      if (k === prev.kline || !k || k.market !== market || k.symbol !== symbol || k.interval !== interval) return;
       const next = applyKline(candles.current, k.candle);
       if (!next) return;
       const added = next.length > candles.current.length;
@@ -303,7 +395,7 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
       const oldest = candles.current[0];
       if (!oldest || exhausted || loadingOlder) return;
       loadingOlder = true;
-      api.candles(symbol, interval, oldest.time - 1).then(
+      api.candles(symbol, interval, oldest.time - 1, market).then(
         (rows) => {
           loadingOlder = false;
           if (!current) return;
@@ -329,16 +421,24 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
       unsubscribe();
       l.chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRange);
     };
-  }, [symbol, interval, attempt]);
+  }, [market, symbol, interval, attempt]);
 
-  // The owner's fills: on symbol change, whenever fills may have changed (fillSeq) and after a
-  // reconnect. The previous markers stay on screen while reloading and if a reload fails.
+  // The owner's fills (and a perpetual's liquidations): on a market or symbol change, whenever
+  // fills may have changed (fillSeq) and after a reconnect. The previous markers stay on screen
+  // while reloading and if a reload fails.
   useEffect(() => {
     let current = true;
-    api.fills({ symbol, limit: FILLS_LIMIT }).then(
-      (rows) => {
+    const fills = api.fills({ symbol, limit: FILLS_LIMIT, market });
+    const liquidations =
+      market === 'perp'
+        ? api
+            .history({ symbol, market: 'perp', types: ['liquidation'], limit: LIQUIDATIONS_LIMIT })
+            .then((page) => page.rows.flatMap((r) => liquidationMark(r) ?? []))
+        : Promise.resolve([]);
+    Promise.all([fills, liquidations]).then(
+      ([rows, liqs]) => {
         if (!current) return;
-        fills.current = rows;
+        markerData.current = { market, symbol, fills: rows, liquidations: liqs, complete: rows.length < FILLS_LIMIT };
         redraw.current();
       },
       (e: unknown) => console.warn(`Could not load fills for the chart markers: ${(e as Error).message}`),
@@ -346,7 +446,7 @@ export function PriceChart({ symbol, interval }: { symbol: string; interval: Int
     return () => {
       current = false;
     };
-  }, [symbol, fillSeq, reconnects]);
+  }, [market, symbol, fillSeq, reconnects]);
 
   return (
     <div className="relative min-h-0 flex-1">

@@ -26,6 +26,40 @@ export function navigate(path: RoutePath, params: Record<string, string> = {}): 
   location.hash = href(path, params);
 }
 
+/** Point the address at a route without a new history entry or a hashchange event. */
+export function replaceRoute(path: RoutePath, params: Record<string, string> = {}): void {
+  const next = href(path, params);
+  if (location.hash !== next) history.replaceState(history.state, '', next);
+}
+
+/** The trade screen's market and coin as kept in the hash: '#/?m=perp&s=BTCUSDT'. */
+export interface TradeSelection {
+  symbol: string;
+  market: 'spot' | 'perp';
+}
+
+/**
+ * The market and coin the trade hash asks for: `m` (spot or perp) and `s` (a known symbol), each
+ * taken from `current` when absent or not one we know.
+ */
+export function selectionFromParams(
+  params: URLSearchParams,
+  symbols: string[],
+  current: TradeSelection,
+): TradeSelection {
+  const m = params.get('m');
+  const s = params.get('s');
+  return {
+    market: m === 'spot' || m === 'perp' ? m : current.market,
+    symbol: s !== null && symbols.includes(s) ? s : current.symbol,
+  };
+}
+
+/** The hash parameters for a market and coin. */
+export function selectionParams(sel: TradeSelection): Record<string, string> {
+  return { m: sel.market, s: sel.symbol };
+}
+
 const subscribe = (cb: () => void) => {
   window.addEventListener('hashchange', cb);
   return () => window.removeEventListener('hashchange', cb);

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountSnapshot, Meta, ServerMessage, WireAggTrade, WireOrder } from '../src/lib/api.ts';
-import { initialLiveData, reduce, useLive } from '../src/lib/live.ts';
+import { initialLiveData, reduce, selectionChange, useLive } from '../src/lib/live.ts';
 import type { LiveData } from '../src/lib/live.ts';
+import { selectionFromParams, selectionParams } from '../src/lib/route.ts';
 
 const T0 = 1_700_000_000_000;
 
@@ -59,7 +60,7 @@ describe('live store reducer', () => {
     s = apply(s, { type: 'book', symbol: 'ETHUSDT', bids: [{ price: '1', qty: '1' }], asks: [] });
     expect(s.book).toBeNull();
     s = apply(s, { type: 'book', symbol: 'BTCUSDT', bids: [{ price: '99', qty: '2' }], asks: [{ price: '101', qty: '3' }] });
-    expect(s.book).toEqual({ symbol: 'BTCUSDT', bids: [{ price: '99', qty: '2' }], asks: [{ price: '101', qty: '3' }] });
+    expect(s.book).toEqual({ market: 'spot', symbol: 'BTCUSDT', bids: [{ price: '99', qty: '2' }], asks: [{ price: '101', qty: '3' }] });
     s = apply(s, { type: 'trades', symbol: 'BTCUSDT', trades: [trade(3), trade(2), trade(1)] });
     s = apply(s, { type: 'trades', symbol: 'BTCUSDT', trades: [trade(4)] });
     s = apply(s, { type: 'trades', symbol: 'BTCUSDT', trades: [trade(4)] });
@@ -147,6 +148,97 @@ describe('live store reducer', () => {
     expect(s.fillSeq).toBe(1);
     s = apply(s, { type: 'account', account: { ...bought, total: '999' } });
     expect(s.fillSeq).toBe(1);
+  });
+});
+
+describe('market selection', () => {
+  const kline = { time: T0, open: '1', high: '1', low: '1', close: '1', volume: '1' };
+
+  it('switching market resets the book, trades and kline; the same selection changes nothing', () => {
+    let s = initialLiveData();
+    s = apply(s, { type: 'book', market: 'spot', symbol: 'BTCUSDT', bids: [{ price: '99', qty: '1' }], asks: [] });
+    s = apply(s, { type: 'trades', market: 'spot', symbol: 'BTCUSDT', trades: [trade(1)] });
+    s = apply(s, { type: 'kline', market: 'spot', symbol: 'BTCUSDT', interval: '15m', candle: kline });
+    expect(s.book).not.toBeNull();
+    const next = { ...s, ...selectionChange(s, { symbol: 'BTCUSDT', market: 'perp' }) };
+    expect(next.selected).toEqual({ symbol: 'BTCUSDT', market: 'perp' });
+    expect(next.book).toBeNull();
+    expect(next.trades).toEqual([]);
+    expect(next.kline).toBeNull();
+    expect(selectionChange(next, { symbol: 'BTCUSDT', market: 'perp' })).toEqual({});
+    const eth = { ...next, ...selectionChange(next, { symbol: 'ETHUSDT', market: 'perp' }) };
+    expect(eth.selected).toEqual({ symbol: 'ETHUSDT', market: 'perp' });
+  });
+
+  it("keeps the selected market's book, trades and klines only (a message without a market is spot)", () => {
+    let s: LiveData = { ...initialLiveData(), selected: { symbol: 'BTCUSDT', market: 'perp' } };
+    s = apply(s, { type: 'book', symbol: 'BTCUSDT', bids: [{ price: '1', qty: '1' }], asks: [] });
+    s = apply(s, { type: 'book', market: 'spot', symbol: 'BTCUSDT', bids: [{ price: '1', qty: '1' }], asks: [] });
+    s = apply(s, { type: 'trades', market: 'spot', symbol: 'BTCUSDT', trades: [trade(1)] });
+    s = apply(s, { type: 'kline', market: 'spot', symbol: 'BTCUSDT', interval: '15m', candle: kline });
+    expect(s.book).toBeNull();
+    expect(s.trades).toEqual([]);
+    expect(s.kline).toBeNull();
+    s = apply(s, { type: 'book', market: 'perp', symbol: 'BTCUSDT', bids: [{ price: '2', qty: '1' }], asks: [] });
+    s = apply(s, { type: 'trades', market: 'perp', symbol: 'BTCUSDT', trades: [trade(2)] });
+    s = apply(s, { type: 'kline', market: 'perp', symbol: 'BTCUSDT', interval: '15m', candle: kline });
+    expect(s.book).toEqual({ market: 'perp', symbol: 'BTCUSDT', bids: [{ price: '2', qty: '1' }], asks: [] });
+    expect(s.trades.map((t) => t.id)).toEqual([2]);
+    expect(s.kline).toEqual({ market: 'perp', symbol: 'BTCUSDT', interval: '15m', candle: kline });
+  });
+
+  it('stores marks, perp tickers, positions, perp orders and every market health with what is catching up', () => {
+    let s = initialLiveData();
+    const mark = { markPrice: '81328.08', indexPrice: '81330.1', fundingRate: '0.00005355', nextFundingTime: T0 + 3_600_000, fresh: true };
+    s = apply(s, { type: 'marks', marks: { BTCUSDT: mark } });
+    expect(s.marks.BTCUSDT).toEqual(mark);
+    s = apply(s, {
+      type: 'tickers',
+      tickers: { BTCUSDT: { last: '1', open24h: '1', change24hPct: '0' } },
+      perpTickers: { BTCUSDT: { last: '2', open24h: '2', change24hPct: '0' } },
+    });
+    expect(s.perpTickers.BTCUSDT?.last).toBe('2');
+    expect(s.tickers.BTCUSDT?.last).toBe('1');
+    const position = { id: 'p1', symbol: 'BTCUSDT', side: 'long', entryPrice: '80000', liquidationPrice: '76345.4' };
+    s = apply(s, { type: 'positions', positions: [position as never] });
+    expect(s.positions?.map((p) => p.id)).toEqual(['p1']);
+    s = apply(s, {
+      type: 'health',
+      health: { BTCUSDT: { fresh: true, reason: null } },
+      markets: {
+        'spot:BTCUSDT': { fresh: true, reason: null, catchingUp: false },
+        'perp:BTCUSDT': { fresh: false, reason: 'Catching up', catchingUp: true },
+      },
+      catchingUp: ['perp:BTCUSDT'],
+    });
+    expect(s.markets['perp:BTCUSDT']).toEqual({ fresh: false, reason: 'Catching up', catchingUp: true });
+    expect(s.catchingUp).toEqual(['perp:BTCUSDT']);
+    expect(s.health.BTCUSDT?.fresh).toBe(true);
+    const fillSeq = s.fillSeq;
+    s = apply(s, { type: 'orders', orders: [], perpOrders: [{ id: 'o1', status: 'new', filledQty: '0' } as never] });
+    expect(s.perpOrders.map((o) => o.id)).toEqual(['o1']);
+    expect(s.fillSeq).toBe(fillSeq + 1);
+  });
+
+  it('bumps fillSeq on liquidation and catch-up notices too (they move the chart markers)', () => {
+    let s = initialLiveData();
+    s = apply(s, { type: 'notice', kind: 'liquidation', level: 'error', text: 'Liquidated' });
+    s = apply(s, { type: 'notice', kind: 'catch_up', level: 'info', text: 'Caught up' });
+    s = apply(s, { type: 'notice', kind: 'funding', level: 'info', text: 'Funding paid' });
+    expect(s.fillSeq).toBe(2);
+  });
+
+  it('reads the market and coin from the hash (#/?m=perp&s=BTCUSDT) and writes them back', () => {
+    const symbols = ['BTCUSDT', 'ETHUSDT'];
+    const current = { symbol: 'BTCUSDT', market: 'spot' } as const;
+    const from = (q: string) => selectionFromParams(new URLSearchParams(q), symbols, current);
+    expect(from('m=perp&s=ETHUSDT')).toEqual({ symbol: 'ETHUSDT', market: 'perp' });
+    expect(from('m=perp')).toEqual({ symbol: 'BTCUSDT', market: 'perp' });
+    expect(from('s=ETHUSDT')).toEqual({ symbol: 'ETHUSDT', market: 'spot' });
+    expect(from('')).toEqual(current);
+    // Unknown values are ignored, not trusted.
+    expect(from('m=futures&s=FOOUSDT')).toEqual(current);
+    expect(selectionParams({ symbol: 'BTCUSDT', market: 'perp' })).toEqual({ m: 'perp', s: 'BTCUSDT' });
   });
 });
 
@@ -278,6 +370,20 @@ describe('live connection', () => {
     expect(useLive.getState().conn).toBe('open');
     await vi.advanceTimersByTimeAsync(1);
     expect(useLive.getState().conn).toBe('down');
+  });
+
+  it('subscribes to the selected market and coin, and again on every switch', async () => {
+    const { startLive, useLive } = await freshLive(() => metaWith(['BTCUSDT', 'DOGEUSDT']));
+    startLive();
+    const ws = FakeSocket.all[0]!;
+    ws.open();
+    useLive.getState().select('DOGEUSDT', 'perp');
+    useLive.getState().select('ETHUSDT');
+    expect(ws.sent.map((m) => JSON.parse(m))).toEqual([
+      { type: 'subscribe', market: 'spot', symbol: 'BTCUSDT', interval: '15m' },
+      { type: 'subscribe', market: 'perp', symbol: 'DOGEUSDT', interval: '15m' },
+      { type: 'subscribe', market: 'perp', symbol: 'ETHUSDT', interval: '15m' },
+    ]);
   });
 
   it('reconnectNow replaces a socket that is not open', async () => {

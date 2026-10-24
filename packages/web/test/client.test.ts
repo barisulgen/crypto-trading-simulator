@@ -62,7 +62,7 @@ describe('live WebSocket client', () => {
     const delays: number[] = [];
     for (let i = 0; i < 6; i++) {
       latest().open();
-      expect(JSON.parse(latest().sent[0]!)).toEqual({ type: 'subscribe', symbol: 'BTCUSDT', interval: '15m' });
+      expect(JSON.parse(latest().sent[0]!)).toEqual({ type: 'subscribe', market: 'spot', symbol: 'BTCUSDT', interval: '15m' });
       await vi.advanceTimersByTimeAsync(100);
       latest().close();
       delays.push(await delayUntilNextSocket());
