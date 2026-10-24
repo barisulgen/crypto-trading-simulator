@@ -2,8 +2,9 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { fmtPrice } from '../lib/format.ts';
+import type { PerpMark } from '../lib/api.ts';
 import { useLive } from '../lib/live.ts';
-import { fmtCountdown, fmtFundingPct } from '../lib/market.ts';
+import { fmtFundingPct, nextFundingText } from '../lib/market.ts';
 
 /** The current time, updated every `ms` while mounted. */
 function useNow(ms: number): number {
@@ -37,6 +38,25 @@ export function PerpHeader({ symbol }: { symbol: string }) {
   const mark = useLive((s) => s.marks[symbol]);
   const down = useLive((s) => s.conn !== 'open');
   const now = useNow(1000);
+  return <PerpHeaderView symbol={symbol} mark={mark} down={down} now={now} />;
+}
+
+/**
+ * The header as drawn from the symbol's last mark (undefined before the first), whether our
+ * connection is down, and the time now. A funding time that is missing, 0 or already past shows
+ * a dash, never a countdown stuck at 00:00:00.
+ */
+export function PerpHeaderView({
+  symbol,
+  mark,
+  down,
+  now,
+}: {
+  symbol: string;
+  mark: PerpMark | undefined;
+  down: boolean;
+  now: number;
+}) {
   const stale = !mark || !mark.fresh || down;
   const why = !mark
     ? 'No mark price yet'
@@ -54,7 +74,7 @@ export function PerpHeader({ symbol }: { symbol: string }) {
           {fmtFundingPct(mark?.fundingRate)}
         </Figure>
         <Figure label="Next funding" title="Time left until the next funding is settled">
-          {mark ? fmtCountdown(mark.nextFundingTime - now) : '-'}
+          {nextFundingText(mark?.nextFundingTime, now)}
         </Figure>
       </dl>
       {mark && stale && (

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { Candle, WireFill, WireFillRow } from '../src/lib/api.ts';
+import { D, Decimal, emptyLedger, emptyPerpState, PerpEngine } from '@sim/engine';
+import type { PerpEvent } from '@sim/engine';
+import { FakePerpMarket, perpCtx } from '../../engine/test/perpFixtures.ts';
+import type { Candle, HistoryRow, WireFill, WireFillRow } from '../src/lib/api.ts';
 import {
   addDec,
   applyKline,
@@ -9,7 +12,10 @@ import {
   fmtClock,
   fmtCountdown,
   fmtFundingPct,
+  liqPriceAtTick,
+  liquidationMark,
   mergeCandles,
+  nextFundingText,
   perpMarkers,
   subDec,
   toBar,
@@ -252,5 +258,70 @@ describe('perp chart markers', () => {
     const fills = [pfill('f1', 'p1', 'buy', '1', T - 1)];
     const liqs = [{ time: T + 61 * MIN, side: 'long' as const, qty: '1' }];
     expect(perpMarkers(fills, liqs, { complete: true }, '1m', range, colors, qty)).toEqual([]);
+  });
+});
+
+describe('next funding', () => {
+  const now = 1_792_713_600_000;
+
+  it('counts down to a funding time still ahead', () => {
+    expect(nextFundingText(now + 3_600_000 + 12 * 60_000 + 45_000, now)).toBe('01:12:45');
+  });
+
+  it('shows a dash, not a live-looking 00:00:00, for a missing, zero or past funding time', () => {
+    expect(nextFundingText(undefined, now)).toBe('-');
+    expect(nextFundingText(0, now)).toBe('-');
+    expect(nextFundingText(now, now)).toBe('-');
+    expect(nextFundingText(now - 1, now)).toBe('-');
+  });
+});
+
+describe('liquidation price on the chart', () => {
+  it('rounds to the tick towards the mark, exactly: up for a long, down for a short', () => {
+    expect(liqPriceAtTick('76345.43', 'long', '0.1')).toBe('76345.5');
+    expect(liqPriceAtTick('76345.47', 'short', '0.1')).toBe('76345.4');
+    // Already on the tick: unchanged either way (no float noise).
+    expect(liqPriceAtTick('76345.4', 'long', '0.1')).toBe('76345.4');
+    expect(liqPriceAtTick('76345.4', 'short', '0.1')).toBe('76345.4');
+    // Many decimals, as the engine computes it; the wire tick has trailing zeros.
+    expect(liqPriceAtTick('76345.38095238095238095238', 'long', '0.10000000')).toBe('76345.4');
+    expect(liqPriceAtTick('2.000001', 'long', '0.001')).toBe('2.001');
+    expect(liqPriceAtTick('2.000999', 'short', '0.001')).toBe('2');
+    // Rules not loaded yet: the price as computed, never rounded the wrong way.
+    expect(liqPriceAtTick('76345.43', 'long', undefined)).toBe('76345.43');
+  });
+});
+
+describe('liquidation markers from history', () => {
+  /** An event as the store writes it into events.payload (decimals as their strings) and the API reads it back. */
+  const stored = (e: PerpEvent): unknown =>
+    JSON.parse(
+      JSON.stringify(e, function (this: Record<string, unknown>, key: string, v: unknown) {
+        const raw = this[key];
+        return Decimal.isDecimal(raw) ? (raw as Decimal).toString() : v;
+      }),
+    );
+
+  it('reads the side and quantity of a real liquidation event', () => {
+    // Long 0.1 BTC at 80000, 20x, then the mark falls through its liquidation price.
+    const market = new FakePerpMarket();
+    const ctx = perpCtx(market, { now: 1_000_000 });
+    const ledger = emptyLedger(['USDT', 'BTC']);
+    ledger.balances.leverage.USDT = { free: D('1000'), locked: D(0) };
+    const engine = new PerpEngine(emptyPerpState(ledger));
+    const placed = engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.1' }, ctx)[0];
+    if (placed?.type !== 'order_placed') throw new Error('order not placed');
+    ctx.now = placed.order.arrivesAt!;
+    engine.arrive(placed.order.id, ctx);
+    market.setMarkPrice('BTCUSDT', D('70000'));
+    const liq = engine.onMark('BTCUSDT', D('70000'), ctx).events.find((e) => e.type === 'liquidation');
+    if (!liq) throw new Error('no liquidation');
+
+    const row: HistoryRow = { id: 7, time: liq.time, type: liq.type, symbol: 'BTCUSDT', market: 'perp', payload: stored(liq) };
+    expect(liquidationMark(row)).toEqual({ time: liq.time, side: 'long', qty: '0.1' });
+  });
+
+  it('skips a row that is not a liquidation', () => {
+    expect(liquidationMark({ id: 1, time: 5, type: 'funding', symbol: 'BTCUSDT', market: 'perp', payload: { amount: '1' } })).toBeNull();
   });
 });

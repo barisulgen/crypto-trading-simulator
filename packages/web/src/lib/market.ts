@@ -1,8 +1,8 @@
 // Pure helpers behind the chart, the order book and the trades list. Book arithmetic stays on
 // decimal strings (scaled BigInt); only chart bars and depth-bar widths become JS numbers, and
 // those are display only.
-import type { Candle, Interval, WireFill, WireFillRow, WireLevel } from './api.ts';
-import { fmtNum } from './format.ts';
+import type { Candle, HistoryRow, Interval, WireFill, WireFillRow, WireLevel } from './api.ts';
+import { fmtNum, tickDecimals } from './format.ts';
 
 // ---- exact decimal strings ----
 
@@ -269,6 +269,31 @@ export interface LiquidationMark {
   qty: string;
 }
 
+/** A liquidation event from GET /api/history as a chart marker; null if the row is not one. */
+export function liquidationMark(row: HistoryRow): LiquidationMark | null {
+  if (row.type !== 'liquidation') return null;
+  const position = (row.payload as { position?: { side?: unknown; qty?: unknown } } | null)?.position;
+  if (!position || (position.side !== 'long' && position.side !== 'short') || typeof position.qty !== 'string') return null;
+  return { time: row.time, side: position.side, qty: position.qty };
+}
+
+/**
+ * A liquidation price at the tick's decimals, rounded towards the mark (up for a long, down for a
+ * short) as the liquidation notices round it, so the chart never shows it further away than they
+ * do. Exact: decimal strings, no floats. Without a tick (rules not loaded) the price as given.
+ */
+export function liqPriceAtTick(price: string, side: 'long' | 'short', tick: string | undefined): string {
+  if (tick === undefined) return price;
+  const dp = tickDecimals(tick);
+  const s = Math.max(scaleOf(price), dp);
+  const unit = 10n ** BigInt(s - dp);
+  const p = scaled(price, s);
+  const down = p >= 0n ? p / unit : -((-p + unit - 1n) / unit);
+  const exact = down * unit === p;
+  const q = side === 'long' && !exact ? down + 1n : down;
+  return unscaled(q, dp);
+}
+
 /** What a perp fill did to its position; 'fill' when the fills loaded cannot tell. */
 type PerpFillKind = 'entry' | 'increase' | 'reduce' | 'close' | 'fill';
 
@@ -361,6 +386,12 @@ export function perpMarkers(
 }
 
 // ---- funding ----
+
+/** The time left to the next funding ('03:12:45'); a dash when that time is unknown (0) or already past. */
+export function nextFundingText(nextFundingTime: number | null | undefined, now: number): string {
+  if (!nextFundingTime || nextFundingTime <= now) return '-';
+  return fmtCountdown(nextFundingTime - now);
+}
 
 /** Time left until a moment, as HH:MM:SS ('03:12:45'); a started second counts whole, never below zero. */
 export function fmtCountdown(ms: number): string {

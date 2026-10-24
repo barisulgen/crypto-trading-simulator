@@ -11,7 +11,7 @@ const ROW_COLS = 'grid-cols-[minmax(0,1fr)_auto_3.75rem]';
  * a second line under the 24 h change (the narrow desktop column).
  */
 const PERP_COLS = `${ROW_COLS} @min-[20rem]:grid-cols-[minmax(0,1fr)_auto_3.75rem_4.5rem]`;
-const FUNDING_CELL = 'col-start-3 text-right text-2xs @min-[20rem]:col-start-auto @min-[20rem]:text-xs';
+const FUNDING_CELL = 'col-start-3 text-right @min-[20rem]:col-start-auto';
 
 /** Up/down colour of a change: teal for gains, rose for losses, muted for none. */
 export function changeClass(value: string | null | undefined, dp = 2): string {
@@ -39,6 +39,7 @@ export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
   const cols = perp ? PERP_COLS : ROW_COLS;
 
   return (
+    // The one container every row (header included) sizes its columns against.
     <div className="@container flex min-h-0 flex-1 flex-col">
       <div className="flex-none p-2">
         <MarketSwitch />
@@ -47,9 +48,9 @@ export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
         <span>Coin</span>
         <span className="text-right">Last</span>
         <span className="text-right">24h</span>
-        {perp && <span className={`${FUNDING_CELL} @min-[20rem]:text-2xs`}>Funding</span>}
+        {perp && <span className={FUNDING_CELL}>Funding</span>}
       </div>
-      <ul className={`@container min-h-0 flex-1 overflow-auto ${down ? 'opacity-60' : ''}`}>
+      <ul className={`min-h-0 flex-1 overflow-auto ${down ? 'opacity-60' : ''}`}>
         {coins.map((coin) => {
           const symbol = `${coin}USDT`;
           const t = tickers[symbol];
@@ -86,7 +87,7 @@ export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
                 {perp && (
                   <span
                     title={mark && !mark.fresh ? 'Funding rate from a stale mark price' : 'Funding rate'}
-                    className={`${FUNDING_CELL} ${mark?.fresh ? 'text-muted' : 'text-faint opacity-60'}`}
+                    className={`${FUNDING_CELL} text-2xs ${mark?.fresh ? 'text-muted' : 'text-faint opacity-60'}`}
                   >
                     <span className="sr-only">Funding </span>
                     {fmtFundingPct(mark?.fundingRate)}

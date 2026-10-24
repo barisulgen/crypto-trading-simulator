@@ -24,11 +24,21 @@ import type {
   UTCTimestamp,
 } from 'lightweight-charts';
 import { api, INTERVALS } from '../lib/api.ts';
-import type { Candle, HistoryRow, Interval, Market, WireFillRow } from '../lib/api.ts';
+import type { Candle, Interval, Market, WireFillRow } from '../lib/api.ts';
 import { fmtQty, tickDecimals } from '../lib/format.ts';
 import { feedOf, useLive } from '../lib/live.ts';
 import type { LiveState } from '../lib/live.ts';
-import { applyKline, fillMarkers, fmtChartTime, fmtTick, mergeCandles, perpMarkers, toBar } from '../lib/market.ts';
+import {
+  applyKline,
+  fillMarkers,
+  fmtChartTime,
+  fmtTick,
+  liqPriceAtTick,
+  liquidationMark,
+  mergeCandles,
+  perpMarkers,
+  toBar,
+} from '../lib/market.ts';
 import type { LiquidationMark } from '../lib/market.ts';
 import { Button, Segmented } from './ui.tsx';
 
@@ -138,13 +148,6 @@ interface MarkerData {
   complete: boolean;
 }
 
-/** A liquidation history row as a chart marker; null if the row is not one. */
-function liquidationMark(row: HistoryRow): LiquidationMark | null {
-  const position = (row.payload as { position?: { side?: unknown; qty?: unknown } } | null)?.position;
-  if (!position || (position.side !== 'long' && position.side !== 'short') || typeof position.qty !== 'string') return null;
-  return { time: row.time, side: position.side, qty: position.qty };
-}
-
 /**
  * Candles of `symbol` in `market` at `interval`: history from GET /api/candles, the forming candle
  * from the live `kline` messages, older history loaded as the owner scrolls left, and a marker
@@ -171,7 +174,11 @@ export function PriceChart({ market, symbol, interval }: { market: Market; symbo
   // The open position's prices only (not the position, which is pushed anew every second).
   const position = (s: LiveState) => (market === 'perp' ? s.positions?.find((p) => p.symbol === symbol) : undefined);
   const entryPrice = useLive((s) => position(s)?.entryPrice ?? null);
-  const liqPrice = useLive((s) => position(s)?.liquidationPrice ?? null);
+  // At the tick, rounded towards the mark as the notices show it; the axis label shows exactly this.
+  const liqPrice = useLive((s) => {
+    const p = position(s);
+    return p?.liquidationPrice ? liqPriceAtTick(p.liquidationPrice, p.side, tick) : null;
+  });
 
   /** Redraw the fill markers for the candles now loaded. */
   const drawMarkers = () => {
