@@ -51,7 +51,10 @@ const limit = (side: 'buy' | 'sell', price: string, qty: string): SpotOrderReque
 const perpLimit = (side: 'buy' | 'sell', price: string, qty: string): PerpOrderRequest => ({ symbol: SYMBOL, side, type: 'limit', price, qty });
 
 /** runnerHarness over a FakeHistory (unless given another history) and a clock at 12:00:00. */
-type FundingHooks = { knownTimes(symbol: string): number[]; caughtUp(symbol: string): void };
+type FundingHooks = {
+  fundingTimes(symbol: string, start: number, end: number): Promise<number[]>;
+  caughtUp(symbol: string, since: number): void;
+};
 
 function setup(opts: { db?: Db; clock?: FakeClock; history?: CatchUpHistory; funding?: FundingHooks } = {}) {
   const history = opts.history ?? new FakeHistory();
@@ -294,6 +297,62 @@ describe('catch-up: spot', () => {
     expect(t.orderRow(stop.id)!.status).toBe('open');
   });
 
+  it('a cancel requested just before a gap is delivered by catch-up at its time: a gap trade before it fills the order, the cancel is rejected', async () => {
+    const t = setup();
+    const { orders } = withStop(t, [limit('buy', '99.2', '0.1')]); // the limit arrived at 12:00:00.200
+    const order = orders[0]!;
+    expect(t.runner.cancel(order.id).ok).toBe(true); // arrives at 12:00:00.300
+    t.market.setFresh(SYMBOL, false);
+    t.clock.advance(200); // the cancel's arrival finds the data stale: it waits for the catch-up
+    expect(t.orderRow(order.id)!.status).toBe('open');
+    t.history.candleList[SPOT] = minutes(T - MIN, T + 6 * MIN, '99.5', '100', [candle(T, '99.1', '100')]);
+    t.history.tradeList[SPOT] = [trade(300, '99.15', '1', true, T + 250)]; // through the limit before the cancel arrived
+    t.clock.advance(5 * MIN);
+    t.market.setFresh(SYMBOL, true);
+    t.clock.advance(1000);
+    await settle();
+    expect(t.fillsOf(order.id).map((f) => [f.qty, f.price, f.time])).toEqual([['0.1', '99.2', T + 250]]);
+    expect(t.eventsOf('cancel_rejected').map((e) => [e.payload.order.id, e.time])).toEqual([[order.id, T + 300]]);
+    expect(t.orderRow(order.id)!.status).toBe('filled');
+    expect(t.fatal).toEqual([]);
+  });
+
+  it('a restart after a done job whose resume may not have finished starts its startup gap at that job’s end, so held trades are replayed', async () => {
+    const a = setup();
+    withStop(a, [limit('buy', '50', '0.1')]);
+    spotGap(a, 10 * MIN);
+    a.history.candleList[SPOT] = spotCandles(T + 11 * MIN);
+    const release = a.history.hold();
+    a.market.setFresh(SYMBOL, true);
+    a.clock.advance(1000); // catching up from 12:10:01
+    a.market.trade(SYMBOL, trade(500, '100', '0.1')); // held
+    a.clock.advance(15_000); // a heartbeat at 12:10:10, after the gap's end
+    release();
+    await settle(); // done at 12:10:16.2; the process dies at once, no heartbeat since
+    const [first] = a.jobs();
+    expect(first).toMatchObject({ status: 'done', endedAt: T + 601_000, endTradeId: 500 });
+
+    const b = setup({ db: a.db, clock: new FakeClock(T + 15 * MIN) });
+    b.history.candleList[SPOT] = spotCandles(T + 15 * MIN);
+    b.runner.start();
+    await settle();
+    // Not from the last heartbeat (12:10:10, less the lag allowance): from the done job's end.
+    expect(b.jobs()[1]).toMatchObject({ status: 'done', startedAt: T + 601_000, endedAt: T + 15 * MIN });
+  });
+
+  it('fresh trades held before a poll-only gap closes: past 10 minutes they are dropped and the next trade bounds the replay', async () => {
+    const t = setup();
+    withStop(t, [limit('buy', '99.2', '0.1')]);
+    t.clock.now += 8000; // a pause: no timer ran
+    t.market.trade(SYMBOL, trade(700, '100', '0.1')); // held: the pause's gap closes only at a poll
+    t.clock.now += 10 * MIN; // and no poll ran
+    t.market.trade(SYMBOL, trade(701, '100', '0.1'));
+    t.clock.advance(1000);
+    await settle();
+    expect(t.jobs()).toEqual([expect.objectContaining({ status: 'done', endTradeId: 701 })]);
+    expect(t.logs.some((l) => l.includes('held back before its gap closed; dropped'))).toBe(true);
+  });
+
   it('a gap closing only at a poll (after a pause) holds the fresh trades meanwhile for the run, so the cursor never skips the gap', async () => {
     const t = setup();
     withStop(t, [limit('buy', '99.2', '0.1')]);
@@ -363,6 +422,26 @@ describe('catch-up: perps', () => {
     expect(notice).toContain('Long 0.1 BTC liquidated at 76353.31325301');
     expect(b.runner.gate(PERP)).toBe('live');
     expect(b.fatal).toEqual([]);
+  });
+
+  it('transfers out of the leverage wallet are refused while a perp key catches up; deposits and transfers into it are not', async () => {
+    const t = setup();
+    withLong(t);
+    t.runner.deposit('spot', D('100'));
+    t.perp.setFresh(SYMBOL, false);
+    t.clock.advance(2 * MIN);
+    const release = t.history.hold();
+    t.perp.setFresh(SYMBOL, true);
+    t.clock.advance(1000);
+    expect(t.runner.gate(PERP)).toBe('catching_up');
+    expect(() => t.runner.transfer('leverage', 'spot', D('1'))).toThrow(
+      'Catching up after a data gap; transfers from the leverage wallet resume when it is done',
+    );
+    expect(t.runner.deposit('leverage', D('1')).ok).toBe(true);
+    expect(t.runner.transfer('spot', 'leverage', D('1')).ok).toBe(true);
+    release();
+    await settle();
+    expect(t.runner.transfer('leverage', 'spot', D('1')).ok).toBe(true);
   });
 
   it('a mark held back during the run past the liquidation price liquidates after it, at the liquidation price as the mark (the catch-up split)', async () => {
@@ -460,6 +539,7 @@ function fakeFundingRest() {
         calls.push(q);
         return answers.shift() ?? [];
       },
+      fundingInfo: async () => [],
     },
   };
 }
@@ -467,7 +547,10 @@ function fakeFundingRest() {
 /** A runner and a FundingService over it, bound to each other as main.ts binds them. */
 function withFunding(opts: { db?: Db; clock: FakeClock; history?: FakeHistory }) {
   let funding: FundingService | null = null;
-  const hooks = { knownTimes: (s: string) => funding!.knownTimes(s), caughtUp: (s: string) => funding!.caughtUp(s) };
+  const hooks: FundingHooks = {
+    fundingTimes: (s, start, end) => funding!.fundingTimes(s, start, end),
+    caughtUp: (s, since) => funding!.caughtUp(s, since),
+  };
   const t = setup({ db: opts.db, clock: opts.clock, history: opts.history, funding: hooks });
   const f = fakeFundingRest();
   funding = new FundingService({ rest: f.rest, sim: t.runner, market: t.perp, now: () => t.clock.now, setTimer: t.clock.setTimer, logger: t.logger });
@@ -512,6 +595,52 @@ describe('catch-up and funding windows', () => {
     await t.run(FUNDING_POLL_MS * 3);
     expect(t.eventsOf('funding')).toHaveLength(1);
     expect(t.fatal).toEqual([]);
+  });
+
+  it('a run held past a whole funding window by REST failures: the window is opened after it on the (unchanged) size, closed and settled once', async () => {
+    const t = withFunding({ clock: new FakeClock(T) });
+    withLong(t);
+    t.funding.start();
+    t.perp.mark(SYMBOL, '80000', FT);
+    await t.run(FT - 3 * MIN - t.clock.now);
+    t.perp.setFresh(SYMBOL, false); // a gap from 12:07 to 12:09:01, before the window
+    t.history.markList.BTCUSDT = minutes(FT - 4 * MIN, FT, '79995', '80005');
+    for (let i = 0; i < 5; i++) t.history.failures.push(new Error('Binance /fapi/v1/klines HTTP 429: '));
+    await t.run(2 * MIN);
+    t.perp.setFresh(SYMBOL, true);
+    await t.run(1000);
+    expect(t.runner.gate(PERP)).toBe('catching_up');
+    await t.run(3 * MIN); // fails at −59, −54, −44, −24 and +16 s; succeeds at +76 s, after the window
+    expect(t.runner.gate(PERP)).toBe('live');
+    expect(t.jobs()).toEqual([expect.objectContaining({ status: 'done', attempts: 5 })]);
+    t.f.answers.push(settled());
+    await t.run(FUNDING_POLL_MS + 5000);
+    expect(t.eventsOf('funding').map((e) => [e.payload.fundingTime, e.payload.qty, e.payload.amount])).toEqual([[FT, '0.1', '-0.8']]);
+    await t.run(FUNDING_POLL_MS * 3);
+    expect(t.eventsOf('funding')).toHaveLength(1);
+    expect(t.fatal).toEqual([]);
+  });
+
+  it('a restart over a funding time whose settlement is published only later: projected from the next one, closed by the run, polled until it appears, applied once', async () => {
+    const a = withFunding({ clock: new FakeClock(FT - 3 * MIN) });
+    withLong(a);
+    a.runner.stop(); // the last heartbeat at 12:07
+
+    const history = new FakeHistory(); // FT's settlement is not published yet
+    history.markList.BTCUSDT = minutes(FT - 4 * MIN, FT + 2 * MIN, '79995', '80005');
+    const b = withFunding({ db: a.db, clock: new FakeClock(FT + 2 * MIN), history });
+    b.runner.start();
+    b.funding.start();
+    b.perp.mark(SYMBOL, '80000', FT + 8 * HOUR); // the mark stream names only the next funding time
+    await settle();
+    expect(b.runner.gate(PERP)).toBe('live');
+    // FT = the next time less one 8 h interval: modelled by the run, waiting for its rate.
+    expect(b.sim.perp.state.funding.pending.map((w) => [w.fundingTime, w.long.max.toString()])).toEqual([[FT, '0.1']]);
+    b.f.answers.push([], settled());
+    await b.run(FUNDING_POLL_MS + 5000);
+    expect(b.eventsOf('funding').map((e) => [e.payload.fundingTime, e.payload.qty, e.payload.amount])).toEqual([[FT, '0.1', '-0.8']]);
+    await b.run(FUNDING_POLL_MS * 3);
+    expect(b.eventsOf('funding')).toHaveLength(1);
   });
 
   it('a window a run left open for the live path is closed and settled once, though the funding service never saw its time', async () => {

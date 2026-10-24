@@ -314,7 +314,10 @@ export function runnerHarness(
     clock?: FakeClock;
     symbols?: string[];
     history?: CatchUpHistory;
-    funding?: { knownTimes(symbol: string): number[]; caughtUp(symbol: string): void };
+    funding?: {
+      fundingTimes(symbol: string, start: number, end: number): Promise<number[]>;
+      caughtUp(symbol: string, since: number): void;
+    };
   } = {},
 ) {
   const symbols = opts.symbols ?? ['BTCUSDT'];

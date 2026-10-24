@@ -742,6 +742,18 @@ export function loadPendingJobs(db: Db, seasonId: number): CatchUpJob[] {
   return rows.map(reviveJob);
 }
 
+/** Per market and symbol, the season's latest done catch-up job. */
+export function latestDoneJobs(db: Db, seasonId: number): CatchUpJob[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM catchup_jobs WHERE id IN (
+         SELECT max(id) FROM catchup_jobs WHERE season_id = ? AND status = 'done' GROUP BY market, symbol)
+       ORDER BY id`,
+    )
+    .all(seasonId) as JobRow[];
+  return rows.map(reviveJob);
+}
+
 /** Every catch-up job of the season, oldest first. */
 export function loadJobs(db: Db, seasonId: number): CatchUpJob[] {
   return (db.prepare('SELECT * FROM catchup_jobs WHERE season_id = ? ORDER BY id').all(seasonId) as JobRow[]).map(reviveJob);

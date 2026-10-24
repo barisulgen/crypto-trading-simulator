@@ -19,6 +19,10 @@ const QUERY_MS = 60_000;
 const QUERY_LIMIT = 10;
 /** While a symbol's windows are left to catch-up, an open or close that fell due is tried again this often. */
 export const FUNDING_DEFER_RETRY_MS = 1000;
+/** The funding interval of a symbol fundingInfo does not list (Binance's default). */
+export const DEFAULT_FUNDING_INTERVAL_MS = 8 * 3_600_000;
+/** The funding intervals (fundingInfo) are read again when older than this. */
+const INTERVALS_MAX_AGE_MS = 3_600_000;
 
 /** A funding window by symbol and funding time. */
 export interface FundingRef {
@@ -28,8 +32,11 @@ export interface FundingRef {
 
 /** What the service does to the account: each call is one engine call, persisted (the runner). */
 export interface FundingSim {
-  /** The windows open now and those closed and waiting for their settled rate, as saved. */
-  fundingWindows(): { open: FundingRef[]; pending: FundingRef[] };
+  /**
+   * The windows open now and those closed and waiting for their settled rate, as saved, and the
+   * funding times already applied (absent: none known).
+   */
+  fundingWindows(): { open: FundingRef[]; pending: FundingRef[]; applied?: FundingRef[] };
   openFundingWindow(symbol: string, fundingTime: number): void;
   closeFundingWindow(symbol: string, fundingTime: number): void;
   applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal): unknown;
@@ -42,7 +49,7 @@ export interface FundingSim {
 }
 
 export interface FundingServiceDeps {
-  rest: { fundingRate(q: FundingRateQuery): Promise<unknown> };
+  rest: { fundingRate(q: FundingRateQuery): Promise<unknown>; fundingInfo(): Promise<unknown> };
   sim: FundingSim;
   /** The mark stream: 'mark' (symbol, { nextFundingTime }). */
   market: {
@@ -64,8 +71,12 @@ export interface FundingServiceDeps {
  * time (at once if that has passed) and every window waiting for its rate is polled again at once.
  * A funding time first seen after its window closed (the server was down) is left to catch-up.
  * While a symbol's data is in a gap or catching up (fundingDeferred), its due opens and closes wait
- * and its polls stop; once its catch-up has run (caughtUp), every window found open or waiting in
- * the state is closed on time and polled, whoever opened it, so each is settled exactly once.
+ * and its polls stop; once its catch-up has run (caughtUp), the windows that fell due while it
+ * caught up are opened, and every window found open or waiting in the state is closed on time and
+ * polled, whoever opened it, so each is settled exactly once. For a catch-up run, the funding times
+ * of its gap are the known ones and those projected back from the latest known one by the
+ * symbol's funding interval (fundingTimes), so one whose settlement is not published yet is still
+ * modelled, and then polled here until it is.
  */
 export class FundingService {
   private readonly d: FundingServiceDeps;
@@ -81,6 +92,8 @@ export class FundingService {
   private readonly polling = new Set<string>();
   /** Refusals of the account already logged, by message: each is logged once. */
   private readonly refusals = new Set<string>();
+  /** Each listed symbol's funding interval (fundingInfo), and when it was read; null before the first read. */
+  private intervals: { bySymbol: Map<string, number>; at: number } | null = null;
   private started = false;
   private readonly markListener = (symbol: string, mark: { nextFundingTime: number }) =>
     this.onMark(symbol, mark.nextFundingTime);
@@ -97,20 +110,70 @@ export class FundingService {
   }
 
   /**
-   * The symbol's catch-up has been applied: a window of a known funding time that is due now
-   * (T − 15 s ≤ now < T + 15 s) and not open yet opens, before anything after the gap reaches the
-   * position; then every window open or waiting in the state is tracked (track).
+   * The symbol's catch-up has been applied; its position has not changed since `since` (the end of
+   * the interval the run covered: nothing trades while catching up). Every known funding time
+   * whose window opened from `since` on (since ≤ T − 15 s ≤ now) and is not open, waiting for its
+   * rate or applied, opens now, in time order, seeded with the position as it is: exactly what was
+   * held through it. That is before anything after the catch-up reaches the position; a window
+   * whose close has passed is closed by the next engine call. A time older than a window open now
+   * cannot be opened without closing that one early, and is logged. Then every window open or
+   * waiting in the state is tracked (track), so the overdue ones close at once and are polled.
    */
-  caughtUp(symbol: string): void {
+  caughtUp(symbol: string, since: number): void {
     if (!this.started) return;
     const now = this.d.now();
+    const { open, pending, applied = [] } = this.d.sim.fundingWindows();
+    const handled = new Set([...open, ...pending, ...applied].map(refKey));
     for (const fundingTime of this.knownTimes(symbol)) {
-      if (now >= fundingTime - FUNDING_WINDOW_MS && now < fundingTime + FUNDING_WINDOW_MS) {
-        const ref = { symbol, fundingTime };
-        this.safely(ref, () => this.d.sim.openFundingWindow(symbol, fundingTime));
+      const ref = { symbol, fundingTime };
+      const opensAt = fundingTime - FUNDING_WINDOW_MS;
+      if (opensAt < since || opensAt > now || handled.has(refKey(ref))) continue;
+      const later = this.d.sim.fundingWindows().open.find((w) => w.symbol === symbol);
+      if (later && later.fundingTime > fundingTime) {
+        this.d.logger.warn(`Funding ${symbol} at ${iso(fundingTime)}: its window was missed while catching up; not applied`);
+        continue;
       }
+      this.safely(ref, () => this.d.sim.openFundingWindow(symbol, fundingTime));
     }
     this.track();
+  }
+
+  /**
+   * The funding times of `symbol` from `start` to `end`: the known ones, and those projected back
+   * from the latest known one in steps of the symbol's funding interval (fundingInfo; 8 h for a
+   * symbol it does not list). Never estimated: a projected time is only modelled, and settled once
+   * Binance publishes its settlement. With no time known yet, only the known ones (none).
+   * Throws when the intervals cannot be read (the run is retried).
+   */
+  async fundingTimes(symbol: string, start: number, end: number): Promise<number[]> {
+    const known = this.knownTimes(symbol);
+    const out = new Set(known.filter((t) => t >= start && t <= end));
+    const anchor = known.at(-1);
+    if (anchor !== undefined) {
+      const step = (await this.fundingIntervals()).get(symbol) ?? DEFAULT_FUNDING_INTERVAL_MS;
+      for (let t = anchor; t >= start; t -= step) if (t <= end) out.add(t);
+    }
+    return [...out].sort((a, b) => a - b);
+  }
+
+  /** Each listed symbol's funding interval in ms, read through the funding lane at most hourly (the last read if a new one fails). */
+  private async fundingIntervals(): Promise<Map<string, number>> {
+    const now = this.d.now();
+    if (this.intervals && now - this.intervals.at < INTERVALS_MAX_AGE_MS) return this.intervals.bySymbol;
+    try {
+      const rows = await this.d.rest.fundingInfo();
+      if (!Array.isArray(rows)) throw new Error('fundingInfo did not return a list');
+      const bySymbol = new Map<string, number>();
+      for (const r of rows) {
+        const hours = Number(r?.fundingIntervalHours);
+        if (typeof r?.symbol === 'string' && Number.isFinite(hours) && hours > 0) bySymbol.set(r.symbol, hours * 3_600_000);
+      }
+      this.intervals = { bySymbol, at: now };
+      return bySymbol;
+    } catch (e) {
+      if (this.intervals) return this.intervals.bySymbol;
+      throw e;
+    }
   }
 
   /**
@@ -195,8 +258,10 @@ export class FundingService {
    */
   private open(ref: FundingRef, waited = false): void {
     if (this.d.now() >= ref.fundingTime + FUNDING_WINDOW_MS) {
-      const why = waited ? 'its data was interrupted through its window' : 'the server was paused through its window';
-      this.d.logger.warn(`Funding ${ref.symbol} at ${iso(ref.fundingTime)}: ${why}; left to catch-up`);
+      // One that waited for catch-up is opened by caughtUp, on the size held through it.
+      if (!waited) {
+        this.d.logger.warn(`Funding ${ref.symbol} at ${iso(ref.fundingTime)}: the server was paused through its window; left to catch-up`);
+      }
       return;
     }
     if (this.deferred(ref.symbol)) {

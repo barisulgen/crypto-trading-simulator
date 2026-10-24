@@ -50,15 +50,17 @@ export class FeedGaps {
    * the last heartbeat (the server may have been down since then). A saved gap keeps its reason
    * and trade cursor; otherwise the reason is Server offline and the cursor the one just loaded.
    * The seeds are saved in one transaction, so a crash before the data is fresh again still keeps
-   * the earliest start. Keys of other markets in open_gaps are left as they are.
+   * the earliest start. Keys of other markets in open_gaps are left as they are. A key's `floors`
+   * entry is the latest its gap may start.
    */
-  seed(keys: MarketKey[], lastAlive: number | null): void {
+  seed(keys: MarketKey[], lastAlive: number | null, floors: Map<MarketKey, number> = new Map()): void {
     const now = this.d.now();
     const saved = new Map(loadOpenGaps(this.d.db, this.d.seasonId).map((g) => [marketKey(g.market, g.symbol), g]));
     for (const key of keys) {
       const row = saved.get(key);
-      if (row === undefined && lastAlive === null) continue;
-      const at = Math.min(row?.startedAt ?? Infinity, lastAlive ?? Infinity, now);
+      const floor = floors.get(key);
+      if (row === undefined && lastAlive === null && floor === undefined) continue;
+      const at = Math.min(row?.startedAt ?? Infinity, lastAlive ?? Infinity, floor ?? Infinity, now);
       this.open.set(key, {
         at,
         reason: row?.reason ?? OFFLINE_REASON,

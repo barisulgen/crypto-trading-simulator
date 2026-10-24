@@ -468,7 +468,7 @@ describe('EngineRunner', () => {
     expect(c.fatal).toEqual([]);
   });
 
-  it('restart within the cancel delay: the cancel arrives at its own time', () => {
+  it('restart within the cancel delay: the cancel arrives at its own time', async () => {
     const a = setup();
     a.runner.start();
     a.runner.deposit('spot', D('1000'));
@@ -481,6 +481,10 @@ describe('EngineRunner', () => {
 
     const b = setup({ db: a.db, clock: a.clock });
     expect(b.orderRow(order.id)!.status).toBe('open');
+    // The first poll: fresh, the restart's gap caught up (live before the cancel's arrival).
+    b.runner.start();
+    await settle();
+    expect(b.runner.gate(marketKey('spot', 'BTCUSDT'))).toBe('live');
     b.clock.advance(at - b.clock.now - 1);
     expect(b.orderRow(order.id)!.status).toBe('open');
     b.clock.advance(1);
@@ -548,7 +552,7 @@ describe('EngineRunner', () => {
     expect(b.fatal).toEqual([]);
   });
 
-  it('restart inside the delays: the cancel timer of a held-back order cancels it, not its stale old arrival', () => {
+  it('restart inside the delays: the cancel timer of a held-back order cancels it, not its stale old arrival', async () => {
     const a = setup();
     a.runner.start();
     a.runner.deposit('spot', D('1000'));
@@ -562,12 +566,14 @@ describe('EngineRunner', () => {
     const b = setup({ db: a.db, clock: a.clock, market });
     b.runner.start();
     b.clock.advance(200);
+    // The cancel's arrival finds the data stale: it waits for the gap's catch-up.
+    expect(b.orderRow(order.id)!.status).toBe('pending');
+    market.setFresh('BTCUSDT', true);
+    b.clock.advance(1000);
+    await settle();
     expect(b.orderRow(order.id)!.status).toBe('cancelled');
     expect(b.eventsOf('order_cancelled').map((e) => e.payload.reason)).toEqual(['user']);
     expect(b.eventsOf('order_rejected')).toEqual([]);
-    market.setFresh('BTCUSDT', true);
-    b.clock.advance(1000);
-    expect(b.orderRow(order.id)!.status).toBe('cancelled');
     expect(b.eventsOf('fill')).toEqual([]);
     expect(b.fatal).toEqual([]);
   });

@@ -37,16 +37,19 @@ export interface CatchUpHost {
   /** The trigger minutes of the key's triggered orders still waiting to execute. */
   triggerMinutes(key: MarketKey): number[];
   needs(key: MarketKey, from: number, to: number, candles: Candle1m[]): CatchUpNeeds;
-  /** The funding times a perp run models though they may have no settlement yet. */
-  fundingTimes(symbol: string): number[];
+  /** The funding times a perp run over [from, to] models though they may have no settlement yet. */
+  fundingTimes(symbol: string, from: number, to: number): Promise<number[]>;
   /** Throws when the exchange rules (perps: and leverage tiers) the run needs are not loaded. */
   assertReady(key: MarketKey): void;
   /** The closed gaps and the job changes they make, in one transaction. */
   commitGaps(gaps: FeedGap[], jobs: JobWrite[]): void;
   /** The run's events, the state it leaves and the job's `done`, in one transaction. */
   apply(input: CatchUpInput, done: Extract<JobWrite, { kind: 'done' }>): void;
-  /** After the run: the held-back trades and marks are handled and the key goes live. */
-  resume(key: MarketKey, trades: AggTrade[], marks: { low: Decimal; high: Decimal } | null): void;
+  /**
+   * After the run: the held-back trades and marks are handled and the key goes live. `since`: the
+   * end of the interval the run covered, from which the key's position has not changed.
+   */
+  resume(key: MarketKey, trades: AggTrade[], marks: { low: Decimal; high: Decimal } | null, since: number): void;
   recordFailure(jobId: number, error: string): void;
   extendJob(jobId: number, endedAt: number): void;
   /** Called with an error that must stop the runner (a run that did not end in a known way). */
@@ -96,8 +99,11 @@ export class CatchUpService {
   private readonly catching = new Map<MarketKey, Catching>();
   /** Keys with a pending job saved. */
   private readonly pending = new Set<MarketKey>();
-  /** Fresh live trades of a key whose gap is still open (it closes only at a health poll), held for its run. */
-  private readonly held = new Map<MarketKey, AggTrade[]>();
+  /**
+   * Fresh live trades of a key whose gap is still open (it closes only at a health poll), held for
+   * its run, and when the first arrived.
+   */
+  private readonly held = new Map<MarketKey, { trades: AggTrade[]; since: number }>();
   private stopped = false;
 
   constructor(deps: CatchUpServiceDeps) {
@@ -191,17 +197,28 @@ export class CatchUpService {
     c.trades.push(trade);
   }
 
-  /** A fresh live trade of a key whose gap is still open but closes only at a health poll; held for its run. */
+  /**
+   * A fresh live trade of a key whose gap is still open but closes only at a health poll; held for
+   * its run. Past 50 000 trades or 10 minutes, as while catching up, the held trades are dropped and
+   * this one is the first held: the job, which runs to the poll that closes the gap, replays them.
+   */
   holdBeforeClose(key: MarketKey, trade: AggTrade): void {
-    const list = this.held.get(key) ?? [];
-    if (list.length >= BUFFER_MAX_TRADES) return;
-    list.push(trade);
+    const now = this.d.now();
+    const held = this.held.get(key);
+    if (held && (held.trades.length >= BUFFER_MAX_TRADES || now - held.since >= BUFFER_MAX_MS)) {
+      this.d.logger.warn(
+        `${label(key)}: ${held.trades.length} live trades held back before its gap closed; dropped, its catch-up replays them`,
+      );
+      this.held.delete(key);
+    }
+    const list = this.held.get(key) ?? { trades: [], since: now };
+    list.trades.push(trade);
     this.held.set(key, list);
   }
 
   /** The trades held for the key before its gap closed, in receive order; no longer held. */
   takeHeld(key: MarketKey): AggTrade[] {
-    const list = this.held.get(key) ?? [];
+    const list = this.held.get(key)?.trades ?? [];
     this.held.delete(key);
     return list;
   }
@@ -311,13 +328,15 @@ export class CatchUpService {
       if (needs.markCandles) input.markCandles = await h.markCandles(symbol, from, to);
       if (needs.funding) {
         input.funding = await h.funding(symbol, from - FUNDING_WINDOW_MS, to);
-        input.fundingTimes = this.d.host.fundingTimes(symbol);
+        input.fundingTimes = await this.d.host.fundingTimes(symbol, from, to);
       }
       if (from < this.d.now() - PERP_TRADES_WINDOW_MS) {
         input.trades = 'unavailable';
         return input;
       }
     }
+    // With no minute to replay, endTradeId is unused: it stays the first held trade, or null when
+    // none is held yet (finish takes one held meanwhile); no request is spent on it.
     if (needs.tradeMinutes.length === 0) return input;
     // Replayed trades stop before the first trade the live path processes after the run: the
     // first held back, or else the one after the latest trade now.
@@ -341,7 +360,7 @@ export class CatchUpService {
     this.catching.delete(key);
     this.pending.delete(key);
     const marks = c.low !== null && c.high !== null ? { low: c.low, high: c.high } : null;
-    this.d.host.resume(key, c.trades, marks);
+    this.d.host.resume(key, c.trades, marks, c.job.endedAt);
   }
 
   private failed(key: MarketKey, c: Catching, e: unknown): void {

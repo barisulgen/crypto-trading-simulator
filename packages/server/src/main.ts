@@ -117,7 +117,10 @@ const runner = new EngineRunner({
   // Catch-up reads history through the same clients, in the bulk lane of each weight budget.
   history: new BinanceHistory(rest, futuresRest),
   // Bound late: the funding service is built over the runner, and is only called once it runs.
-  funding: { knownTimes: (s) => funding.knownTimes(s), caughtUp: (s) => funding.caughtUp(s) },
+  funding: {
+    fundingTimes: (s, start, end) => funding.fundingTimes(s, start, end),
+    caughtUp: (s, since) => funding.caughtUp(s, since),
+  },
 });
 const funding = new FundingService({
   rest: futuresRest,

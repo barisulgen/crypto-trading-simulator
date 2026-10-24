@@ -23,6 +23,7 @@ function fakeRest(clock: FakeClock) {
       if (a instanceof Error) throw a;
       return a;
     },
+    fundingInfo: async () => [],
   };
   return { rest, answers, calls };
 }
@@ -39,7 +40,10 @@ async function setup(opts: { db?: ReturnType<typeof runnerHarness>['db']; clock?
   const perpMarket = new TestPerpMarket();
   // Bound late, as main.ts binds them: the service is built over the runner.
   let funding: FundingService | null = null;
-  const hooks = { knownTimes: (s: string) => funding!.knownTimes(s), caughtUp: (s: string) => funding!.caughtUp(s) };
+  const hooks = {
+    fundingTimes: (s: string, start: number, end: number) => funding!.fundingTimes(s, start, end),
+    caughtUp: (s: string, since: number) => funding!.caughtUp(s, since),
+  };
   const t = runnerHarness({ db: opts.db, clock, perpMarket, funding: hooks });
   t.runner.start();
   if (opts.long ?? true) {
