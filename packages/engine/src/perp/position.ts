@@ -1,5 +1,6 @@
 import { D, Decimal, roundDown8 } from '../decimal.ts';
 import type { OrderStatus, PriceLevel } from '../types.ts';
+import { trackFundingWindow } from './funding.ts';
 import { perpFee } from './math.ts';
 import { cancelOrder, liveOrders, remainingQty } from './orders.ts';
 import { creditUsdt, debitUsdt, freeUsdt, putOrder, releaseUsdt, spendUsdt } from './state.ts';
@@ -152,6 +153,7 @@ export function applyOpeningFill(
     };
   }
   s.positions[order.symbol] = position;
+  trackFundingWindow(s, order.symbol);
 
   const fill = makeFill(order, t, fee, { positionId: position.id, marginIn, uncovered: null, realizedPnl: null }, ctx);
   const after: PerpOrder = {
@@ -200,6 +202,7 @@ export function applyReducingFill(
   const closed = position.qty.isZero() ? position : null;
   if (closed) delete s.positions[order.symbol];
   else s.positions[order.symbol] = position;
+  trackFundingWindow(s, order.symbol);
 
   const fill = makeFill(
     order,

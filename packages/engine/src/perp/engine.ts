@@ -10,6 +10,7 @@ import {
   UNKNOWN_ORDER_TYPE,
 } from '../spot/engine.ts';
 import type { ActionResult, AggTrade } from '../types.ts';
+import { applyFunding, closeFundingWindow, openFundingWindow } from './funding.ts';
 import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import { checkMark, isolatedModel } from './liquidation.ts';
 import type { LiquidationModel } from './liquidation.ts';
@@ -151,6 +152,29 @@ export class PerpEngine {
   onMark(symbol: string, mark: Decimal, ctx: PerpCtx): { events: PerpEvent[]; warnings: MarginWarning[] } {
     if (!ctx.market.isMarkFresh(symbol)) return { events: [], warnings: [] };
     return checkMark(this.s, symbol, mark, this.model, ctx);
+  }
+
+  /**
+   * Open the symbol's funding window at fundingTime − 15 s: from now until it closes, every change
+   * to the position widens the sizes the funding is settled on.
+   */
+  openFundingWindow(symbol: string, fundingTime: number, ctx: PerpCtx): void {
+    openFundingWindow(this.s, symbol, fundingTime, ctx);
+  }
+
+  /** Close the symbol's funding window at fundingTime + 15 s; it waits for its settled rate. */
+  closeFundingWindow(symbol: string, fundingTime: number, ctx: PerpCtx): void {
+    closeFundingWindow(this.s, symbol, fundingTime, ctx);
+  }
+
+  /**
+   * Apply the funding Binance settled at `fundingTime`, at its settled rate and the mark price at
+   * settlement; never an estimate. Payers pay on the largest size held in the window, from the
+   * position's margin first; receivers receive on the smallest, into free leverage USDT. Applied
+   * once per (symbol, fundingTime); a repeat returns []. It never liquidates: the next mark does.
+   */
+  applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal, ctx: PerpCtx): PerpEvent[] {
+    return applyFunding(this.s, symbol, fundingTime, rate, markPrice, ctx);
   }
 
   /**

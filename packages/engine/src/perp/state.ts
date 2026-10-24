@@ -10,8 +10,11 @@ export const DEFAULT_LEVERAGE = 20;
 
 /** Sizes held on one side during a funding window. */
 export interface FundingSide {
+  /** The largest size held at any moment of the window: what a payer pays on. */
   max: Decimal;
+  /** The smallest size held at any moment of the window: what a receiver receives on. */
   min: Decimal;
+  /** The last position held on this side during the window; null if none was. */
   positionId: string | null;
 }
 

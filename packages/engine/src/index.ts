@@ -35,6 +35,7 @@ export type {
   WarnLevel,
 } from './perp/types.ts';
 export { PerpEngine } from './perp/engine.ts';
+export { FUNDING_WINDOW_MS } from './perp/funding.ts';
 export { isolatedModel } from './perp/liquidation.ts';
 export type { LiquidationModel } from './perp/liquidation.ts';
 export { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './perp/rules.ts';

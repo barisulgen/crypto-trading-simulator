@@ -228,6 +228,28 @@ export type PerpEvent =
   | { type: 'fill'; market: 'perp'; time: number; fill: PerpFill; order: PerpOrder; consumed?: PriceLevel[] }
   | { type: 'position_opened'; market: 'perp'; time: number; position: Position }
   /**
+   * Funding settled at `fundingTime` on `qty` of the position's side, at the settled rate and the
+   * mark price at settlement. `amount` is negative when paid. A payment comes from the position's
+   * margin while the position exists (target 'margin'), then from free leverage USDT; a receipt
+   * goes to free leverage USDT (target 'wallet'). `uncollected` is the part of a payment neither
+   * could cover; null when none.
+   */
+  | {
+      type: 'funding';
+      market: 'perp';
+      time: number;
+      symbol: string;
+      positionId: string;
+      fundingTime: number;
+      rate: Decimal;
+      markPrice: Decimal;
+      qty: Decimal;
+      side: PositionSide;
+      amount: Decimal;
+      target: 'margin' | 'wallet';
+      uncollected: Decimal | null;
+    }
+  /**
    * An isolated position was liquidated at the mark: the whole margin is lost (marginLost), split
    * into the trading loss at the mark, the liquidation fee, and any remainder, also lost. The
    * leverage wallet outside the margin is not touched.

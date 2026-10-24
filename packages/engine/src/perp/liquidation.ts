@@ -1,5 +1,6 @@
 import { D } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
+import { trackFundingWindow } from './funding.ts';
 import { bracketsOrNull } from './market.ts';
 import { liquidationPrice, liquidationSplit, maintenanceMargin, marginBalance, marginRatio } from './math.ts';
 import { cancelOrder, liveOrders, remainingQty } from './orders.ts';
@@ -94,6 +95,7 @@ export function liquidate(
     cancelledOrderIds.push(o.id);
   }
   delete s.positions[symbol];
+  trackFundingWindow(s, symbol);
 
   const known = liquidationSplit({
     margin: held.margin,
