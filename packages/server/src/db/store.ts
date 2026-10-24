@@ -56,6 +56,41 @@ export interface OpenGap {
   lastTradeIdBefore: number | null;
 }
 
+/**
+ * A catch-up job: an interval of one market and symbol whose missed history is applied once, by
+ * one run; once done it never runs again.
+ */
+export interface CatchUpJob {
+  id: number;
+  market: Market;
+  symbol: string;
+  /** The interval the run covers (see mergeCatchUpJob). */
+  startedAt: number;
+  endedAt: number;
+  /** The trade cursor when the interval began: replayed trades come after it. */
+  lastTradeIdBefore: number | null;
+  /** The first trade id the live path processes after the interval; set when the run is applied. */
+  endTradeId: number | null;
+  status: 'pending' | 'done';
+  attempts: number;
+  lastError: string | null;
+  createdAt: number;
+  doneAt: number | null;
+}
+
+/** A change to the catch-up jobs, written in persist's transaction. */
+export type JobWrite =
+  | {
+      kind: 'merge';
+      market: Market;
+      symbol: string;
+      startedAt: number;
+      endedAt: number;
+      lastTradeIdBefore: number | null;
+      now: number;
+    }
+  | { kind: 'done'; id: number; endTradeId: number | null; now: number };
+
 export interface HistoryRow {
   id: number;
   time: number;
@@ -356,7 +391,8 @@ function refuseUnloadedPerpState(db: Db, seasonId: number): void {
  * call, even with no events: pending -> open has none, but the order's row must still follow.
  * Orders written, spot and perp: those changed since the last call (takeDirty) and each one an
  * event names. Each feed gap becomes a feed_gap event and its open_gaps row is deleted in the
- * same transaction. A call with events, changed orders, gaps, or a perp state (positions, leverage
+ * same transaction, and each catch-up job change (`jobs`: see writeJob) is written in it too. A
+ * call with events, changed orders, gaps, job changes, or a perp state (positions, leverage
  * settings, funding state) that differs from the one last saved or loaded is a commit: it also
  * writes the balances, basis, account, trade cursors, every open position (deleting the rows of
  * positions no longer open), every leverage setting and the funding state. A call with none of
@@ -371,11 +407,12 @@ export function persist(
   seasonId: number,
   sim: SimEngine,
   events: SimEvent[],
-  extra: { feedGaps?: FeedGap[]; cursor?: boolean; now?: number } = {},
+  extra: { feedGaps?: FeedGap[]; cursor?: boolean; now?: number; jobs?: JobWrite[] } = {},
 ): boolean {
   const state = sim.spot.state;
   const perp = sim.perp.state;
   const gaps = extra.feedGaps ?? [];
+  const jobs = extra.jobs ?? [];
   const now = extra.now ?? events.reduce<number | null>((t, e) => (t === null || e.time > t ? e.time : t), null);
   if (now !== null) pruneAppliedFunding(perp.funding, now);
   const perpKey = perpStateKey(perp);
@@ -384,7 +421,8 @@ export function persist(
   const perpChanged = perpKey !== (savedKey ?? EMPTY_PERP_KEY);
   const dirty = takeDirty(state);
   const perpDirty = takePerpDirty(perp);
-  const changed = events.length > 0 || dirty.length > 0 || perpDirty.length > 0 || gaps.length > 0 || perpChanged;
+  const changed =
+    events.length > 0 || dirty.length > 0 || perpDirty.length > 0 || gaps.length > 0 || jobs.length > 0 || perpChanged;
   if (!changed && !extra.cursor) return false;
   const insEvent = db.prepare(
     'INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, ?, ?, ?, ?)',
@@ -510,6 +548,7 @@ export function persist(
       );
       delOpenGap.run(seasonId, g.market, g.symbol);
     }
+    for (const j of jobs) writeJob(db, seasonId, j);
   });
   try {
     write();
@@ -603,6 +642,123 @@ export function loadOpenGaps(db: Db, seasonId: number): OpenGap[] {
        FROM open_gaps WHERE season_id = ? ORDER BY market, symbol`,
     )
     .all(seasonId) as OpenGap[];
+}
+
+// ---- catch-up jobs ----
+
+interface JobRow {
+  id: number;
+  market: Market;
+  symbol: string;
+  started_at: number;
+  ended_at: number;
+  last_trade_id_before: number | null;
+  end_trade_id: number | null;
+  status: 'pending' | 'done';
+  attempts: number;
+  last_error: string | null;
+  created_at: number;
+  done_at: number | null;
+}
+
+function reviveJob(r: JobRow): CatchUpJob {
+  return {
+    id: r.id,
+    market: r.market,
+    symbol: r.symbol,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    lastTradeIdBefore: r.last_trade_id_before,
+    endTradeId: r.end_trade_id,
+    status: r.status,
+    attempts: r.attempts,
+    lastError: r.last_error,
+    createdAt: r.created_at,
+    doneAt: r.done_at,
+  };
+}
+
+/** The earlier of two trade cursors; null (no trade processed yet) is the earliest. */
+function earlierCursor(a: number | null, b: number | null): number | null {
+  return a === null || b === null ? null : Math.min(a, b);
+}
+
+/**
+ * Inside persist's transaction. 'merge': an interval of the market and symbol that needs a run.
+ * Its start is first clipped to the latest end of the done jobs it overlaps, so no interval is run
+ * twice; an interval left empty needs nothing. A pending job of the key is extended to the union
+ * of both, keeping the trade cursor of the earlier start; otherwise a pending job is created.
+ * 'done': the job's run was applied; a job that is not pending throws, rolling everything back,
+ * so a run is never applied twice.
+ */
+function writeJob(db: Db, seasonId: number, j: JobWrite): void {
+  if (j.kind === 'done') {
+    const r = db
+      .prepare(
+        `UPDATE catchup_jobs SET status = 'done', end_trade_id = ?, done_at = ?
+         WHERE id = ? AND season_id = ? AND status = 'pending'`,
+      )
+      .run(j.endTradeId, j.now, j.id, seasonId);
+    if (r.changes !== 1) throw new Error(`catch-up job ${j.id} is not pending; refusing to apply it again`);
+    return;
+  }
+  const done = db
+    .prepare(
+      `SELECT max(ended_at) AS end FROM catchup_jobs
+       WHERE season_id = ? AND market = ? AND symbol = ? AND status = 'done' AND started_at < ? AND ended_at > ?`,
+    )
+    .get(seasonId, j.market, j.symbol, j.endedAt, j.startedAt) as { end: number | null };
+  const from = Math.max(j.startedAt, done.end ?? -Infinity);
+  if (from >= j.endedAt) return;
+  const pending = db
+    .prepare(`SELECT * FROM catchup_jobs WHERE season_id = ? AND market = ? AND symbol = ? AND status = 'pending'`)
+    .get(seasonId, j.market, j.symbol) as JobRow | undefined;
+  if (!pending) {
+    db.prepare(
+      `INSERT INTO catchup_jobs (season_id, market, symbol, started_at, ended_at, last_trade_id_before, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    ).run(seasonId, j.market, j.symbol, from, j.endedAt, j.lastTradeIdBefore, j.now);
+    return;
+  }
+  const cursor =
+    from < pending.started_at
+      ? j.lastTradeIdBefore
+      : from > pending.started_at
+        ? pending.last_trade_id_before
+        : earlierCursor(j.lastTradeIdBefore, pending.last_trade_id_before);
+  db.prepare('UPDATE catchup_jobs SET started_at = ?, ended_at = ?, last_trade_id_before = ? WHERE id = ?').run(
+    Math.min(from, pending.started_at),
+    Math.max(j.endedAt, pending.ended_at),
+    cursor,
+    pending.id,
+  );
+}
+
+/** The season's pending catch-up jobs, at most one per market and symbol. */
+export function loadPendingJobs(db: Db, seasonId: number): CatchUpJob[] {
+  const rows = db
+    .prepare(`SELECT * FROM catchup_jobs WHERE season_id = ? AND status = 'pending' ORDER BY id`)
+    .all(seasonId) as JobRow[];
+  return rows.map(reviveJob);
+}
+
+/** Every catch-up job of the season, oldest first. */
+export function loadJobs(db: Db, seasonId: number): CatchUpJob[] {
+  return (db.prepare('SELECT * FROM catchup_jobs WHERE season_id = ? ORDER BY id').all(seasonId) as JobRow[]).map(reviveJob);
+}
+
+/** A failed run of a pending job: one more attempt, with its error. */
+export function recordJobFailure(db: Db, seasonId: number, id: number, error: string): void {
+  db.prepare(
+    `UPDATE catchup_jobs SET attempts = attempts + 1, last_error = ? WHERE id = ? AND season_id = ? AND status = 'pending'`,
+  ).run(error.slice(0, 500), id, seasonId);
+}
+
+/** A pending job's interval now ends at `endedAt` (never earlier than it did). */
+export function extendJob(db: Db, seasonId: number, id: number, endedAt: number): void {
+  db.prepare(
+    `UPDATE catchup_jobs SET ended_at = max(ended_at, ?) WHERE id = ? AND season_id = ? AND status = 'pending'`,
+  ).run(endedAt, id, seasonId);
 }
 
 // ---- invariants ----

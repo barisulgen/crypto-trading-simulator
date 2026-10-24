@@ -3,7 +3,7 @@ import { D } from '@sim/engine';
 import type { SpotOrderRequest } from '@sim/engine';
 import type { Db } from '../src/db/db.ts';
 import { submittedOrder } from '../src/runner.ts';
-import { liveStack } from './helpers.ts';
+import { liveStack, settle } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
 const FREEZE_MS = 20_000;
@@ -56,7 +56,8 @@ describe('after a freeze', () => {
     // which also ends the late trade's lag, with no further trade needed.
     t.depth(102, [['99.90', '0'], ['99.80', '0'], ['99.00', '0'], ['95.00', '5']]);
     expect(t.market.isFresh('BTCUSDT')).toBe(true);
-    t.clock.advance(1000); // the next health poll sees fresh data
+    t.clock.advance(1000); // the next health poll sees fresh data; the stop was open across the gap: catch-up first
+    await settle();
     expect(t.status()).toBe('filled');
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([
       expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /),
@@ -80,6 +81,7 @@ describe('after a freeze', () => {
     expect(t.status()).toBe('triggered');
     t.depth(102, [['99.90', '0'], ['99.80', '0'], ['99.00', '0'], ['95.00', '5']]);
     t.clock.advance(1000);
+    await settle();
     expect(t.status()).toBe('filled');
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([
       expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /),
@@ -96,6 +98,11 @@ describe('after a freeze', () => {
     t.depth(102, [['99.90', '0'], ['99.80', '0'], ['99.00', '0'], ['95.00', '5']]);
     expect(t.status()).toBe('triggered');
     t.trade(4, '95.10'); // the last buffered frame is current: now fresh on the new book
+    // The pause's gap closes only at a poll, and the stop was open across it: the trade is held
+    // for its catch-up, then executes the stop on the new book.
+    expect(t.status()).toBe('triggered');
+    t.clock.advance(1000);
+    await settle();
     expect(t.status()).toBe('filled');
 
     t.clock.advance(1000); // the late timer and poll find nothing left to do
@@ -126,7 +133,8 @@ describe('after a stall shorter than the silence limit', () => {
     expect(t.status()).toBe('triggered');
     t.depth(102, [['99.90', '0'], ['99.80', '0'], ['99.00', '0'], ['95.00', '5']]);
     expect(t.market.isFresh('BTCUSDT')).toBe(true);
-    t.clock.advance(1000); // the next health poll sees fresh data
+    t.clock.advance(1000); // the next health poll sees fresh data; the stop was open across the gap: catch-up first
+    await settle();
     expect(t.status()).toBe('filled');
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /)]);
     expect(gaps(t.db)).toEqual([{ startedAt: lastPoll, endedAt: t.clock.now, reason: PAUSED, lastTradeIdBefore: 2 }]);

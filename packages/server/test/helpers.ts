@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { D, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
-import type { AggTrade, BookSnapshot, Decimal, PriceLevel, Side } from '@sim/engine';
+import type { AggTrade, BookSnapshot, Candle1m, Decimal, Market, PriceLevel, Side } from '@sim/engine';
 import { FakeMarket } from '../../engine/test/fixtures.ts';
 import { FakePerpMarket } from '../../engine/test/perpFixtures.ts';
+import type { CatchUpHistory, Settlement } from '../src/catchup/history.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
 import { loadLedger, loadPerpState, loadSpotState, toJson } from '../src/db/store.ts';
@@ -18,6 +19,10 @@ import exchangeInfo from './fixtures/btcusdt-exchangeinfo.json' with { type: 'js
 
 export const WATCHDOG_MS = 5000;
 export const tick = () => new Promise<void>((r) => setImmediate(r));
+/** Lets every promise chain started so far (a catch-up run over FakeHistory, say) run to its end. */
+export async function settle(rounds = 20): Promise<void> {
+  for (let i = 0; i < rounds; i++) await tick();
+}
 
 /** Manual timers: nothing runs until the test fires it. */
 export function fakeTimers() {
@@ -226,6 +231,65 @@ export class TestPerpMarket extends FakePerpMarket {
   }
 }
 
+/**
+ * Binance history for catch-up, served from what the test sets: last-price candles per
+ * `${market}:${symbol}`, mark candles and funding per symbol, trades per `${market}:${symbol}`
+ * (each answer filtered to the range asked for). Every call is recorded in `calls`; while
+ * `failures` holds errors, each call throws the next one.
+ */
+export class FakeHistory implements CatchUpHistory {
+  candleList: Record<string, Candle1m[]> = {};
+  markList: Record<string, Candle1m[]> = {};
+  tradeList: Record<string, AggTrade[]> = {};
+  latest: Record<string, number | null> = {};
+  settlements: Record<string, Settlement[]> = {};
+  readonly calls: string[] = [];
+  readonly failures: Error[] = [];
+  /** While set, every call waits for it first: a run in flight the test holds. */
+  private blocked: Promise<void> | null = null;
+
+  /** Holds every later call until the returned function is called. */
+  hold(): () => void {
+    let release!: () => void;
+    this.blocked = new Promise<void>((r) => {
+      release = r;
+    });
+    return () => {
+      this.blocked = null;
+      release();
+    };
+  }
+
+  private async call(what: string): Promise<void> {
+    this.calls.push(what);
+    if (this.blocked) await this.blocked;
+    const e = this.failures.shift();
+    if (e) throw e;
+  }
+  async candles(market: Market, symbol: string, start: number, end: number): Promise<Candle1m[]> {
+    await this.call(`candles ${market}:${symbol} ${start} ${end}`);
+    const from = Math.floor(start / 60_000) * 60_000;
+    return (this.candleList[`${market}:${symbol}`] ?? []).filter((c) => c.openTime >= from && c.openTime <= end);
+  }
+  async markCandles(symbol: string, start: number, end: number): Promise<Candle1m[]> {
+    await this.call(`marks ${symbol} ${start} ${end}`);
+    const from = Math.floor(start / 60_000) * 60_000;
+    return (this.markList[symbol] ?? []).filter((c) => c.openTime >= from && c.openTime <= end);
+  }
+  async minuteTrades(market: Market, symbol: string, minute: number): Promise<AggTrade[]> {
+    await this.call(`trades ${market}:${symbol} ${minute}`);
+    return (this.tradeList[`${market}:${symbol}`] ?? []).filter((t) => t.time >= minute && t.time < minute + 60_000);
+  }
+  async latestTradeId(market: Market, symbol: string): Promise<number | null> {
+    await this.call(`latest ${market}:${symbol}`);
+    return this.latest[`${market}:${symbol}`] ?? null;
+  }
+  async funding(symbol: string, start: number, end: number): Promise<Settlement[]> {
+    await this.call(`funding ${symbol} ${start} ${end}`);
+    return (this.settlements[symbol] ?? []).filter((f) => f.time >= start && f.time <= end);
+  }
+}
+
 export const RUNNER_T0 = 1_700_000_000_000;
 export const RUNNER_FEES = {
   spot: { maker: D('0.001'), taker: D('0.001') },
@@ -243,7 +307,15 @@ export interface RunnerMsg {
  * 100 ms delays. Not started.
  */
 export function runnerHarness(
-  opts: { db?: Db; market?: TestMarket; perpMarket?: TestPerpMarket; clock?: FakeClock; symbols?: string[] } = {},
+  opts: {
+    db?: Db;
+    market?: TestMarket;
+    perpMarket?: TestPerpMarket;
+    clock?: FakeClock;
+    symbols?: string[];
+    history?: CatchUpHistory;
+    funding?: { knownTimes(symbol: string): number[]; caughtUp(symbol: string): void };
+  } = {},
 ) {
   const symbols = opts.symbols ?? ['BTCUSDT'];
   const db = opts.db ?? openDb(':memory:');
@@ -261,6 +333,7 @@ export function runnerHarness(
   const fatal: unknown[] = [];
   const logs: string[] = [];
   const logger = createLogger([], (_s, line) => logs.push(line));
+  const history = opts.history ?? new FakeHistory();
   const runner = new EngineRunner({
     db,
     seasonId,
@@ -276,6 +349,8 @@ export function runnerHarness(
     onBroadcast: (m) => sent.push(JSON.parse(toJson(m)) as RunnerMsg),
     onFatal: (e) => fatal.push(e),
     logger,
+    history,
+    funding: opts.funding,
   });
   const notices = () => sent.filter((m) => m.type === 'notice').map((m) => m.text as string);
   const orderRow = (id: string) =>
@@ -288,7 +363,7 @@ export function runnerHarness(
       symbol: string | null;
       payload: string;
     }[]).map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
-  return { db, clock, seasonId, market, perp, health, perpHealth, sim, engine, runner, sent, fatal, logs, logger, notices, orderRow, eventsOf };
+  return { db, clock, seasonId, market, perp, health, perpHealth, sim, engine, runner, sent, fatal, logs, logger, notices, orderRow, eventsOf, history };
 }
 
 type Levels = [string, string][];
@@ -351,6 +426,7 @@ export async function liveStack(t0: number) {
     onFatal: (e) => {
       throw e;
     },
+    history: new FakeHistory(),
   });
 
   feed.start();

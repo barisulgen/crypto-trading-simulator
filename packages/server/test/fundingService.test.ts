@@ -4,7 +4,10 @@ import type { Decimal } from '@sim/engine';
 import { FUNDING_POLL_MS, FUNDING_SLOW_POLL_MS, FundingService, FUNDING_UNSETTLED_LOG_MS } from '../src/funding/fundingService.ts';
 import type { FundingRef, FundingSim } from '../src/funding/fundingService.ts';
 import type { FundingRateQuery } from '../src/binance/futuresRest.ts';
-import { FakeClock, runnerHarness, tick, TestPerpMarket } from './helpers.ts';
+import { marketKey } from '../src/market/marketKey.ts';
+import { FakeClock, FakeHistory, runnerHarness, settle, tick, TestPerpMarket } from './helpers.ts';
+
+const perpKeyOf = (symbol: string) => marketKey('perp', symbol);
 
 /** 2026-10-24 08:00:00 UTC. */
 const T = Date.UTC(2026, 9, 24, 8, 0, 0);
@@ -34,7 +37,10 @@ const settled = (fundingTime = T + 7, fundingRate = '0.0001', markPrice = '80000
 async function setup(opts: { db?: ReturnType<typeof runnerHarness>['db']; clock?: FakeClock; long?: boolean } = {}) {
   const clock = opts.clock ?? new FakeClock(T - 60_000);
   const perpMarket = new TestPerpMarket();
-  const t = runnerHarness({ db: opts.db, clock, perpMarket });
+  // Bound late, as main.ts binds them: the service is built over the runner.
+  let funding: FundingService | null = null;
+  const hooks = { knownTimes: (s: string) => funding!.knownTimes(s), caughtUp: (s: string) => funding!.caughtUp(s) };
+  const t = runnerHarness({ db: opts.db, clock, perpMarket, funding: hooks });
   t.runner.start();
   if (opts.long ?? true) {
     t.runner.deposit('leverage', D('1000'));
@@ -42,7 +48,7 @@ async function setup(opts: { db?: ReturnType<typeof runnerHarness>['db']; clock?
     clock.advance(100);
   }
   const r = fakeRest(clock);
-  const funding = new FundingService({ rest: r.rest, sim: t.runner, market: perpMarket, now: () => clock.now, setTimer: clock.setTimer, logger: t.logger });
+  funding = new FundingService({ rest: r.rest, sim: t.runner, market: perpMarket, now: () => clock.now, setTimer: clock.setTimer, logger: t.logger });
   const advance = async (ms: number) => {
     // Step in small slices so each poll's answer is handled before the next timer.
     const end = clock.now + ms;
@@ -54,7 +60,7 @@ async function setup(opts: { db?: ReturnType<typeof runnerHarness>['db']; clock?
   };
   const fundingEvents = () => t.eventsOf('funding');
   const windows = () => t.sim.perp.state.funding;
-  return { ...t, ...r, funding, advance, fundingEvents, windows };
+  return { ...t, ...r, funding: funding as FundingService, advance, fundingEvents, windows };
 }
 
 describe('FundingService', () => {
@@ -117,8 +123,13 @@ describe('FundingService', () => {
     const b = await setup({ db: a.db, clock: a.clock, long: false });
     expect(b.windows().pending.map((w) => w.fundingTime)).toEqual([T]);
     b.answers.push(settled());
-    b.funding.start(); // every pending window is polled again, at once
+    // Every pending window is polled again, once the symbol has caught up after the downtime
+    // (the first fresh poll; the window is applied once either way).
+    b.funding.start();
     await b.advance(0);
+    expect(b.calls).toHaveLength(0);
+    await b.advance(1000);
+    await settle();
     await b.advance(1);
     expect(b.calls).toHaveLength(1);
     expect(b.fundingEvents()).toHaveLength(1);
@@ -160,6 +171,8 @@ describe('FundingService', () => {
     const c = await setup({ db: c0.db, clock: c0.clock, long: false });
     c.answers.push(settled());
     c.funding.start();
+    await c.advance(1000); // the first fresh poll: the symbol catches up, which closes the window at T + 15 s
+    await settle();
     await c.advance(1);
     expect(c.windows().windows).toEqual({});
     expect(c.windows().pending).toEqual([]);
@@ -200,19 +213,23 @@ describe('FundingService', () => {
     expect(t.fundingEvents()).toHaveLength(1);
   });
 
-  it('a suspend past T + 15 s before the open timer fires: no window is opened and the live service applies nothing for T', async () => {
+  it('a suspend past T + 15 s before the open timer fires: the live service opens no window; the catch-up settles T once', async () => {
     const t = await setup({ clock: new FakeClock(T - 4 * 3_600_000) }); // a long held across T
+    (t.history as FakeHistory).settlements.BTCUSDT = [{ time: T, rate: D('0.0001'), markPrice: D('80000') }];
     t.funding.start();
     t.perp.mark('BTCUSDT', '80000', T);
     await t.advance(60_000);
     t.clock.now = T + 2 * 3_600_000; // the laptop slept through the window: no timer ran meanwhile
     t.answers.push(settled(), settled(), settled());
     await t.advance(10 * 60_000);
+    // The sleep is a gap: its catch-up settles T from the history, on the 0.1 held across it.
     expect(t.windows().windows).toEqual({});
     expect(t.windows().pending).toEqual([]);
-    expect(t.windows().applied).toEqual({});
+    expect(t.windows().applied).toEqual({ BTCUSDT: [T] });
     expect(t.calls).toEqual([]);
-    expect(t.fundingEvents()).toEqual([]);
+    expect(t.fundingEvents().map((e) => [e.payload.qty, e.payload.amount, e.payload.catchUp.basis])).toEqual([
+      ['0.1', '-0.8', 'funding_history'],
+    ]);
     expect(t.logs.filter((l) => l.includes('left to catch-up'))).toHaveLength(1);
   });
 
@@ -245,10 +262,19 @@ describe('FundingService', () => {
     await t.advance(T - t.clock.now); // the window is open, the long 0.1 in it
     expect(t.windows().windows.BTCUSDT?.fundingTime).toBe(T);
     t.clock.now = T + 3_600_000; // slept from T to T + 1 h
-    // An engine call before the service's close timer runs: the runner closes the due window first.
-    t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.1' });
+    // An engine call before the service's close timer runs. The sleep is a gap in the data, so the
+    // window is left to that gap's catch-up: it stays open, for fills the gap may have had.
+    t.perp.mark('BTCUSDT', '80000', T + 8 * 3_600_000); // the first mark after the wake
+    expect(t.runner.gate(perpKeyOf('BTCUSDT'))).toBe('stale');
+    expect(t.windows().windows.BTCUSDT?.fundingTime).toBe(T);
+    // The next poll: fresh, the position held across the gap is caught up, which closes the window
+    // at T + 15 s; a position change after that is never added to it.
+    await t.advance(1000);
+    await settle();
+    expect(t.runner.gate(perpKeyOf('BTCUSDT'))).toBe('live');
     expect(t.windows().windows).toEqual({});
     expect(t.windows().pending.map((w) => [w.fundingTime, w.long.max.toString()])).toEqual([[T, '0.1']]);
+    t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.1' });
     t.answers.push(settled());
     await t.advance(FUNDING_POLL_MS + 1000);
     expect(t.sim.perp.state.positions.BTCUSDT!.qty.toString()).toBe('0.2');

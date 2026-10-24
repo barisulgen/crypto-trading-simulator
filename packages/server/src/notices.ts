@@ -13,7 +13,8 @@ export interface Notice {
     | 'feed_restored'
     | 'funding'
     | 'liquidation'
-    | 'margin_warning';
+    | 'margin_warning'
+    | 'catch_up';
   level: 'info' | 'warn' | 'error';
   text: string;
 }
@@ -30,12 +31,19 @@ const isPerp = (e: SimEvent): e is PerpEvent => 'market' in e && e.market === 'p
 
 /**
  * One notice per fill (spot or perp), partial fill, rejection (one per pair), late cancel,
- * trigger, thin-book cancel, funding payment or receipt, and liquidation.
+ * trigger, thin-book cancel, funding payment or receipt, and liquidation. What a catch-up run
+ * applied after a gap gets one notice, from its summary, listing every action (each estimated);
+ * its own events give none, so nothing it estimated reads like a live fill.
  */
 export function noticesFor(events: SimEvent[], lookup: NoticeLookup): Notice[] {
   const out: Notice[] = [];
   const rejectedPairs = new Set<string>();
   for (const e of events) {
+    if (e.type === 'catch_up') {
+      out.push(catchUpNotice(e));
+      continue;
+    }
+    if ('catchUp' in e && e.catchUp !== undefined) continue;
     const perp = isPerp(e);
     switch (e.type) {
       case 'fill': {
@@ -109,6 +117,18 @@ export function marginWarningNotice(w: MarginWarning, rules: PerpRules | null): 
     level: w.level === 0.5 ? 'warn' : 'error',
     text: `Margin ratio ${ratio}% on ${w.symbol} ${w.side}${liq}`,
   };
+}
+
+/**
+ * `Caught up BTCUSDT perp after the data gap 12:00–12:10 UTC: <action>; <action>`, or `...: nothing
+ * to apply`. A warning when anything was applied.
+ */
+function catchUpNotice(e: Extract<SimEvent, { type: 'catch_up' }>): Notice {
+  const name = e.market === 'spot' ? e.symbol : `${e.symbol} perp`;
+  const at = (t: number) => new Date(t).toISOString().slice(11, 16);
+  const head = `Caught up ${name} after the data gap ${at(e.from)}–${at(e.to)} UTC`;
+  const text = e.actions.length > 0 ? `${head}: ${e.actions.join('; ')}` : `${head}: nothing to apply`;
+  return { kind: 'catch_up', level: e.actions.length > 0 ? 'warn' : 'info', text };
 }
 
 /** `Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC` (price at tick decimals + 2; slippage rounded up). */

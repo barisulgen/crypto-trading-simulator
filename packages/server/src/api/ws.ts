@@ -49,6 +49,8 @@ export interface HubDeps {
   symbols: string[];
   setTimer: SetTimer;
   logger: Logger;
+  /** The health message's content: feed health by symbol and the keys catching up (default: the market's health only). */
+  health?: () => { health: HealthMap; catchingUp?: string[] };
 }
 
 interface Client {
@@ -88,7 +90,7 @@ export class ClientHub {
       this.broadcast({ type: 'account', account: this.d.runner.account() });
     });
     this.every(HEALTH_MS, () => {
-      if (this.clients.size > 0) this.broadcast({ type: 'health', health: this.d.market.healthSnapshot() });
+      if (this.clients.size > 0) this.broadcast({ type: 'health', ...this.health() });
     });
     this.every(HEARTBEAT_MS, () => this.heartbeat());
   }
@@ -115,9 +117,13 @@ export class ClientHub {
     socket.on('close', () => this.remove(socket));
     socket.on('error', () => this.remove(socket));
     this.sendTo(socket, { type: 'tickers', tickers: this.d.market.tickers() }, true);
-    this.sendTo(socket, { type: 'health', health: this.d.market.healthSnapshot() }, true);
+    this.sendTo(socket, { type: 'health', ...this.health() }, true);
     this.sendTo(socket, { type: 'account', account: this.d.runner.account() }, true);
     this.sendTo(socket, { type: 'orders', orders: this.d.runner.openOrders(), perpOrders: this.d.runner.openPerpOrders() }, true);
+  }
+
+  private health(): { health: HealthMap; catchingUp?: string[] } {
+    return this.d.health ? this.d.health() : { health: this.d.market.healthSnapshot() };
   }
 
   /** Send to every client (the runner's account, orders, notice and health messages). */

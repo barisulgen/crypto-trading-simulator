@@ -9,6 +9,7 @@ import { FuturesRest } from './binance/futuresRest.ts';
 import { BinanceRest } from './binance/rest.ts';
 import { PauseController } from './binance/restCore.ts';
 import { fetchUnofficialBrackets, TierLoader } from './binance/tiers.ts';
+import { BinanceHistory } from './catchup/history.ts';
 import { loadConfig } from './config.ts';
 import { currentSeasonId, openDb } from './db/db.ts';
 import { loadLedger, loadPerpState, loadSpotState } from './db/store.ts';
@@ -113,6 +114,10 @@ const runner = new EngineRunner({
   // Memory may be ahead of the database: never keep running (the runner has logged the cause).
   onFatal: () => setImmediate(() => void shutdown(1)),
   logger,
+  // Catch-up reads history through the same clients, in the bulk lane of each weight budget.
+  history: new BinanceHistory(rest, futuresRest),
+  // Bound late: the funding service is built over the runner, and is only called once it runs.
+  funding: { knownTimes: (s) => funding.knownTimes(s), caughtUp: (s) => funding.caughtUp(s) },
 });
 const funding = new FundingService({
   rest: futuresRest,
@@ -122,7 +127,15 @@ const funding = new FundingService({
   setTimer: defaultSetTimer,
   logger,
 });
-hub = new ClientHub({ market, candles, runner, symbols: config.symbols, setTimer: defaultSetTimer, logger });
+hub = new ClientHub({
+  market,
+  candles,
+  runner,
+  symbols: config.symbols,
+  setTimer: defaultSetTimer,
+  logger,
+  health: () => ({ health: runner.healthSnapshot(), catchingUp: runner.catchingUp() }),
+});
 
 app = await buildApp({
   runner,

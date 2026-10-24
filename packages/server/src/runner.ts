@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import {
+  applyCatchUp,
+  catchUpNeeds,
   ctxFor,
+  floorMinute,
   FUNDING_WINDOW_MS,
   liquidationPrice,
   ORDER_NOT_OPEN,
@@ -15,6 +18,8 @@ import type {
   ActionResult,
   AggTrade,
   Bracket,
+  CatchUpInput,
+  CatchUpNeeds,
   Decimal,
   EngineEvent,
   FeeSchedule,
@@ -42,18 +47,23 @@ import type {
   SpotState,
   Wallet,
 } from '@sim/engine';
+import { CATCHING_UP_REFUSAL, CatchUpService } from './catchup/catchUpService.ts';
+import type { CatchUpHost, Gate } from './catchup/catchUpService.ts';
+import type { CatchUpHistory } from './catchup/history.ts';
 import type { Db } from './db/db.ts';
 import {
   checkInvariants,
+  extendJob,
   insertEquitySnapshot,
   lastAlive,
   persist,
+  recordJobFailure,
   settleLateCancels,
   storedOrderExists,
   toJson,
   touchAlive,
 } from './db/store.ts';
-import type { FeedGap } from './db/store.ts';
+import type { FeedGap, JobWrite } from './db/store.ts';
 import { FeedGaps, OFFLINE_REASON } from './feedGaps.ts';
 import type { FundingRef, FundingSim } from './funding/fundingService.ts';
 import type { Logger } from './log.ts';
@@ -63,8 +73,8 @@ import type { SetTimer } from './market/ws.ts';
 import { marginWarningNotice, noticesFor } from './notices.ts';
 import type { Notice, NoticeLookup } from './notices.ts';
 
-export { OFFLINE_REASON, RESTART_REASON, noticesFor };
-export type { Notice };
+export { CATCHING_UP_REFUSAL, OFFLINE_REASON, RESTART_REASON, noticesFor };
+export type { Gate, Notice };
 export const INTEGRITY_REFUSAL = 'Account state failed integrity check; see server log';
 export const PAUSED_REASON = 'Server paused (sleep or freeze)';
 const STOPPED_REFUSAL = 'Server stopped after an internal error; see server log';
@@ -88,7 +98,8 @@ export class RefusedError extends Error {
   }
 }
 
-export type HealthMap = Record<string, { fresh: boolean; reason: string | null }>;
+/** Feed health by symbol; `catchingUp` is set while the key catches up after a gap. */
+export type HealthMap = Record<string, { fresh: boolean; reason: string | null; catchingUp?: boolean }>;
 
 /** Account value plus the raw wallet balances and each held coin's average-cost basis. */
 export interface AccountSnapshot extends AccountValue {
@@ -101,7 +112,7 @@ export type RunnerMessage =
   | { type: 'account'; account: AccountSnapshot }
   | { type: 'orders'; orders: SpotOrder[]; perpOrders: PerpOrder[] }
   | ({ type: 'notice' } & Notice)
-  | { type: 'health'; health: HealthMap };
+  | { type: 'health'; health: HealthMap; catchingUp: MarketKey[] };
 
 /** What the runner reads from MarketData beyond the engine's MarketView. */
 export interface RunnerMarket extends MarketView {
@@ -161,6 +172,13 @@ export interface RunnerDeps {
   /** Called once when the runner stops after a persist (or other internal) failure; main exits non-zero. */
   onFatal: (err: unknown) => void;
   logger: Logger;
+  /** Binance's history, read by catch-up after a gap. */
+  history: CatchUpHistory;
+  /**
+   * The funding service, bound late (it is built over the runner): the funding times it knows of a
+   * symbol, and the notice that a perp symbol's catch-up has been applied.
+   */
+  funding?: { knownTimes(symbol: string): number[]; caughtUp(symbol: string): void };
 }
 
 /** A live order of either market: the fields the runner reads are common to both. */
@@ -199,6 +217,10 @@ export class EngineRunner implements FundingSim {
   private lastPollAt: number | null = null;
   /** Per market and symbol, the pending orders re-sent after a restart: they wait for its first fresh data. */
   private readonly awaitingFresh = new Map<MarketKey, Set<string>>();
+  /** Catch-up after gaps: the per-key gate, the jobs, and the runs. */
+  private readonly catchUp: CatchUpService;
+  /** Arrivals and cancels of orders whose key was catching up when they fell due: run once it is live. */
+  private readonly heldCalls = new Map<MarketKey, (() => void)[]>();
   /** Integrity violations of the loaded state; when set, nothing trades. */
   private readonly violations: string[];
   private dead = false;
@@ -223,6 +245,16 @@ export class EngineRunner implements FundingSim {
       now: deps.now,
       lastFrameAt: (key) => deps.health[splitKey(key).market].lastFrameAt(),
       cursorOf: (key) => this.cursorOf(key),
+    });
+
+    this.catchUp = new CatchUpService({
+      db: deps.db,
+      seasonId: deps.seasonId,
+      host: this.catchUpHost(),
+      history: deps.history,
+      now: deps.now,
+      setTimer: deps.setTimer,
+      logger: deps.logger,
     });
 
     this.violations = checkInvariants(deps.sim);
@@ -264,6 +296,7 @@ export class EngineRunner implements FundingSim {
     this.d.perpMarket.off('mark', this.markListener);
     for (const cancel of this.timers) cancel();
     this.timers.clear();
+    this.catchUp.stop();
     this.saveOnStop();
   }
 
@@ -280,13 +313,13 @@ export class EngineRunner implements FundingSim {
   }
 
   submit(req: SpotOrderRequest): EngineEvent[] {
-    this.refuseTrading();
+    this.refuseTrading(spotKey(req.symbol));
     this.noteStale(spotKey(req.symbol));
     return this.apply((ctx) => this.d.sim.submit('spot', req, ctx));
   }
 
   submitPerp(req: PerpOrderRequest): PerpEvent[] {
-    this.refuseTrading();
+    this.refuseTrading(perpKey(req.symbol));
     this.noteStale(perpKey(req.symbol));
     return this.apply((ctx) => this.d.sim.submit('perp', req, ctx));
   }
@@ -299,6 +332,7 @@ export class EngineRunner implements FundingSim {
   cancel(orderId: string): ActionResult {
     this.refuseTrading();
     const market = this.marketOfOrder(orderId);
+    if (market !== null) this.refuseTrading(marketKey(market, this.ordersOf(market).get(orderId)!.symbol));
     if (market === null) {
       if (storedOrderExists(this.d.db, this.d.seasonId, orderId)) return { ok: false, reason: ORDER_NOT_OPEN };
       return this.apply((ctx) => this.d.sim.cancel('spot', orderId, ctx)); // answered as not found
@@ -310,7 +344,7 @@ export class EngineRunner implements FundingSim {
   }
 
   attachOco(req: OcoRequest): EngineEvent[] {
-    this.refuseTrading();
+    this.refuseTrading(spotKey(req.symbol));
     this.noteStale(spotKey(req.symbol));
     return this.apply((ctx) => this.d.sim.spot.attachOco(req, ctxFor(ctx, 'spot')));
   }
@@ -328,27 +362,27 @@ export class EngineRunner implements FundingSim {
   }
 
   setLeverage(symbol: string, leverage: number): PerpActionResult {
-    this.refuseTrading();
+    this.refuseTrading(perpKey(symbol));
     return this.apply((ctx) => this.d.sim.setLeverage(symbol, leverage, ctx));
   }
 
   setMarginMode(symbol: string, mode: 'isolated' | 'cross'): PerpActionResult {
-    this.refuseTrading();
+    this.refuseTrading(perpKey(symbol));
     return this.apply((ctx) => this.d.sim.setMarginMode(symbol, mode, ctx));
   }
 
   addMargin(symbol: string, amount: string): PerpActionResult {
-    this.refuseTrading();
+    this.refuseTrading(perpKey(symbol));
     return this.apply((ctx) => this.d.sim.addMargin(symbol, amount, ctx));
   }
 
   removeMargin(symbol: string, amount: string): PerpActionResult {
-    this.refuseTrading();
+    this.refuseTrading(perpKey(symbol));
     return this.apply((ctx) => this.d.sim.removeMargin(symbol, amount, ctx));
   }
 
   setPositionTpSl(symbol: string, input: { stopLoss?: string; takeProfit?: string }): PerpEvent[] {
-    this.refuseTrading();
+    this.refuseTrading(perpKey(symbol));
     this.noteStale(perpKey(symbol));
     return this.apply((ctx) => this.d.sim.setPositionTpSl(symbol, input, ctx));
   }
@@ -381,6 +415,37 @@ export class EngineRunner implements FundingSim {
   applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal): PerpEvent[] {
     this.refuseTrading();
     return this.apply((ctx) => this.d.sim.applyFunding(symbol, fundingTime, rate, markPrice, ctx));
+  }
+
+  /**
+   * Whether the symbol's perp funding windows are left to catch-up: its data has a gap open or is
+   * catching up, so what was held across them is known only once its catch-up has been applied.
+   */
+  fundingDeferred(symbol: string): boolean {
+    return this.gate(perpKey(symbol)) !== 'live';
+  }
+
+  // ---- catch-up gate ----
+
+  /** The key's gate: live, stale (a gap open) or catching up after a gap. */
+  gate(key: MarketKey): Gate {
+    if (this.catchUp.isCatchingUp(key)) return 'catching_up';
+    return this.gaps.has(key) ? 'stale' : 'live';
+  }
+
+  /** Every market and symbol catching up now. */
+  catchingUp(): MarketKey[] {
+    return this.catchUp.keys();
+  }
+
+  /** The spot feed health by symbol, with `catchingUp: true` on each spot key catching up. */
+  healthSnapshot(): HealthMap {
+    const health = this.d.spotMarket.healthSnapshot();
+    for (const key of this.catchUp.keys()) {
+      const { market, symbol } = splitKey(key);
+      if (market === 'spot' && health[symbol]) health[symbol] = { ...health[symbol], catchingUp: true };
+    }
+    return health;
   }
 
   // ---- reads ----
@@ -444,9 +509,11 @@ export class EngineRunner implements FundingSim {
     if (this.dead) throw new RefusedError(STOPPED_REFUSAL);
   }
 
-  private refuseTrading(): void {
+  /** Refuses when nothing may trade; with a key, also while that key catches up after a gap. */
+  private refuseTrading(key?: MarketKey): void {
     this.refuseIfDead();
     if (this.violations.length > 0) throw new RefusedError(INTEGRITY_REFUSAL);
+    if (key !== undefined && this.catchUp.isCatchingUp(key)) throw new RefusedError(CATCHING_UP_REFUSAL);
   }
 
   private marketOf(market: Market): RunnerMarket | RunnerPerpMarket {
@@ -473,6 +540,7 @@ export class EngineRunner implements FundingSim {
     call: (ctx: SimCtx) => T,
     gaps: FeedGap[] = [],
     extra: () => Notice[] = () => [],
+    jobs: JobWrite[] = [],
   ): T {
     this.refuseIfDead();
     let result: T;
@@ -484,26 +552,30 @@ export class EngineRunner implements FundingSim {
       this.die('engine call failed', e);
       throw e;
     }
-    this.commit(Array.isArray(result) ? result : result.ok ? result.events : [], gaps, extra);
+    this.commit(Array.isArray(result) ? result : result.ok ? result.events : [], gaps, extra, jobs);
     return result;
   }
 
   /**
    * Before every engine call: a funding window still open at or after fundingTime + 15 s is closed
    * first (its own close timer may have been held back by a sleep), so no change after the window
-   * ever counts in it. Saved with the call.
+   * ever counts in it. Saved with the call. A symbol whose windows are left to catch-up keeps its
+   * window open: catch-up closes it at its time, after the gap's fills.
    */
   private closeDueFundingWindows(ctx: SimCtx): void {
     for (const w of Object.values(this.d.sim.perp.state.funding.windows)) {
-      if (ctx.now >= w.fundingTime + FUNDING_WINDOW_MS) this.d.sim.closeFundingWindow(w.symbol, w.fundingTime, ctx);
+      if (ctx.now >= w.fundingTime + FUNDING_WINDOW_MS && !this.fundingDeferred(w.symbol)) {
+        this.d.sim.closeFundingWindow(w.symbol, w.fundingTime, ctx);
+      }
     }
   }
 
-  private commit(events: SimEvent[], gaps: FeedGap[] = [], extra: () => Notice[] = () => []): void {
+  private commit(events: SimEvent[], gaps: FeedGap[] = [], extra: () => Notice[] = () => [], jobs: JobWrite[] = []): void {
     const now = this.d.now();
     try {
       const cursor = now - this.cursorSavedAt >= CURSOR_FLUSH_MS;
-      if (persist(this.d.db, this.d.seasonId, this.d.sim, events, { feedGaps: gaps, cursor, now })) this.cursorSavedAt = now;
+      const extras = { feedGaps: gaps, cursor, now, jobs };
+      if (persist(this.d.db, this.d.seasonId, this.d.sim, events, extras)) this.cursorSavedAt = now;
     } catch (e) {
       this.die('persist failed', e);
       throw e;
@@ -601,7 +673,13 @@ export class EngineRunner implements FundingSim {
       if (left > 0) return this.timer(fire, left);
       this.background(() => {
         const symbol = this.ordersOf(market).get(orderId)?.symbol;
-        if (symbol !== undefined) this.noteStale(marketKey(market, symbol));
+        const key = symbol === undefined ? null : marketKey(market, symbol);
+        // Nothing of a key catching up happens before its catch-up: the call waits until it is live.
+        if (key !== null && this.catchUp.isCatchingUp(key)) {
+          this.heldCalls.set(key, [...(this.heldCalls.get(key) ?? []), fire]);
+          return;
+        }
+        if (key !== null) this.noteStale(key);
         else this.checkStall(this.d.now());
         this.apply(call);
       });
@@ -697,7 +775,7 @@ export class EngineRunner implements FundingSim {
     const armed: { market: Market; id: string; at: number }[] = [];
     const events: SimEvent[] = [];
     for (const [key, ids] of this.awaitingFresh) {
-      if (!this.isFresh(key)) continue;
+      if (!this.isFresh(key) || this.gate(key) !== 'live') continue;
       this.awaitingFresh.delete(key);
       const { market } = splitKey(key);
       const orders = this.ordersOf(market);
@@ -716,6 +794,99 @@ export class EngineRunner implements FundingSim {
     if (armed.length === 0 && events.length === 0) return;
     this.commit(events);
     for (const { market, id, at } of armed) this.scheduleArrival(market, id, at);
+  }
+
+  // ---- catch-up ----
+
+  /**
+   * Whether anything a catch-up run looks after exists for the key: an order of any live status or
+   * with a cancel in flight; for perps also a position, or a funding window open or waiting for its rate.
+   */
+  private somethingOpen(key: MarketKey): boolean {
+    const { market, symbol } = splitKey(key);
+    for (const o of this.ordersOf(market).values()) {
+      if (o.symbol === symbol && (LIVE.has(o.status) || o.cancelArrivesAt !== null)) return true;
+    }
+    if (market === 'spot') return false;
+    const p = this.d.sim.perp.state;
+    return (
+      p.positions[symbol] !== undefined ||
+      p.funding.windows[symbol] !== undefined ||
+      p.funding.pending.some((w) => w.symbol === symbol)
+    );
+  }
+
+  /** What the catch-up service reads of the account, and how its runs are applied: each as an engine call, persisted. */
+  private catchUpHost(): CatchUpHost {
+    return {
+      somethingOpen: (key) => this.somethingOpen(key),
+      gapOpen: (key) => this.gaps.has(key),
+      triggerMinutes: (key) => {
+        const { market, symbol } = splitKey(key);
+        const triggered = [...this.ordersOf(market).values()].filter(
+          (o) => o.symbol === symbol && o.status === 'triggered' && o.triggeredAt !== null,
+        );
+        return triggered.map((o) => floorMinute(o.triggeredAt!));
+      },
+      needs: (key, from, to, candles): CatchUpNeeds => {
+        const { market, symbol } = splitKey(key);
+        return catchUpNeeds(this.d.sim, market, symbol, from, to, candles);
+      },
+      fundingTimes: (symbol) => {
+        const open = this.d.sim.perp.state.funding.windows[symbol];
+        const known = this.d.funding?.knownTimes(symbol) ?? [];
+        return [...new Set([...known, ...(open ? [open.fundingTime] : [])])].sort((a, b) => a - b);
+      },
+      assertReady: (key) => {
+        const { market, symbol } = splitKey(key);
+        if (market === 'spot') this.d.spotMarket.rules(symbol);
+        else {
+          this.d.perpMarket.rules(symbol);
+          this.d.perpMarket.brackets(symbol);
+        }
+      },
+      commitGaps: (gaps, jobs) => this.commit([], gaps, undefined, jobs),
+      apply: (input, done) => this.applyCatchUpRun(input, done),
+      resume: (key, trades, marks) => this.background(() => this.resume(key, trades, marks)),
+      recordFailure: (id, error) => recordJobFailure(this.d.db, this.d.seasonId, id, error),
+      extendJob: (id, endedAt) => extendJob(this.d.db, this.d.seasonId, id, endedAt),
+      fatal: (what, e) => this.die(what, e),
+    };
+  }
+
+  /**
+   * A catch-up run: its events, the state it leaves (the trade cursor raised past every trade it
+   * replayed included) and its job marked done, in one transaction, like any engine call.
+   */
+  private applyCatchUpRun(input: CatchUpInput, done: JobWrite): void {
+    this.apply((ctx) => applyCatchUp(this.d.sim, input, ctx), [], () => [], [done]);
+  }
+
+  /**
+   * A key's catch-up has been applied (or a done job left it nothing to run): perp funding windows
+   * due now open first; the trades held back go through the live path, in receive order; a perp
+   * position whose liquidation price the held-back marks reached is liquidated at that price; then
+   * onFresh. If the key is stale again by now, a gap opens instead and the next catch-up covers
+   * what was held. Last, the arrivals and cancels held back run and the orders held since startup
+   * are sent again.
+   */
+  private resume(key: MarketKey, trades: AggTrade[], marks: { low: Decimal; high: Decimal } | null): void {
+    const { market, symbol } = splitKey(key);
+    if (!this.isFresh(key)) {
+      this.startGap(key, this.staleReason(key));
+    } else {
+      if (market === 'perp') this.d.funding?.caughtUp(symbol);
+      for (const t of trades) this.onTrade(market, symbol, t);
+      if (market === 'perp' && marks !== null && this.gate(key) === 'live') {
+        this.apply((ctx) => this.d.sim.liquidateOnMarkRange(symbol, marks.low, marks.high, ctx));
+      }
+      if (this.gate(key) === 'live') this.apply((ctx) => this.d.sim.onFresh(market, symbol, ctx));
+    }
+    const calls = this.heldCalls.get(key) ?? [];
+    this.heldCalls.delete(key);
+    for (const fire of calls) fire();
+    this.rearmWhenFresh();
+    this.broadcastHealth();
   }
 
   // ---- feed gaps ----
@@ -763,8 +934,10 @@ export class EngineRunner implements FundingSim {
     this.lastPollAt = now;
     let changed = false;
     for (const key of paused ? [] : this.keys) {
-      if (!this.isFresh(key)) changed = this.startGap(key, this.staleReason(key)) || changed;
-      else changed = this.freshAtPoll(key, now) || changed;
+      if (!this.isFresh(key)) {
+        this.catchUp.dropHeld(key);
+        changed = this.startGap(key, this.staleReason(key)) || changed;
+      } else changed = this.freshAtPoll(key, now) || changed;
     }
     if (changed) this.broadcastHealth();
     this.rearmWhenFresh();
@@ -802,13 +975,24 @@ export class EngineRunner implements FundingSim {
     if (!this.isFresh(key) && this.startGap(key, this.staleReason(key))) this.broadcastHealth();
   }
 
-  /** A health poll found the key's data fresh. Returns whether its gap closed. */
+  /**
+   * A health poll found the key's data fresh. A key catching up is left to its run, unless a gap
+   * opened while it did: that gap joins its job. Otherwise, when the closing gap (or a pending job
+   * found at start) needs catching up, the key starts catching up; if not, onFresh runs as before.
+   * Returns whether a gap closed.
+   */
   private freshAtPoll(key: MarketKey, now: number): boolean {
     const { market, symbol } = splitKey(key);
     this.gaps.markFresh(key, now);
     const gaps = this.gaps.take(key, now);
     if (this.violations.length > 0) {
       if (gaps.length > 0) this.commit([], gaps);
+    } else if (this.catchUp.isCatchingUp(key)) {
+      if (gaps.length > 0) this.catchUp.enter(key, gaps);
+    } else if (this.needsCatchUp(key, gaps)) {
+      // Catching up: its run resumes the key. With no job left to run (a done job covered the
+      // gap), it is live at once, with the trades held for it.
+      if (!this.enterCatchUp(key, gaps)) this.resume(key, this.catchUp.takeHeld(key), null);
     } else if (gaps.length > 0 || this.d.sim.hasDeferredWork(market, symbol, this.ctx())) {
       this.apply((ctx) => this.d.sim.onFresh(market, symbol, ctx), gaps);
     }
@@ -816,20 +1000,56 @@ export class EngineRunner implements FundingSim {
     return gaps.length > 0;
   }
 
+  /** Whether the key's data coming back fresh needs a catch-up run: a gap closing with anything open, or a pending job. */
+  private needsCatchUp(key: MarketKey, gaps: FeedGap[]): boolean {
+    return this.catchUp.hasPendingJob(key) || (gaps.length > 0 && this.somethingOpen(key));
+  }
+
+  /** Records the gaps with their job and starts catching up; false (the gaps recorded) when no job is left to run. */
+  private enterCatchUp(key: MarketKey, gaps: FeedGap[]): boolean {
+    const entered = this.catchUp.enter(key, gaps);
+    if (entered) this.broadcastHealth();
+    return entered;
+  }
+
   /**
    * A live trade of `market`, sent to that market's engine only. On stale data the engine skips
    * it, so the interruption is saved first: a gap opens now, from the last fresh moment. On fresh
    * data the open gap (unless it is a pause, which a poll closes) is recorded as a feed_gap in the
    * same transaction as the trade's own changes, so the trade cursor never moves past a skipped
-   * trade before its gap is recorded.
+   * trade before its gap is recorded. A gap that needs catching up is recorded with its job
+   * instead, and the trade is held for the run, as are every trade of a key catching up and the
+   * fresh trades of a key whose gap closes only at a poll (dropped if it is stale meanwhile: its
+   * job then covers them).
    */
   private onTrade(market: Market, symbol: string, trade: AggTrade): void {
     const now = this.d.now();
     const key = marketKey(market, symbol);
     this.checkStall(now);
+    if (this.catchUp.isCatchingUp(key)) {
+      // Stale again: the job is extended over the new gap when it closes, its trades replayed.
+      if (this.gaps.has(key)) return;
+      this.catchUp.holdTrade(key, trade);
+      return;
+    }
     const fresh = this.isFresh(key);
     const opened = !fresh && this.startGap(key, this.staleReason(key));
+    // A gap that closes only at a poll stays open while fresh trades arrive: one that will need
+    // catching up holds them for its run, so none moves the trade cursor past the gap's trades.
+    const willCatchUp = this.violations.length === 0 && (this.catchUp.hasPendingJob(key) || this.somethingOpen(key));
+    if (fresh && this.gaps.isPollOnly(key) && willCatchUp) {
+      this.catchUp.holdBeforeClose(key, trade);
+      return;
+    }
     const gaps = fresh && !this.gaps.isPollOnly(key) ? this.gaps.take(key, now) : [];
+    if (gaps.length > 0 && willCatchUp) {
+      // The first trade after the gap: held for the run, as the first the live path processes after it.
+      this.gaps.markFresh(key, now);
+      if (this.enterCatchUp(key, gaps)) this.catchUp.holdTrade(key, trade);
+      else this.resume(key, [...this.catchUp.takeHeld(key), trade], null);
+      this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${label(key)}` });
+      return;
+    }
     this.apply((ctx) => this.d.sim.onTrade(market, symbol, trade, ctx), gaps);
     if (fresh) this.gaps.markFresh(key, now);
     if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${label(key)}` });
@@ -843,6 +1063,11 @@ export class EngineRunner implements FundingSim {
    */
   private onMark(symbol: string, mark: RunnerMark): void {
     this.checkStall(this.d.now());
+    if (this.catchUp.isCatchingUp(perpKey(symbol))) {
+      // Not applied before the catch-up: its lowest and highest are judged after it.
+      if (this.d.perpMarket.isMarkFresh(symbol)) this.catchUp.holdMark(symbol, mark.markPrice);
+      return;
+    }
     let warnings: MarginWarning[] = [];
     this.apply(
       (ctx) => {
@@ -861,6 +1086,7 @@ export class EngineRunner implements FundingSim {
    */
   private startGap(key: MarketKey, reason: string, pausedSince: number | null = null): boolean {
     if (!this.gaps.start(key, reason, pausedSince)) return false;
+    this.catchUp.gapOpened(key);
     this.notice({ kind: 'feed_gap', level: 'warn', text: `Live data interrupted for ${label(key)}: ${reason}` });
     return true;
   }
@@ -870,9 +1096,12 @@ export class EngineRunner implements FundingSim {
     return this.marketOf(market).healthSnapshot()[symbol]?.reason ?? 'Data stale';
   }
 
-  /** The spot health map, as the clients read it (perp health joins it with the perp API). */
+  /**
+   * The spot health map, as the clients read it (perp health joins it with the perp API), and every
+   * key catching up.
+   */
   private broadcastHealth(): void {
-    this.d.onBroadcast({ type: 'health', health: this.d.spotMarket.healthSnapshot() });
+    this.d.onBroadcast({ type: 'health', health: this.healthSnapshot(), catchingUp: this.catchUp.keys() });
   }
 
   /**

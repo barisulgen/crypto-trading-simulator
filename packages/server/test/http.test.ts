@@ -12,7 +12,7 @@ import { loadLedger, loadPerpState, loadSpotState } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import type { Candle } from '../src/market/candles.ts';
 import { EngineRunner } from '../src/runner.ts';
-import { FakeClock, FakeHealth, TestMarket, TestPerpMarket } from './helpers.ts';
+import { FakeClock, FakeHealth, FakeHistory, TestMarket, TestPerpMarket } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
 const SECRET_ENV = { BINANCE_KEY: 'kKEY-9f3a1e', BINANCE_SECRET: 'sSECRET-77b2c4', APP_PASSWORD: 'pw-LAN-4c1d0a' };
@@ -63,6 +63,7 @@ async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
     onBroadcast: (m) => hub?.broadcast(m),
     onFatal: () => {},
     logger,
+    history: new FakeHistory(),
   });
   const candles = new FakeCandles();
   const perpCandles = new FakeCandles('perp:');
