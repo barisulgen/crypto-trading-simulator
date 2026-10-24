@@ -410,6 +410,9 @@ describe('REST', () => {
     expect((await t.call('POST', '/api/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: 1 })).body).toEqual({
       error: 'Invalid field qty',
     });
+    expect((await t.call('POST', '/api/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'trailing', qty: '1' })).body).toEqual({
+      error: 'Invalid field type',
+    });
     expect((await t.call('POST', '/api/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1', size: '1' })).body).toEqual({
       error: 'Invalid field size',
     });
@@ -426,7 +429,7 @@ describe('REST', () => {
 
     const rejected = await t.call('POST', '/api/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1' });
     expect(rejected.status).toBe(200);
-    expect(rejected.body.order).toMatchObject({ status: 'rejected', rejectReason: 'Insufficient USDT: need 100.05, available 0' });
+    expect(rejected.body.order).toMatchObject({ market: 'spot', status: 'rejected', rejectReason: 'Insufficient USDT: need 100.05, available 0' });
     const hist = await t.call('GET', '/api/history?types=order_rejected');
     expect(hist.body.rows).toHaveLength(1);
     expect((await t.call('GET', '/api/history?limit=0')).status).toBe(400);
@@ -447,7 +450,7 @@ describe('REST', () => {
     // The cancel is a request: accepted, it arrives after its delay; the order is still open meanwhile.
     const cancel = await t.call('DELETE', `/api/orders/${limit.body.order.id}`);
     expect(cancel.status).toBe(200);
-    expect(cancel.body.order).toMatchObject({ status: 'open', cancelArrivesAt: t.clock.now + 100 });
+    expect(cancel.body.order).toMatchObject({ market: 'spot', status: 'open', cancelArrivesAt: t.clock.now + 100 });
     const again = await t.call('DELETE', `/api/orders/${limit.body.order.id}`);
     expect([again.status, again.body]).toEqual([400, { error: 'Cancel already requested' }]);
     t.clock.advance(100);
@@ -506,7 +509,7 @@ describe('perp REST', () => {
     const t = await perpApp();
     const res = await t.call('POST', '/api/perp/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.01', reduceOnly: false });
     expect(res.status).toBe(200);
-    expect(res.body.order).toMatchObject({ symbol: 'BTCUSDT', side: 'buy', type: 'market', status: 'pending', qty: '0.01', leverage: 20 });
+    expect(res.body.order).toMatchObject({ market: 'perp', symbol: 'BTCUSDT', side: 'buy', type: 'market', status: 'pending', qty: '0.01', leverage: 20 });
     t.clock.advance(100);
     expect((await t.call('GET', '/api/positions')).body.positions).toEqual([
       expect.objectContaining({ symbol: 'BTCUSDT', side: 'long', qty: '0.01', entryPrice: '80000', margin: '39.6' }),
@@ -519,6 +522,11 @@ describe('perp REST', () => {
     expect(await bad({ ...base, price: ['79000'] })).toEqual({ error: 'Invalid field price' });
     expect(await bad({ ...base, reduceOnly: 'yes' })).toEqual({ error: 'Invalid field reduceOnly' });
     expect(await bad({ ...base, side: 'long' })).toEqual({ error: 'Invalid field side' });
+    // An unknown type is malformed input, not an order: nothing is recorded.
+    expect(await bad({ ...base, type: 'stop_market' })).toEqual({ error: 'Invalid field type' });
+    expect(await bad({ ...base, type: 'stop_loss' })).toEqual({ error: 'Invalid field type' });
+    expect(await bad({ ...base, type: 7 })).toEqual({ error: 'Invalid field type' });
+    expect(t.db.prepare("SELECT count(*) AS n FROM orders WHERE market = 'perp' AND status = 'rejected'").get()).toEqual({ n: 0 });
     expect(await bad({ ...base, attach: 'tight' })).toEqual({ error: 'Invalid field attach' });
     expect(await bad({ ...base, attach: { stopLoss: 70000 } })).toEqual({ error: 'Invalid field attach.stopLoss' });
     expect(await bad({ ...base, attach: { trailing: '1' } })).toEqual({ error: 'Invalid field attach.trailing' });
@@ -565,6 +573,7 @@ describe('perp REST', () => {
       leverage: 20,
       margin: '39.6',
       marginMode: 'isolated',
+      catchingUp: false,
       markPrice: '79000',
       markFresh: true,
       markAt: T0 + 100,
@@ -588,7 +597,7 @@ describe('perp REST', () => {
     const id = limit.body.order.id;
     const cancel = await t.call('DELETE', `/api/orders/${id}`);
     expect(cancel.status).toBe(200);
-    expect(cancel.body.order).toMatchObject({ id, status: 'open', cancelArrivesAt: t.clock.now + 100 });
+    expect(cancel.body.order).toMatchObject({ id, market: 'perp', status: 'open', cancelArrivesAt: t.clock.now + 100 });
     expect((await t.call('DELETE', `/api/orders/${id}`)).body).toEqual({ error: 'Cancel already requested' });
     t.clock.advance(100);
     expect(t.db.prepare('SELECT status, market FROM orders WHERE id = ?').get(id)).toEqual({ status: 'cancelled', market: 'perp' });
@@ -610,6 +619,25 @@ describe('perp REST', () => {
       error: 'Leverage is locked while a position or an opening order is open on BTCUSDT',
     });
     expect((await t.call('GET', '/api/positions')).body.positions[0].leverage).toBe(10);
+  });
+
+  it('engine refusals that are temporary (tiers not loaded, no fresh mark) are 503s, like missing rules', async () => {
+    const t = await perpApp();
+    await openLong(t);
+    t.perpMarket.setMarkFresh('BTCUSDT', false);
+    expect(await t.call('POST', '/api/perp/margin', { symbol: 'BTCUSDT', action: 'remove', amount: '1' })).toMatchObject({
+      status: 503,
+      body: { error: 'Mark price unavailable; try again when live data is back' },
+    });
+    t.perpMarket.setMarkFresh('BTCUSDT', true);
+    t.perpMarket.clearBrackets('BTCUSDT');
+    const tiers = { status: 503, body: { error: 'Leverage tiers not loaded yet; try again in a moment' } };
+    expect(await t.call('POST', '/api/perp/margin', { symbol: 'BTCUSDT', action: 'add', amount: '1' })).toMatchObject(tiers);
+    expect(await t.call('POST', '/api/perp/margin', { symbol: 'BTCUSDT', action: 'remove', amount: '1' })).toMatchObject(tiers);
+    expect(await t.call('POST', '/api/perp/leverage', { symbol: 'BTCUSDT', leverage: 5 })).toMatchObject(tiers);
+    // The owner's own mistakes stay 400s.
+    t.perpMarket.setBrackets('BTCUSDT', btcBrackets);
+    expect((await t.call('POST', '/api/perp/margin', { symbol: 'BTCUSDT', action: 'add', amount: '100000' })).status).toBe(400);
   });
 
   it('POST /api/perp/margin-mode: isolated is accepted, cross is refused for now', async () => {
@@ -656,9 +684,9 @@ describe('perp REST', () => {
     await openLong(t);
     const set = await t.call('POST', '/api/perp/tpsl', { symbol: 'BTCUSDT', stopLoss: '70000', takeProfit: '90000' });
     expect(set.status).toBe(200);
-    expect(set.body.orders.map((o: any) => [o.type, o.status, o.closePosition, o.triggerPrice])).toEqual([
-      ['stop_loss', 'pending', true, '70000'],
-      ['take_profit', 'pending', true, '90000'],
+    expect(set.body.orders.map((o: any) => [o.market, o.type, o.status, o.closePosition, o.triggerPrice])).toEqual([
+      ['perp', 'stop_loss', 'pending', true, '70000'],
+      ['perp', 'take_profit', 'pending', true, '90000'],
     ]);
   });
 
@@ -668,7 +696,7 @@ describe('perp REST', () => {
     await openLong(t);
     const part = await t.call('POST', '/api/perp/close', { symbol: 'BTCUSDT', qty: '0.004' });
     expect(part.status).toBe(200);
-    expect(part.body.order).toMatchObject({ side: 'sell', type: 'market', qty: '0.004', reduceOnly: true, status: 'pending' });
+    expect(part.body.order).toMatchObject({ market: 'perp', side: 'sell', type: 'market', qty: '0.004', reduceOnly: true, status: 'pending' });
     t.clock.advance(100);
     expect((await t.call('GET', '/api/positions')).body.positions[0].qty).toBe('0.006');
     const all = await t.call('POST', '/api/perp/close', { symbol: 'BTCUSDT' });
@@ -699,6 +727,25 @@ describe('perp REST', () => {
     ]);
     const spot = await t.call('GET', '/api/history?market=spot&types=fill');
     expect(spot.body.rows.map((r: any) => r.market)).toEqual(['spot']);
+    // market=leverage is the leverage side as a whole: perp events, its wallet's deposits, and transfers.
+    await t.call('POST', '/api/transfer', { from: 'spot', to: 'leverage', amount: '5' });
+    const types = 'fill,position_opened,deposit,transfer';
+    const lev = (await t.call('GET', `/api/history?market=leverage&types=${types}`)).body.rows;
+    expect(lev.map((r: any) => [r.type, r.market])).toEqual([
+      ['transfer', null],
+      ['fill', 'perp'],
+      ['position_opened', 'perp'],
+      ['fill', 'perp'],
+      ['deposit', 'leverage'],
+    ]);
+    const perpOnly = (await t.call('GET', `/api/history?market=perp&types=${types}`)).body.rows;
+    expect(perpOnly.map((r: any) => r.type)).toEqual(['transfer', 'fill', 'position_opened', 'fill']);
+    const spotSide = (await t.call('GET', `/api/history?market=spot&types=${types}`)).body.rows;
+    expect(spotSide.map((r: any) => [r.type, r.market])).toEqual([
+      ['transfer', null],
+      ['fill', 'spot'],
+      ['deposit', 'spot'],
+    ]);
     expect((await t.call('GET', '/api/history?market=margin')).body).toEqual({ error: 'market must be spot, leverage or perp' });
 
     const perpFills = (await t.call('GET', '/api/fills?market=perp')).body.fills;
@@ -747,6 +794,10 @@ describe('perp REST', () => {
     expect(health.markets['perp:BTCUSDT']).toMatchObject({ catchingUp: true });
     expect(health.markets['spot:BTCUSDT']).toMatchObject({ catchingUp: false });
     expect(health.catchingUp).toEqual(['perp:BTCUSDT']);
+    // Its position is shown, flagged as catching up: the figures may still change.
+    expect((await t.call('GET', '/api/positions')).body.positions).toEqual([
+      expect.objectContaining({ symbol: 'BTCUSDT', qty: '0.01', catchingUp: true }),
+    ]);
     ws.terminate();
     release();
   });
@@ -818,6 +869,7 @@ describe('order fuzz', () => {
       }
       const payload = rnd() < 0.02 ? pick<unknown>([[1, 2], 'text', 42, null]) : body;
       const res = await t.app.inject({ method: 'POST', url, payload: JSON.stringify(payload), headers });
+      seen.push(res.body, JSON.stringify(res.headers));
       statuses.set(res.statusCode, (statuses.get(res.statusCode) ?? 0) + 1);
       if (res.statusCode >= 500) throw new Error(`${res.statusCode} for POST ${url} ${JSON.stringify(payload)}: ${res.body}`);
 
@@ -831,6 +883,7 @@ describe('order fuzz', () => {
         const open = [...t.runner.openOrders(), ...t.runner.openPerpOrders()];
         const id = open.length > 0 && rnd() < 0.7 ? pick(open).id : String(pick(values));
         const del = await t.app.inject({ method: 'DELETE', url: `/api/orders/${encodeURIComponent(id)}`, headers: { cookie: t.cookie() } });
+        seen.push(del.body);
         expect(del.statusCode).toBeLessThan(500);
       }
     }

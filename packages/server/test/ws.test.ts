@@ -203,15 +203,18 @@ describe('ClientHub sessions', () => {
     return { s, handle };
   };
 
-  it('pongs and messages renew the session; an expired one is closed at the next heartbeat and its kline released', () => {
+  it('messages renew the session, pongs do not; an expired one is closed at the next heartbeat and its kline released', () => {
     const t = setup();
     const { s, handle } = session();
     const socket = t.connect(handle);
+    // A pong is the browser answering a ping: an unattended open tab must not hold the session open.
     socket.emit('pong');
+    expect(s.touches).toBe(0);
     t.subscribe(socket);
-    expect(s.touches).toBe(2);
+    expect(s.touches).toBe(1);
     t.clock.advance(30_000);
     socket.emit('pong');
+    expect(s.touches).toBe(1);
     expect(socket.closed).toBeNull();
 
     s.alive = false; // idle 24 h, or 7 days old
@@ -221,6 +224,32 @@ describe('ClientHub sessions', () => {
     const before = socket.sent.length;
     t.hub.broadcast(notice);
     expect(socket.sent).toHaveLength(before);
+  });
+
+  it('nothing more reaches a socket once its session has expired: it is closed at the next message to it, not the heartbeat', () => {
+    const t = setup();
+    const { s, handle } = session();
+    const socket = t.connect(handle);
+    t.subscribe(socket);
+    t.clock.advance(1000);
+    const live = socket.sent.length;
+    expect(socket.sent.slice(-4).map((m) => m.type)).toEqual(['tickers', 'account', 'marks', 'positions']);
+
+    s.alive = false;
+    t.clock.advance(1000); // the 1 s tick: account, marks and positions would go out
+    expect(socket.closed).toEqual([4001, 'Session expired; log in again']);
+    expect(socket.sent).toHaveLength(live);
+    expect(t.kline.unsubscribed).toBe(1);
+
+    // The same for a runner broadcast and a book update arriving first.
+    const other = session();
+    const second = t.connect(other.handle);
+    t.subscribe(second);
+    const sent = second.sent.length;
+    other.s.alive = false;
+    t.hub.broadcast({ type: 'account', account: {} });
+    expect(second.closed).toEqual([4001, 'Session expired; log in again']);
+    expect(second.sent).toHaveLength(sent);
   });
 
   it('a message on an expired session closes the socket instead of answering it', () => {

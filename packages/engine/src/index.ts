@@ -43,6 +43,7 @@ export { FUNDING_WINDOW_MS } from './perp/funding.ts';
 export { isolatedModel } from './perp/liquidation.ts';
 export type { LiquidationModel } from './perp/liquidation.ts';
 export { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './perp/rules.ts';
+export { MARGIN_MARK_UNAVAILABLE } from './perp/margin.ts';
 export type { NormalizedPerpRequest } from './perp/rules.ts';
 export {
   DEFAULT_LEVERAGE,

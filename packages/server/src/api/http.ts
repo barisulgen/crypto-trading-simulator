@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
-import { InputError, maxLeverage, parseAmount } from '@sim/engine';
+import { InputError, MARGIN_MARK_UNAVAILABLE, maxLeverage, parseAmount, TIERS_NOT_LOADED } from '@sim/engine';
 import type {
   Bracket,
   FeeSchedule,
@@ -56,12 +56,21 @@ type Query = Record<string, unknown>;
 
 const WALLETS = ['spot', 'leverage'] as const;
 const SIDES = ['buy', 'sell'] as const;
+const ORDER_TYPES = ['market', 'limit', 'post_only', 'stop_loss', 'take_profit'] as const;
+const PERP_ORDER_TYPES = ['market', 'limit', 'post_only'] as const;
 const HISTORY_MARKETS: readonly string[] = ['spot', 'leverage', 'perp'];
 const HISTORY_MAX = 200;
 const FILLS_MAX = 500;
 const RECENT_ORDERS = 100;
 /** Refusals that are the account's state, not the server's: the request may be repeated once it changes. */
 const CONFLICTS: ReadonlySet<string> = new Set([CATCHING_UP_REFUSAL, LEVERAGE_TRANSFER_REFUSAL]);
+/** Engine refusals that are the server's temporary state (data not loaded or not live): 503, like missing rules. */
+const UNAVAILABLE: ReadonlySet<string> = new Set([TIERS_NOT_LOADED, MARGIN_MARK_UNAVAILABLE]);
+
+/** An owner action the engine refused: a 400 with its reason, or a 503 when the reason is temporary. */
+function refused(reason: string): Error {
+  return UNAVAILABLE.has(reason) ? new RefusedError(reason) : new InputError(reason);
+}
 
 const ORDER_FIELDS = ['symbol', 'side', 'type', 'qty', 'quoteQty', 'price', 'triggerPrice', 'attach'];
 const PERP_ORDER_FIELDS = ['symbol', 'side', 'type', 'qty', 'quoteQty', 'price', 'reduceOnly', 'attach'];
@@ -213,7 +222,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     const req: SpotOrderRequest = {
       symbol: tradable(reqStr(b, 'symbol')),
       side: oneOf(b, 'side', SIDES),
-      type: reqStr(b, 'type') as SpotOrderRequest['type'],
+      type: oneOf(b, 'type', ORDER_TYPES),
     };
     for (const key of ['qty', 'quoteQty', 'price', 'triggerPrice'] as const) {
       const v = optStr(b, key);
@@ -228,7 +237,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     const req: PerpOrderRequest = {
       symbol: perpTradable(reqStr(b, 'symbol')),
       side: oneOf(b, 'side', SIDES),
-      type: reqStr(b, 'type') as PerpOrderRequest['type'],
+      type: oneOf(b, 'type', PERP_ORDER_TYPES),
     };
     for (const key of ['qty', 'quoteQty', 'price'] as const) {
       const v = optStr(b, key);
@@ -244,8 +253,14 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     }
     return req;
   };
-  /** The order as it is now (a call's event holds it as it was then); a finished one is as the event left it. */
-  const current = <O extends SpotOrder | PerpOrder>(o: O): O => (d.runner.order(o.id) as O | undefined) ?? o;
+  /**
+   * The order as it is now (a call's event holds it as it was then; a finished one is as the event
+   * left it), with its market.
+   */
+  const current = <O extends SpotOrder | PerpOrder>(o: O, market: Market): O & { market: Market } => ({
+    ...((d.runner.order(o.id)?.order as O | undefined) ?? o),
+    market,
+  });
   const position = (s: string) => d.runner.positions().find((p) => p.symbol === s) ?? null;
   /** The symbol's perp settings, after an owner action on them. */
   const settings = (s: string) => ({ symbol: s, ...d.runner.perpSetting(s) });
@@ -344,7 +359,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
   // An engine rejection is not an HTTP error: the order is recorded as rejected and returned.
   app.post('/api/orders', async (req, reply) => {
     const order = submittedOrder(d.runner.submit(orderRequest(objectBody(req))));
-    return send(reply, 200, { order: current(order) });
+    return send(reply, 200, { order: current(order, 'spot') });
   });
 
   // A cancel is a request, for an order of either market: 200 means it is on its way. The order
@@ -354,7 +369,8 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const r = d.runner.cancel(id);
     if (!r.ok) return send(reply, r.reason === 'Order not found' ? 404 : 400, { error: r.reason });
-    return send(reply, 200, { order: d.runner.order(id) });
+    const found = d.runner.order(id);
+    return send(reply, 200, { order: found ? { ...found.order, market: found.market } : undefined });
   });
 
   app.post('/api/oco', async (req, reply) => {
@@ -365,7 +381,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
       stopLoss: reqStr(b, 'stopLoss'),
       takeProfit: reqStr(b, 'takeProfit'),
     });
-    return send(reply, 200, { orders: placedOrRejected<SpotOrder>(events).map(current) });
+    return send(reply, 200, { orders: placedOrRejected<SpotOrder>(events).map((o) => current(o, 'spot')) });
   });
 
   // ---- perpetuals ----
@@ -377,14 +393,14 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
   // As for spot: an engine rejection is recorded and returned with 200.
   app.post('/api/perp/orders', async (req, reply) => {
     const order = submittedOrder(d.runner.submitPerp(perpOrderRequest(objectBody(req))));
-    return send(reply, 200, { order: current(order) });
+    return send(reply, 200, { order: current(order, 'perp') });
   });
 
   app.post('/api/perp/leverage', async (req, reply) => {
     const b = only(objectBody(req), ['symbol', 'leverage']);
     const s = symbol(reqStr(b, 'symbol'));
     const r = d.runner.setLeverage(s, reqInt(b, 'leverage'));
-    if (!r.ok) throw new InputError(r.reason);
+    if (!r.ok) throw refused(r.reason);
     return send(reply, 200, settings(s));
   });
 
@@ -392,7 +408,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     const b = only(objectBody(req), ['symbol', 'mode']);
     const s = symbol(reqStr(b, 'symbol'));
     const r = d.runner.setMarginMode(s, oneOf(b, 'mode', ['isolated', 'cross'] as const));
-    if (!r.ok) throw new InputError(r.reason);
+    if (!r.ok) throw refused(r.reason);
     return send(reply, 200, settings(s));
   });
 
@@ -403,7 +419,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     const action = oneOf(b, 'action', ['add', 'remove'] as const);
     const amount = reqStr(b, 'amount');
     const r = action === 'add' ? d.runner.addMargin(s, amount) : d.runner.removeMargin(s, amount);
-    if (!r.ok) throw new InputError(r.reason);
+    if (!r.ok) throw refused(r.reason);
     return send(reply, 200, { position: position(s) });
   });
 
@@ -418,7 +434,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
       ...(stopLoss !== undefined ? { stopLoss } : {}),
       ...(takeProfit !== undefined ? { takeProfit } : {}),
     });
-    return send(reply, 200, { orders: placedOrRejected<PerpOrder>(events).map(current) });
+    return send(reply, 200, { orders: placedOrRejected<PerpOrder>(events).map((o) => current(o, 'perp')) });
   });
 
   // A reduce-only market order on the opposite side of the position: `qty` of it, or all of it.
@@ -435,7 +451,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
       qty: qty ?? p.qty.toString(),
       reduceOnly: true,
     });
-    return send(reply, 200, { order: current(submittedOrder(events)) });
+    return send(reply, 200, { order: current(submittedOrder(events), 'perp') });
   });
 
   // ---- history and charts ----
@@ -480,7 +496,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     return send(reply, 200, { candles });
   });
 
-  // The socket keeps its LAN session: closed once that expires, renewed by its messages and pongs.
+  // The socket keeps its LAN session: closed once that expires, renewed by its messages (not its pongs).
   app.get('/ws', { websocket: true }, (socket, req) => d.hub.add(socket, auth.sessionOf(req)));
 
   // dotfiles: 'deny' - never serve a dotfile (e.g. an editor's .env copy) that lands in web/dist.

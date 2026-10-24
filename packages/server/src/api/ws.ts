@@ -105,8 +105,9 @@ interface Client {
  * and a new subscribe releases the previous one. Every message is JSON with decimals as strings.
  * Backpressure: live messages are skipped while a client has more than 1 MB unsent and the
  * client is terminated above 4 MB; a client that misses a 30 s ping is terminated. A client whose
- * LAN session has expired is closed (code 4001) at the next heartbeat or message; its messages and
- * pongs renew the session. Whenever a client goes, its kline subscription is released.
+ * LAN session has expired is closed (code 4001) before anything more is sent to it, at the latest
+ * at the next heartbeat; its messages renew the session (pongs do not, so an unattended tab does
+ * not hold it open). Whenever a client goes, its kline subscription is released.
  */
 export class ClientHub {
   private readonly clients = new Map<HubSocket, Client>();
@@ -155,9 +156,9 @@ export class ClientHub {
     const client: Client = { key: null, unsubscribeKline: null, alive: true, session };
     this.clients.set(socket, client);
     socket.on('message', (raw: unknown) => this.onMessage(socket, client, raw));
+    // A pong is the browser's, not the owner's: it keeps the socket, not the session, alive.
     socket.on('pong', () => {
       client.alive = true;
-      client.session?.touch();
     });
     socket.on('close', () => this.remove(socket));
     socket.on('error', () => this.remove(socket));
@@ -307,9 +308,14 @@ export class ClientHub {
     this.write(socket, toJson(msg), snapshot);
   }
 
-  /** Snapshot messages are always sent (unless the client is terminated); live ones yield to backpressure. */
+  /**
+   * Snapshot messages are always sent (unless the client is terminated); live ones yield to
+   * backpressure. Nothing is sent once the client's session has expired: it is closed instead.
+   */
   private write(socket: HubSocket, text: string, snapshot = false): void {
     if (socket.readyState !== OPEN) return;
+    const client = this.clients.get(socket);
+    if (client && this.closeIfExpired(socket, client)) return;
     if (socket.bufferedAmount > TERMINATE_BUFFER_BYTES) {
       this.drop(socket, `${socket.bufferedAmount} bytes unsent`);
       return;

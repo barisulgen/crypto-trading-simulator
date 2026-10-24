@@ -131,6 +131,8 @@ export interface HealthMessage {
  */
 export interface PositionView extends Position {
   marginMode: 'isolated';
+  /** True while the symbol's perp data catches up after a gap: the figures may still change once it is applied. */
+  catchingUp: boolean;
   markPrice: Decimal | null;
   markFresh: boolean;
   /** When the mark was received (ms); null before the first. */
@@ -561,9 +563,10 @@ export class EngineRunner implements FundingSim {
       .sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  /** An order of either market still in memory (live, or finished and not yet saved); undefined otherwise. */
-  order(orderId: string): SpotOrder | PerpOrder | undefined {
-    return this.d.sim.spot.state.orders.get(orderId) ?? this.d.sim.perp.state.orders.get(orderId);
+  /** An order of either market still in memory (live, or finished and not yet saved), with its market; undefined otherwise. */
+  order(orderId: string): { market: Market; order: SpotOrder | PerpOrder } | undefined {
+    const market = this.marketOfOrder(orderId);
+    return market === null ? undefined : { market, order: this.ordersOf(market).get(orderId)! };
   }
 
   /** Every open position at the last mark received, oldest first (see PositionView). */
@@ -577,6 +580,7 @@ export class EngineRunner implements FundingSim {
         const view: PositionView = {
           ...p,
           marginMode: 'isolated',
+          catchingUp: this.catchUp.isCatchingUp(perpKey(p.symbol)),
           markPrice: mark,
           markFresh: mark !== null && perp.isMarkFresh(p.symbol),
           markAt: mark === null ? null : perp.markReceivedAt(p.symbol),

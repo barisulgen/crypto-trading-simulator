@@ -841,7 +841,10 @@ export function queryHistory(db: Db, q: HistoryQuery): { rows: HistoryRow[]; nex
     where.push('symbol = ?');
     args.push(q.symbol);
   }
-  if (q.market !== undefined) {
+  if (q.market === 'leverage') {
+    // The leverage side as a whole: its wallet's deposits, the perp events, and transfers.
+    where.push("(market IN ('leverage', 'perp') OR market IS NULL)");
+  } else if (q.market !== undefined) {
     where.push('(market = ? OR market IS NULL)');
     args.push(q.market);
   }

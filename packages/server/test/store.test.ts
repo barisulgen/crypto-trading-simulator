@@ -598,6 +598,13 @@ describe('queryHistory', () => {
     expect(ids({ types: ['fill'] })).toEqual([6, 3, 2]);
     expect(ids({ types: ['fill', 'order_placed'], symbol: 'BTCUSDT' })).toEqual([6, 4, 2]);
     expect(ids({ market: 'spot' })).toEqual([5, 4, 3, 2, 1]);
+    const ins = db.prepare('INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, ?, ?, ?, ?)');
+    ins.run(seasonId, 700, 'deposit', null, 'leverage', '{"amount":"50"}'); // id 8
+    ins.run(seasonId, 800, 'position_opened', 'BTCUSDT', 'perp', '{"n":6}'); // id 9
+    // leverage: the whole leverage side, perp events included; perp: perp events only (and transfers).
+    expect(ids({ market: 'leverage' })).toEqual([9, 8, 6, 5]);
+    expect(ids({ market: 'perp' })).toEqual([9, 5]);
+    expect(ids({ market: 'spot' })).toEqual([5, 4, 3, 2, 1]);
     expect(ids({ from: 200, to: 300 })).toEqual([4, 3, 2]);
   });
 

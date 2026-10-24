@@ -11,7 +11,8 @@ import type { Bracket, PerpActionResult, PerpCtx, Position } from './types.ts';
 
 /** Leverage, margin mode and the margin of open isolated positions. */
 
-const MARK_UNAVAILABLE = 'Mark price unavailable; try again when live data is back';
+/** Margin cannot be removed without a fresh mark price: a temporary refusal. */
+export const MARGIN_MARK_UNAVAILABLE = 'Mark price unavailable; try again when live data is back';
 const MAX_DECIMALS = 8;
 
 function fail(reason: string): PerpActionResult {
@@ -109,7 +110,7 @@ export function removeMargin(s: PerpState, symbol: string, input: string, ctx: P
   const tiers = bracketsOrNull(symbol, ctx);
   if (!tiers) return fail(TIERS_NOT_LOADED);
   const mark = ctx.market.isMarkFresh(symbol) ? validMark(symbol, ctx) : null;
-  if (!mark) return fail(MARK_UNAVAILABLE);
+  if (!mark) return fail(MARGIN_MARK_UNAVAILABLE);
   const read = readMargin(input);
   if ('reason' in read) return fail(read.reason);
   const max = maxRemovableMargin({

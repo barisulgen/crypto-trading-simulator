@@ -66,7 +66,7 @@ export interface AuthOptions {
  * `/%61pi/account` is `/api/account`), and only POST /api/login and `publicRoutes` are open;
  * every other route, /ws and unmatched paths need the session (401 otherwise).
  * A session expires after 24 h without use or 7 days after login (401 'Session expired; log in
- * again'); messages and heartbeats on a /ws socket count as use (sessionOf). 5 wrong passwords
+ * again'); the owner's messages on a /ws socket count as use (sessionOf). 5 wrong passwords
  * from one address within 15 minutes block further logins from it (429) until the oldest failure is
  * 15 minutes old; every login attempt first forgets the addresses whose failures are all older.
  * Without a password (localhost only), every request whose Host or Origin is not local is
