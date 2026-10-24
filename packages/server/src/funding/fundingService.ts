@@ -1,0 +1,197 @@
+import { D, FUNDING_WINDOW_MS } from '@sim/engine';
+import type { Decimal } from '@sim/engine';
+import type { FundingRateQuery } from '../binance/futuresRest.ts';
+import type { Logger } from '../log.ts';
+import type { SetTimer } from '../market/ws.ts';
+
+/** While a settlement is awaited, fundingRate is polled this often (through the funding lane). */
+export const FUNDING_POLL_MS = 30_000;
+/** A settlement still missing this long after its funding time is logged (once per symbol)... */
+export const FUNDING_UNSETTLED_LOG_MS = 6 * 3_600_000;
+/** ...and polled this often from then on. It is never estimated. */
+export const FUNDING_SLOW_POLL_MS = 300_000;
+/** A fundingRate record within this of the funding time is its settlement. */
+const MATCH_MS = 60_000;
+/** The fundingRate query reaches this far either side of the funding time. */
+const QUERY_MS = 60_000;
+const QUERY_LIMIT = 10;
+
+/** A funding window by symbol and funding time. */
+export interface FundingRef {
+  symbol: string;
+  fundingTime: number;
+}
+
+/** What the service does to the account: each call is one engine call, persisted (the runner). */
+export interface FundingSim {
+  /** The windows open now and those closed and waiting for their settled rate, as saved. */
+  fundingWindows(): { open: FundingRef[]; pending: FundingRef[] };
+  openFundingWindow(symbol: string, fundingTime: number): void;
+  closeFundingWindow(symbol: string, fundingTime: number): void;
+  applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal): unknown;
+}
+
+export interface FundingServiceDeps {
+  rest: { fundingRate(q: FundingRateQuery): Promise<unknown> };
+  sim: FundingSim;
+  /** The mark stream: 'mark' (symbol, { nextFundingTime }). */
+  market: {
+    on(event: 'mark', cb: (symbol: string, mark: { nextFundingTime: number }) => void): unknown;
+    off(event: 'mark', cb: (symbol: string, mark: { nextFundingTime: number }) => void): unknown;
+  };
+  now: () => number;
+  setTimer: SetTimer;
+  logger: Logger;
+}
+
+/**
+ * Real funding, never estimated. Each symbol's next funding time T comes from the mark stream: the
+ * window opens at T − 15 s and closes at T + 15 s, then fundingRate (startTime T − 60 s, endTime
+ * T + 60 s) is polled every 30 s, through the funding lane, until Binance has published the
+ * settlement (a record within 60 s of T); its rate and mark price are then applied, once. Still
+ * missing after 6 h, it is logged once per symbol and polled every 5 min. Windows live in the
+ * perp state, so they survive a restart: on start, a window still open is closed at its own close
+ * time (at once if that has passed) and every window waiting for its rate is polled again at once.
+ * A funding time first seen after its window closed (the server was down) is left to catch-up.
+ */
+export class FundingService {
+  private readonly d: FundingServiceDeps;
+  private readonly timers = new Set<() => void>();
+  /** `${symbol}@${T}` of every funding time already scheduled or handled, kept for a day. */
+  private readonly seen = new Map<string, number>();
+  /** Symbols whose missing settlement has been logged; cleared when one of theirs settles. */
+  private readonly loggedLate = new Set<string>();
+  /** Windows whose last poll failed (logged once until a poll answers). */
+  private readonly failing = new Set<string>();
+  private started = false;
+  private readonly markListener = (symbol: string, mark: { nextFundingTime: number }) =>
+    this.onMark(symbol, mark.nextFundingTime);
+
+  constructor(deps: FundingServiceDeps) {
+    this.d = deps;
+  }
+
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+    const { open, pending } = this.d.sim.fundingWindows();
+    for (const w of open) {
+      this.seen.set(refKey(w), w.fundingTime);
+      // A close that should have run while the server was down runs now, and its poll at once.
+      const overdue = this.d.now() >= w.fundingTime + FUNDING_WINDOW_MS;
+      this.at(w.fundingTime + FUNDING_WINDOW_MS, () => this.close(w, overdue ? 0 : FUNDING_POLL_MS));
+    }
+    for (const w of pending) {
+      this.seen.set(refKey(w), w.fundingTime);
+      this.at(this.d.now(), () => void this.poll(w));
+    }
+    this.d.market.on('mark', this.markListener);
+  }
+
+  stop(): void {
+    this.started = false;
+    this.d.market.off('mark', this.markListener);
+    for (const cancel of this.timers) cancel();
+    this.timers.clear();
+  }
+
+  /** A mark update naming the symbol's next funding time: its window is scheduled once. */
+  private onMark(symbol: string, fundingTime: number): void {
+    if (!this.started || !Number.isSafeInteger(fundingTime) || fundingTime <= 0) return;
+    const ref = { symbol, fundingTime };
+    const k = refKey(ref);
+    if (this.seen.has(k)) return;
+    const now = this.d.now();
+    if (now >= fundingTime + FUNDING_WINDOW_MS) return; // its window closed before it was seen: catch-up's
+    this.seen.set(k, fundingTime);
+    this.prune(now);
+    this.at(fundingTime - FUNDING_WINDOW_MS, () => this.safely(ref, () => this.d.sim.openFundingWindow(symbol, fundingTime)));
+    this.at(fundingTime + FUNDING_WINDOW_MS, () => this.close(ref));
+  }
+
+  /** The window closes and waits for its settled rate: the first poll is `pollIn` later (30 s on time). */
+  private close(ref: FundingRef, pollIn = FUNDING_POLL_MS): void {
+    if (!this.safely(ref, () => this.d.sim.closeFundingWindow(ref.symbol, ref.fundingTime))) return;
+    this.at(this.d.now() + pollIn, () => void this.poll(ref));
+  }
+
+  /** One fundingRate poll; the settlement found is applied, otherwise the next poll is scheduled. */
+  private async poll(ref: FundingRef): Promise<void> {
+    const T = ref.fundingTime;
+    const k = refKey(ref);
+    let settlement: { rate: Decimal; markPrice: Decimal } | null = null;
+    try {
+      const rows = await this.d.rest.fundingRate({ symbol: ref.symbol, startTime: T - QUERY_MS, endTime: T + QUERY_MS, limit: QUERY_LIMIT });
+      this.failing.delete(k);
+      settlement = findSettlement(rows, T);
+    } catch (e) {
+      if (!this.failing.has(k)) {
+        this.failing.add(k);
+        this.d.logger.warn(`Funding ${ref.symbol} at ${iso(T)}: fundingRate poll failed (${(e as Error).message}); retrying`);
+      }
+    }
+    if (!this.started) return;
+    if (settlement !== null) {
+      const { rate, markPrice } = settlement;
+      if (this.safely(ref, () => this.d.sim.applyFunding(ref.symbol, T, rate, markPrice))) {
+        this.loggedLate.delete(ref.symbol);
+        return;
+      }
+    }
+    const late = this.d.now() - T >= FUNDING_UNSETTLED_LOG_MS;
+    if (late && !this.loggedLate.has(ref.symbol)) {
+      this.loggedLate.add(ref.symbol);
+      this.d.logger.warn(`${ref.symbol} funding at ${iso(T)} not settled after 6 h; still waiting for Binance (never estimated)`);
+    }
+    this.at(this.d.now() + (late ? FUNDING_SLOW_POLL_MS : FUNDING_POLL_MS), () => void this.poll(ref));
+  }
+
+  /**
+   * Runs one engine call for the window; a refusal (the runner stopped, or its state failed its
+   * integrity check) is logged and reported as false, never thrown into a timer.
+   */
+  private safely(ref: FundingRef, fn: () => unknown): boolean {
+    try {
+      fn();
+      return true;
+    } catch (e) {
+      this.d.logger.warn(`Funding ${ref.symbol} at ${iso(ref.fundingTime)}: ${(e as Error).message}`);
+      return false;
+    }
+  }
+
+  /** Runs `fn` at epoch ms `when` (at once if past), unless stopped first. */
+  private at(when: number, fn: () => void): void {
+    const cancel = this.d.setTimer(() => {
+      this.timers.delete(cancel);
+      if (this.started) fn();
+    }, Math.max(0, when - this.d.now()));
+    this.timers.add(cancel);
+  }
+
+  private prune(now: number): void {
+    for (const [k, t] of this.seen) if (t < now - 86_400_000) this.seen.delete(k);
+  }
+}
+
+const refKey = (r: FundingRef) => `${r.symbol}@${r.fundingTime}`;
+const iso = (t: number) => new Date(t).toISOString();
+
+/**
+ * The settlement of funding time T among fundingRate records: one within 60 s of T with a decimal
+ * rate and a positive mark price. Anything else (no record yet, an old record without a mark
+ * price) is not a settlement: the poll goes on.
+ */
+function findSettlement(rows: unknown, T: number): { rate: Decimal; markPrice: Decimal } | null {
+  if (!Array.isArray(rows)) return null;
+  for (const r of rows) {
+    const time = Number(r?.fundingTime);
+    if (!Number.isSafeInteger(time) || Math.abs(time - T) > MATCH_MS) continue;
+    if (typeof r.fundingRate !== 'string' || !/^-?\d+(\.\d+)?$/.test(r.fundingRate)) continue;
+    if (typeof r.markPrice !== 'string' || !/^\d+(\.\d+)?$/.test(r.markPrice)) continue;
+    const markPrice = D(r.markPrice);
+    if (!markPrice.gt(0)) continue;
+    return { rate: D(r.fundingRate), markPrice };
+  }
+  return null;
+}

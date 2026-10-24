@@ -39,7 +39,7 @@ function setup() {
     },
   };
   const candles = { spot: service, perp: service };
-  const runner = { account: () => ({}) as any, openOrders: () => [] };
+  const runner = { account: () => ({}) as any, openOrders: () => [], openPerpOrders: () => [] };
   const hub = new ClientHub({ market, candles, runner, symbols: ['BTCUSDT'], setTimer: clock.setTimer, logger: silent });
   hub.start();
   const connect = () => {

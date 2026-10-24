@@ -2,17 +2,17 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { D, emptyPerpState, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
+import { D, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/api/http.ts';
 import { ClientHub } from '../src/api/ws.ts';
 import { COINS, loadConfig } from '../src/config.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
-import { loadLedger, loadSpotState } from '../src/db/store.ts';
+import { loadLedger, loadPerpState, loadSpotState } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import type { Candle } from '../src/market/candles.ts';
 import { EngineRunner } from '../src/runner.ts';
-import { FakeClock, FakeHealth, TestMarket } from './helpers.ts';
+import { FakeClock, FakeHealth, TestMarket, TestPerpMarket } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
 const SECRET_ENV = { BINANCE_KEY: 'kKEY-9f3a1e', BINANCE_SECRET: 'sSECRET-77b2c4', APP_PASSWORD: 'pw-LAN-4c1d0a' };
@@ -46,16 +46,17 @@ async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
   const logger = createLogger(config.secrets, (_s, line) => logs.push(line));
   const ledger = loadLedger(db, seasonId, ['USDT', ...COINS]);
   const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
-  const sim = new SimEngine(ledger, engine, new PerpEngine(emptyPerpState(ledger)));
+  const sim = new SimEngine(ledger, engine, new PerpEngine(loadPerpState(db, seasonId, ledger)));
   let hub: ClientHub | null = null;
   const runner = new EngineRunner({
     db,
     seasonId,
     sim,
-    market,
-    health: new FakeHealth(() => clock.now),
+    spotMarket: market,
+    perpMarket: new TestPerpMarket(config.symbols),
+    health: { spot: new FakeHealth(() => clock.now), perp: new FakeHealth(() => clock.now) },
     symbols: config.symbols,
-    fees: config.fees.spot,
+    fees: config.fees,
     now: () => clock.now,
     rng: () => 0,
     setTimer: clock.setTimer,

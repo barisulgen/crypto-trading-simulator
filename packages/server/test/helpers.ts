@@ -1,9 +1,13 @@
 import { EventEmitter } from 'node:events';
-import { D, emptyPerpState, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
+import { D, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import type { AggTrade, BookSnapshot, Decimal, PriceLevel, Side } from '@sim/engine';
 import { FakeMarket } from '../../engine/test/fixtures.ts';
+import { FakePerpMarket } from '../../engine/test/perpFixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
-import { loadLedger, loadSpotState } from '../src/db/store.ts';
+import type { Db } from '../src/db/db.ts';
+import { loadLedger, loadPerpState, loadSpotState, toJson } from '../src/db/store.ts';
+import { createLogger } from '../src/log.ts';
+import type { MarkUpdate } from '../src/market/perpFeed.ts';
 import { FeedHealth } from '../src/market/feedHealth.ts';
 import { LocalBook } from '../src/market/localBook.ts';
 import { MarketData } from '../src/market/marketData.ts';
@@ -174,6 +178,111 @@ export class FakeHealth {
   }
 }
 
+/**
+ * The engine's FakePerpMarket plus what the runner reads of PerpMarketData: consume, health
+ * snapshot and the 'trade' / 'mark' events. BTCUSDT starts fresh on the engine fixture's book
+ * (asks 80000.0 x 0.2, 80010.0 x 1.0; bids 79990.0 x 0.2, 79980.0 x 1.0), mark 80000.
+ */
+export class TestPerpMarket extends FakePerpMarket {
+  private readonly emitter = new EventEmitter();
+  staleReason = 'Disconnected';
+  readonly consumed: { symbol: string; side: Side; levels: PriceLevel[] }[] = [];
+  constructor(private readonly symbols: string[] = ['BTCUSDT']) {
+    super();
+  }
+  on(event: string, cb: (...args: any[]) => void): this {
+    this.emitter.on(event, cb);
+    return this;
+  }
+  off(event: string, cb: (...args: any[]) => void): this {
+    this.emitter.off(event, cb);
+    return this;
+  }
+  /** Deliver a live futures trade, as PerpMarketData does. */
+  trade(symbol: string, t: AggTrade): void {
+    this.setLastPrice(symbol, t.price);
+    this.emitter.emit('trade', symbol, t);
+  }
+  /** Deliver a mark price update (recorded as the market's mark first, as PerpMarketData does). */
+  mark(symbol: string, price: string, nextFundingTime = 0, fundingRate = '0.0001'): void {
+    this.setMarkPrice(symbol, D(price));
+    const m: MarkUpdate = { markPrice: D(price), indexPrice: D(price), fundingRate: D(fundingRate), nextFundingTime, eventTime: 0 };
+    this.emitter.emit('mark', symbol, m);
+  }
+  consume(symbol: string, side: Side, levels: PriceLevel[]): void {
+    this.consumed.push({ symbol, side, levels });
+  }
+  healthSnapshot(): Record<string, { fresh: boolean; reason: string | null }> {
+    return Object.fromEntries(
+      this.symbols.map((s) => [s, { fresh: this.isFresh(s), reason: this.isFresh(s) ? null : this.staleReason }]),
+    );
+  }
+}
+
+export const RUNNER_T0 = 1_700_000_000_000;
+export const RUNNER_FEES = {
+  spot: { maker: D('0.001'), taker: D('0.001') },
+  perp: { maker: D('0.0002'), taker: D('0.0005') },
+};
+
+export interface RunnerMsg {
+  type: string;
+  [k: string]: any;
+}
+
+/**
+ * A runner over a ':memory:' (or given) DB, a spot TestMarket, a TestPerpMarket, a FakeHealth per
+ * market and a fake clock, built as main.ts builds it (every state loaded from the DB); rng 0 =
+ * 100 ms delays. Not started.
+ */
+export function runnerHarness(
+  opts: { db?: Db; market?: TestMarket; perpMarket?: TestPerpMarket; clock?: FakeClock; symbols?: string[] } = {},
+) {
+  const symbols = opts.symbols ?? ['BTCUSDT'];
+  const db = opts.db ?? openDb(':memory:');
+  const clock = opts.clock ?? new FakeClock(RUNNER_T0);
+  const seasonId = currentSeasonId(db, () => clock.now);
+  const market = opts.market ?? new TestMarket(symbols);
+  const perp = opts.perpMarket ?? new TestPerpMarket(symbols);
+  const health = new FakeHealth(() => clock.now);
+  const perpHealth = new FakeHealth(() => clock.now);
+  const ledger = loadLedger(db, seasonId, ['USDT', ...symbols.map((s) => s.replace(/USDT$/, ''))]);
+  const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
+  const sim = new SimEngine(ledger, engine, new PerpEngine(loadPerpState(db, seasonId, ledger)));
+  const sent: RunnerMsg[] = [];
+  const fatal: unknown[] = [];
+  const logs: string[] = [];
+  const logger = createLogger([], (_s, line) => logs.push(line));
+  const runner = new EngineRunner({
+    db,
+    seasonId,
+    sim,
+    spotMarket: market,
+    perpMarket: perp,
+    health: { spot: health, perp: perpHealth },
+    symbols,
+    fees: RUNNER_FEES,
+    now: () => clock.now,
+    rng: () => 0,
+    setTimer: clock.setTimer,
+    onBroadcast: (m) => sent.push(JSON.parse(toJson(m)) as RunnerMsg),
+    onFatal: (e) => fatal.push(e),
+    logger,
+  });
+  const notices = () => sent.filter((m) => m.type === 'notice').map((m) => m.text as string);
+  const orderRow = (id: string) =>
+    db.prepare('SELECT status, market, data FROM orders WHERE id = ?').get(id) as
+      | { status: string; market: string; data: string }
+      | undefined;
+  const eventsOf = (type: string) =>
+    (db.prepare('SELECT time, symbol, payload FROM events WHERE type = ? ORDER BY id').all(type) as {
+      time: number;
+      symbol: string | null;
+      payload: string;
+    }[]).map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
+  return { db, clock, seasonId, market, perp, health, perpHealth, sim, engine, runner, sent, fatal, logs, logger, notices, orderRow, eventsOf };
+}
+
 type Levels = [string, string][];
 
 /**
@@ -218,16 +327,17 @@ export async function liveStack(t0: number) {
   const seasonId = currentSeasonId(db, () => clock.now);
   const ledger = loadLedger(db, seasonId, ['USDT', 'BTC']);
   const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
-  const sim = new SimEngine(ledger, engine, new PerpEngine(emptyPerpState(ledger)));
+  const sim = new SimEngine(ledger, engine, new PerpEngine(loadPerpState(db, seasonId, ledger)));
   const sent: RunnerMessage[] = [];
   const runner = new EngineRunner({
     ...common,
     db,
     seasonId,
     sim,
-    market,
-    health,
-    fees: { maker: D('0.001'), taker: D('0.001') },
+    spotMarket: market,
+    perpMarket: new TestPerpMarket(symbols),
+    health: { spot: health, perp: new FakeHealth(() => clock.now) },
+    fees: RUNNER_FEES,
     rng: () => 0,
     onBroadcast: (m) => sent.push(m),
     onFatal: (e) => {

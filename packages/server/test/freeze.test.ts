@@ -108,9 +108,10 @@ describe('after a freeze', () => {
 describe('after a stall shorter than the silence limit', () => {
   const PAUSED = 'Server paused (sleep or freeze)';
   const STALL_MS = 8000; // above the 5 s stall limit, below the 15 s silence limit
-  const openGaps = (db: Db) => db.prepare('SELECT symbol, started_at AS startedAt, reason FROM open_gaps').all();
+  // The spot feed's gaps: the pause is also a gap in the perp data of the same symbol, recorded on its own.
+  const openGaps = (db: Db) => db.prepare("SELECT symbol, started_at AS startedAt, reason FROM open_gaps WHERE market = 'spot'").all();
   const gaps = (db: Db) =>
-    (db.prepare("SELECT payload FROM events WHERE type = 'feed_gap' ORDER BY id").all() as { payload: string }[]).map(
+    (db.prepare("SELECT payload FROM events WHERE type = 'feed_gap' AND market = 'spot' ORDER BY id").all() as { payload: string }[]).map(
       (r) => JSON.parse(r.payload),
     );
 

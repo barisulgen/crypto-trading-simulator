@@ -5,6 +5,8 @@ import { parsePerpRules } from '../src/binance/parsePerpRules.ts';
 import { FeedHealth } from '../src/market/feedHealth.ts';
 import { LocalBook } from '../src/market/localBook.ts';
 import { PerpFeed, perpHealth, PERP_DEPTH_URL, PERP_MARKET_URL } from '../src/market/perpFeed.ts';
+import { TierLoader } from '../src/binance/tiers.ts';
+import { TIERS_REFRESH_MS as CONFIG_TIERS_REFRESH_MS } from '../src/config.ts';
 import { PerpMarketData, TIERS_REFRESH_MS } from '../src/market/perpMarketData.ts';
 import { SpotFeed } from '../src/market/spotFeed.ts';
 import { FakeClock, FakeWs, tick } from './helpers.ts';
@@ -31,7 +33,7 @@ const tierSet = (source: TierSet['source'], fetchedAt: number, symbols: string[]
  * sockets, loads every book (bids 100 x 1, asks 101 x 1, then a bridging update), sends a mark and
  * a trade per symbol and loads rules and tiers: every symbol is fresh after it.
  */
-function stack(symbols = ['BTCUSDT']) {
+function stack(symbols = ['BTCUSDT'], logger: { info(m: string): void; warn(m: string): void; error(m: string): void } = silent) {
   const clock = new FakeClock(T0);
   const sockets: FakeWs[] = [];
   const health = perpHealth(symbols, cfg);
@@ -53,7 +55,7 @@ function stack(symbols = ['BTCUSDT']) {
       return tiersResult();
     },
   };
-  const common = { symbols, logger: silent, now: () => clock.now, setTimer: clock.setTimer };
+  const common = { symbols, logger, now: () => clock.now, setTimer: clock.setTimer };
   const feed = new PerpFeed({
     ...common,
     rest,
@@ -405,6 +407,81 @@ describe('PerpMarketData refreshes', () => {
     expect(await t.md.refreshTiers()).toBe(true);
     expect(t.md.tierInfo()!.source).toBe('unofficial');
     expect(t.md.brackets('BTCUSDT')[0]!.maxLeverage).toBe(150);
+  });
+
+  it('the tier refresh interval is the config constant, 24 h', () => {
+    expect(CONFIG_TIERS_REFRESH_MS).toBe(86_400_000);
+    expect(TIERS_REFRESH_MS).toBe(CONFIG_TIERS_REFRESH_MS);
+  });
+
+  it('a failed tier refresh through the loader keeps the old set and logs a warning without the key', async () => {
+    const lines: string[] = [];
+    const logger = {
+      info: (m: string) => lines.push(`info ${m}`),
+      warn: (m: string) => lines.push(`warn ${m}`),
+      error: (m: string) => lines.push(`error ${m}`),
+    };
+    const t = stack(['BTCUSDT'], logger);
+    let up = true;
+    const loader = new TierLoader({
+      symbols: ['BTCUSDT'],
+      rest: {
+        leverageBracket: async () => {
+          if (up) return [{ symbol: 'BTCUSDT', brackets: [{ notionalFloor: 0, notionalCap: 300000, maintMarginRatio: 0.004, cum: 0, initialLeverage: 150 }] }];
+          throw new Error('Binance /fapi/v1/leverageBracket HTTP 401: {"msg":"Invalid API-key k3y"}');
+        },
+      },
+      credentials: { key: 'k3y', secret: 's3cret' },
+      unofficial: async () => {
+        throw new Error('down for k3y / s3cret');
+      },
+      snapshot: {},
+      logger,
+    });
+    const md = new PerpMarketData({
+      symbols: ['BTCUSDT'],
+      feed: t.feed,
+      books: t.books,
+      health: t.health,
+      rest: { exchangeInfo: async () => ({ symbols: [] }), serverTime: async () => ({ serverTime: t.clock.now }) },
+      tiers: loader,
+      logger,
+      now: () => t.clock.now,
+      setTimer: t.clock.setTimer,
+    });
+    expect(await md.refreshTiers()).toBe(true);
+    const held = md.tierInfo();
+    expect(held).toEqual({ source: 'official', fetchedAt: t.clock.now });
+    up = false;
+    t.clock.advance(86_400_000);
+    expect(await md.refreshTiers()).toBe(true);
+    expect(md.tierInfo()).toEqual(held);
+    expect(md.brackets('BTCUSDT')[0]!.maxLeverage).toBe(150);
+    expect(lines.some((l) => l.startsWith('warn Leverage tiers refresh failed; keeping the previous tiers'))).toBe(true);
+    for (const l of lines) {
+      expect(l).not.toContain('k3y');
+      expect(l).not.toContain('s3cret');
+    }
+  });
+
+  it('ready() resolves once rules and tiers have both loaded, before which the perp feed must not start', async () => {
+    const t = stack();
+    let ready = false;
+    void t.md.ready().then(() => {
+      ready = true;
+    });
+    await t.md.refreshRules();
+    await tick();
+    expect(ready).toBe(false);
+    await t.md.refreshTiers();
+    await tick();
+    expect(ready).toBe(true);
+    let again = false;
+    void t.md.ready().then(() => {
+      again = true;
+    });
+    await tick();
+    expect(again).toBe(true);
   });
 
   it('stop() cancels every poller', async () => {

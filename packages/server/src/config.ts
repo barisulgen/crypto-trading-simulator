@@ -18,6 +18,9 @@ export interface Config {
   readonly binanceCredentials: { key: string; secret: string } | null;
 }
 
+/** Leverage tiers are reloaded this often (and at start); a failed reload keeps the tiers held. */
+export const TIERS_REFRESH_MS = 86_400_000;
+
 export const COINS = ['BTC', 'ETH', 'SOL', 'NEAR', 'XRP', 'BNB', 'DOGE', 'SUI', 'HYPE', 'AVAX'];
 
 export function parseEnv(text: string): Record<string, string> {

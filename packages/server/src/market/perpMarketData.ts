@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { AggTrade, BookSnapshot, Bracket, Decimal, PerpMarketView, PerpRules, PriceLevel, Side, TierSet } from '@sim/engine';
+import { TIERS_REFRESH_MS } from '../config.ts';
 import type { Logger } from '../log.ts';
 import type { FuturesRest } from '../binance/futuresRest.ts';
 import { parsePerpRules } from '../binance/parsePerpRules.ts';
@@ -13,8 +14,7 @@ import type { DepthLevels, Ticker } from './streamParse.ts';
 import { defaultSetTimer } from './ws.ts';
 import type { SetTimer } from './ws.ts';
 
-/** Leverage tiers are reloaded this often. */
-export const TIERS_REFRESH_MS = 86_400_000;
+export { TIERS_REFRESH_MS };
 
 export interface PerpMarketDataDeps {
   symbols: string[];
@@ -59,6 +59,8 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
   private readonly mark = new Map<string, MarkUpdate>();
   private tierSet: TierSet | null = null;
   private started = false;
+  /** Called once rules and tiers have both loaded (see ready()). */
+  private readyWaiters: (() => void)[] = [];
 
   constructor(d: PerpMarketDataDeps) {
     super();
@@ -103,6 +105,25 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
     this.pollers.stop();
   }
 
+  /**
+   * Resolves once trading rules (from an exchangeInfo that listed any of the symbols) and a set of
+   * leverage tiers are both held. The perp feed starts only then, so no trade or mark reaches the
+   * engine before what it needs to act on it.
+   */
+  ready(): Promise<void> {
+    if (this.isReady()) return Promise.resolve();
+    return new Promise((resolve) => this.readyWaiters.push(resolve));
+  }
+
+  private isReady(): boolean {
+    return this.ruleMap.size > 0 && this.tierSet !== null;
+  }
+
+  private checkReady(): void {
+    if (!this.isReady()) return;
+    for (const resolve of this.readyWaiters.splice(0)) resolve();
+  }
+
   /** True when every symbol has rules afterwards. A symbol whose entry is missing or malformed keeps its previous rules. */
   async refreshRules(): Promise<boolean> {
     try {
@@ -116,6 +137,7 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
           this.log.warn(`futures exchangeInfo: ${(e as Error).message}`);
         }
       }
+      this.checkReady();
       return this.symbols.every((s) => this.ruleMap.has(s));
     } catch (e) {
       this.log.warn(`futures exchangeInfo refresh failed: ${(e as Error).message}`);
@@ -138,6 +160,7 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
         return true;
       }
       this.tierSet = set;
+      this.checkReady();
       return set.source !== 'bundled';
     } catch (e) {
       this.log.warn(`Leverage tiers refresh failed${this.tierSet ? '; keeping the previous tiers' : ''}: ${(e as Error).message}`);

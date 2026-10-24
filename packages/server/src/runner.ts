@@ -1,20 +1,40 @@
 import { randomUUID } from 'node:crypto';
-import { Decimal, ORDER_NOT_OPEN, RESTART_REASON, arrivalDelay, putOrder, valueAccount } from '@sim/engine';
+import {
+  ctxFor,
+  liquidationPrice,
+  ORDER_NOT_OPEN,
+  RESTART_REASON,
+  arrivalDelay,
+  putOrder,
+  putPerpOrder,
+  valueAccount,
+} from '@sim/engine';
 import type {
   AccountValue,
   ActionResult,
   AggTrade,
-  EngineCtx,
+  Bracket,
+  Decimal,
   EngineEvent,
   FeeSchedule,
-  Fill,
+  Ledger,
+  Market,
+  MarginWarning,
   MarketView,
   OcoRequest,
-  Ledger,
   OrderPreview,
+  PerpActionResult,
+  PerpEvent,
+  PerpMarketView,
+  PerpOrder,
+  PerpOrderRequest,
+  PerpPreview,
+  PerpRules,
   PriceLevel,
   Side,
+  SimCtx,
   SimEngine,
+  SimEvent,
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
@@ -34,12 +54,16 @@ import {
 } from './db/store.ts';
 import type { FeedGap } from './db/store.ts';
 import { FeedGaps, OFFLINE_REASON } from './feedGaps.ts';
+import type { FundingRef, FundingSim } from './funding/fundingService.ts';
 import type { Logger } from './log.ts';
 import { marketKey, splitKey } from './market/marketKey.ts';
 import type { MarketKey } from './market/marketKey.ts';
 import type { SetTimer } from './market/ws.ts';
+import { marginWarningNotice, noticesFor } from './notices.ts';
+import type { Notice, NoticeLookup } from './notices.ts';
 
-export { OFFLINE_REASON, RESTART_REASON };
+export { OFFLINE_REASON, RESTART_REASON, noticesFor };
+export type { Notice };
 export const INTEGRITY_REFUSAL = 'Account state failed integrity check; see server log';
 export const PAUSED_REASON = 'Server paused (sleep or freeze)';
 const STOPPED_REFUSAL = 'Server stopped after an internal error; see server log';
@@ -65,12 +89,6 @@ export class RefusedError extends Error {
 
 export type HealthMap = Record<string, { fresh: boolean; reason: string | null }>;
 
-export interface Notice {
-  kind: 'fill' | 'partial_fill' | 'rejected' | 'cancel_rejected' | 'triggered' | 'thin_book' | 'feed_gap' | 'feed_restored';
-  level: 'info' | 'warn' | 'error';
-  text: string;
-}
-
 /** Account value plus the raw wallet balances and each held coin's average-cost basis. */
 export interface AccountSnapshot extends AccountValue {
   balances: Ledger['balances'];
@@ -80,7 +98,7 @@ export interface AccountSnapshot extends AccountValue {
 
 export type RunnerMessage =
   | { type: 'account'; account: AccountSnapshot }
-  | { type: 'orders'; orders: SpotOrder[] }
+  | { type: 'orders'; orders: SpotOrder[]; perpOrders: PerpOrder[] }
   | ({ type: 'notice' } & Notice)
   | { type: 'health'; health: HealthMap };
 
@@ -95,18 +113,42 @@ export interface RunnerMarket extends MarketView {
   off(event: 'trade', cb: (symbol: string, trade: AggTrade) => void): unknown;
 }
 
+/** A mark price update as the perp feed delivers it (the runner reads the price only). */
+export interface RunnerMark {
+  markPrice: Decimal;
+}
+
+/** What the runner reads from PerpMarketData beyond the perp engine's PerpMarketView. */
+export interface RunnerPerpMarket extends PerpMarketView {
+  /** A saved taker fill of a `side` order took `levels`: later walks see them reduced. */
+  consume(symbol: string, side: Side, levels: PriceLevel[]): void;
+  healthSnapshot(): HealthMap;
+  /** 'trade' (symbol, AggTrade): a futures trade; 'mark' (symbol, RunnerMark): a mark price update. */
+  on(event: 'trade' | 'mark', cb: (...args: any[]) => void): unknown;
+  off(event: 'trade' | 'mark', cb: (...args: any[]) => void): unknown;
+}
+
+/**
+ * A market's feed health (or a stand-in): when the last frame of its live data connection was
+ * received (the older one, for a market on two connections), and the notice that the process was
+ * paused, so every book (and mark) waits for current data.
+ */
+export interface HealthSource {
+  lastFrameAt(): number;
+  markStalled(now: number): void;
+}
+
 export interface RunnerDeps {
   db: Db;
   seasonId: number;
   sim: SimEngine;
-  market: RunnerMarket;
-  /**
-   * FeedHealth (or a stand-in): when the last frame of the live data connection was received,
-   * and the notice that the process was paused, so every book waits for current depth data.
-   */
-  health: { lastFrameAt(): number; markStalled(now: number): void };
+  spotMarket: RunnerMarket;
+  perpMarket: RunnerPerpMarket;
+  /** Per market: FeedHealth for spot; for perps, PerpMarketData itself (it reports to both its connections). */
+  health: Record<Market, HealthSource>;
+  /** Every symbol, traded both spot and as a perpetual. */
   symbols: string[];
-  fees: FeeSchedule;
+  fees: { spot: FeeSchedule; perp: FeeSchedule };
   now: () => number;
   rng: () => number;
   /** Default: `${prefix}-${randomUUID()}`, unique across restarts and seasons. */
@@ -118,19 +160,31 @@ export interface RunnerDeps {
   logger: Logger;
 }
 
+/** A live order of either market: the fields the runner reads are common to both. */
+type LiveOrder = SpotOrder | PerpOrder;
+
+const LIVE = new Set(['pending', 'open', 'partially_filled', 'triggered']);
+
 const spotKey = (symbol: string): MarketKey => marketKey('spot', symbol);
+const perpKey = (symbol: string): MarketKey => marketKey('perp', symbol);
+
+function eventMarket(e: SimEvent): Market {
+  return 'market' in e && e.market === 'perp' ? 'perp' : 'spot';
+}
 
 /**
- * Drives the pure SpotEngine: feeds it live trades in receive order, runs arrivals at their
- * arrival time, records every interruption of live data as a feed gap, and after every engine
- * call persists the whole change in one transaction before anything is broadcast. Everything
- * runs on the one Node thread with no awaits between an engine call and its persist.
+ * Drives the SimEngine over spot and perpetuals: feeds each market's live trades to that market's
+ * engine only, in receive order, and each mark price to the perp engine; runs arrivals and cancels
+ * at their arrival time; records every interruption of live data as a feed gap, per market and
+ * symbol; and after every engine call persists the whole change in one transaction before
+ * anything is broadcast. Everything runs on the one Node thread with no awaits between an engine
+ * call and its persist.
  */
-export class EngineRunner {
+export class EngineRunner implements FundingSim {
   private readonly d: RunnerDeps;
   private readonly newId: (prefix: string) => string;
   private readonly timers = new Set<() => void>();
-  /** The market and symbol of every feed the runner watches. */
+  /** The market and symbol of every feed the runner watches: each symbol spot and perp. */
   private readonly keys: MarketKey[];
   /**
    * Per market and symbol, the open gap (since when, and why, the data is not live) and the last
@@ -149,18 +203,22 @@ export class EngineRunner {
   private lastStateKey = '';
   /** When the trade cursor was last saved. */
   private cursorSavedAt: number;
-  private readonly tradeListener = (symbol: string, trade: AggTrade) => this.background(() => this.onTrade(symbol, trade));
+  private readonly spotTradeListener = (symbol: string, trade: AggTrade) =>
+    this.background(() => this.onTrade('spot', symbol, trade));
+  private readonly perpTradeListener = (symbol: string, trade: AggTrade) =>
+    this.background(() => this.onTrade('perp', symbol, trade));
+  private readonly markListener = (symbol: string, mark: RunnerMark) => this.background(() => this.onMark(symbol, mark));
 
   constructor(deps: RunnerDeps) {
     this.d = deps;
     this.newId = deps.newId ?? ((prefix) => `${prefix}-${randomUUID()}`);
     this.cursorSavedAt = deps.now();
-    this.keys = deps.symbols.map(spotKey);
+    this.keys = [...deps.symbols.map(spotKey), ...deps.symbols.map(perpKey)];
     this.gaps = new FeedGaps({
       db: deps.db,
       seasonId: deps.seasonId,
       now: deps.now,
-      lastFrameAt: () => deps.health.lastFrameAt(),
+      lastFrameAt: (key) => deps.health[splitKey(key).market].lastFrameAt(),
       cursorOf: (key) => this.cursorOf(key),
     });
 
@@ -173,11 +231,18 @@ export class EngineRunner {
 
   // ---- lifecycle ----
 
-  /** Subscribes to trades and starts the health poll (1 s), heartbeat (10 s) and equity snapshots (60 s). */
+  /**
+   * Subscribes to both markets' trades and the mark prices, and starts the health poll (1 s),
+   * heartbeat (10 s) and equity snapshots (60 s).
+   */
   start(): void {
     if (this.started || this.dead) return;
     this.started = true;
-    if (this.violations.length === 0) this.d.market.on('trade', this.tradeListener);
+    if (this.violations.length === 0) {
+      this.d.spotMarket.on('trade', this.spotTradeListener);
+      this.d.perpMarket.on('trade', this.perpTradeListener);
+      this.d.perpMarket.on('mark', this.markListener);
+    }
     this.background(() => touchAlive(this.d.db, this.d.now()));
     this.background(() => this.pollHealth());
     this.every(ALIVE_MS, () => touchAlive(this.d.db, this.d.now()));
@@ -186,12 +251,14 @@ export class EngineRunner {
   }
 
   /**
-   * Stops trades, timers and pending arrival timers, and records every gap still open as a
-   * feed_gap ending now, with the trade cursor (after a fatal error nothing more is written).
+   * Stops trades, marks, timers and pending arrival timers, and records every gap still open as a
+   * feed_gap ending now, with the trade cursors (after a fatal error nothing more is written).
    */
   stop(): void {
     this.started = false;
-    this.d.market.off('trade', this.tradeListener);
+    this.d.spotMarket.off('trade', this.spotTradeListener);
+    this.d.perpMarket.off('trade', this.perpTradeListener);
+    this.d.perpMarket.off('mark', this.markListener);
     for (const cancel of this.timers) cancel();
     this.timers.clear();
     this.saveOnStop();
@@ -211,35 +278,106 @@ export class EngineRunner {
 
   submit(req: SpotOrderRequest): EngineEvent[] {
     this.refuseTrading();
-    this.noteStale(req.symbol);
-    return this.apply((ctx) => this.d.sim.spot.submit(req, ctx));
+    this.noteStale(spotKey(req.symbol));
+    return this.apply((ctx) => this.d.sim.submit('spot', req, ctx));
+  }
+
+  submitPerp(req: PerpOrderRequest): PerpEvent[] {
+    this.refuseTrading();
+    this.noteStale(perpKey(req.symbol));
+    return this.apply((ctx) => this.d.sim.submit('perp', req, ctx));
   }
 
   /**
-   * Requests the cancel: ok means it is on its way; arriveCancel runs at the order's cancelArrivesAt.
-   * A finished order is no longer in memory; its saved row tells it apart from an unknown id.
+   * Requests the cancel of a spot or perp order: ok means it is on its way; arriveCancel runs at
+   * the order's cancelArrivesAt. A finished order is no longer in memory; its saved row tells it
+   * apart from an unknown id.
    */
   cancel(orderId: string): ActionResult {
     this.refuseTrading();
-    if (!this.d.sim.spot.state.orders.has(orderId) && storedOrderExists(this.d.db, this.d.seasonId, orderId)) {
-      return { ok: false, reason: ORDER_NOT_OPEN };
+    const market = this.marketOfOrder(orderId);
+    if (market === null) {
+      if (storedOrderExists(this.d.db, this.d.seasonId, orderId)) return { ok: false, reason: ORDER_NOT_OPEN };
+      return this.apply((ctx) => this.d.sim.cancel('spot', orderId, ctx)); // answered as not found
     }
-    const result = this.apply((ctx) => this.d.sim.spot.cancel(orderId, ctx));
-    const at = this.d.sim.spot.state.orders.get(orderId)?.cancelArrivesAt ?? null;
-    if (result.ok && at !== null) this.scheduleCancel(orderId, at);
+    const result = this.apply((ctx) => this.d.sim.cancel(market, orderId, ctx));
+    const at = this.ordersOf(market).get(orderId)?.cancelArrivesAt ?? null;
+    if (result.ok && at !== null) this.scheduleCancel(market, orderId, at);
     return result;
   }
 
   attachOco(req: OcoRequest): EngineEvent[] {
     this.refuseTrading();
-    this.noteStale(req.symbol);
-    return this.apply((ctx) => this.d.sim.spot.attachOco(req, ctx));
+    this.noteStale(spotKey(req.symbol));
+    return this.apply((ctx) => this.d.sim.spot.attachOco(req, ctxFor(ctx, 'spot')));
   }
 
   /** Read-only estimate; nothing is persisted. */
   preview(req: SpotOrderRequest): OrderPreview {
     this.refuseIfDead();
-    return this.d.sim.spot.preview(req, this.ctx());
+    return this.d.sim.preview('spot', req, this.ctx());
+  }
+
+  /** Read-only estimate; nothing is persisted. */
+  previewPerp(req: PerpOrderRequest): PerpPreview {
+    this.refuseIfDead();
+    return this.d.sim.preview('perp', req, this.ctx());
+  }
+
+  setLeverage(symbol: string, leverage: number): PerpActionResult {
+    this.refuseTrading();
+    return this.apply((ctx) => this.d.sim.setLeverage(symbol, leverage, ctx));
+  }
+
+  setMarginMode(symbol: string, mode: 'isolated' | 'cross'): PerpActionResult {
+    this.refuseTrading();
+    return this.apply((ctx) => this.d.sim.setMarginMode(symbol, mode, ctx));
+  }
+
+  addMargin(symbol: string, amount: string): PerpActionResult {
+    this.refuseTrading();
+    return this.apply((ctx) => this.d.sim.addMargin(symbol, amount, ctx));
+  }
+
+  removeMargin(symbol: string, amount: string): PerpActionResult {
+    this.refuseTrading();
+    return this.apply((ctx) => this.d.sim.removeMargin(symbol, amount, ctx));
+  }
+
+  setPositionTpSl(symbol: string, input: { stopLoss?: string; takeProfit?: string }): PerpEvent[] {
+    this.refuseTrading();
+    this.noteStale(perpKey(symbol));
+    return this.apply((ctx) => this.d.sim.setPositionTpSl(symbol, input, ctx));
+  }
+
+  // ---- funding (FundingService), each persisted like any engine call ----
+
+  fundingWindows(): { open: FundingRef[]; pending: FundingRef[] } {
+    const f = this.d.sim.perp.state.funding;
+    const ref = (w: { symbol: string; fundingTime: number }): FundingRef => ({ symbol: w.symbol, fundingTime: w.fundingTime });
+    return { open: Object.values(f.windows).map(ref), pending: f.pending.map(ref) };
+  }
+
+  openFundingWindow(symbol: string, fundingTime: number): void {
+    this.refuseTrading();
+    this.apply((ctx) => {
+      this.d.sim.openFundingWindow(symbol, fundingTime, ctx);
+      return [];
+    });
+  }
+
+  closeFundingWindow(symbol: string, fundingTime: number): void {
+    this.refuseTrading();
+    this.apply((ctx) => {
+      this.d.sim.closeFundingWindow(symbol, fundingTime, ctx);
+      return [];
+    });
+  }
+
+  /** The funding Binance settled at `fundingTime`, at its settled rate and mark price. Applied once per time. */
+  applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal): PerpEvent[] {
+    this.refuseTrading();
+    return this.apply((ctx) => this.d.sim.applyFunding(symbol, fundingTime, rate, markPrice, ctx));
   }
 
   // ---- reads ----
@@ -257,19 +395,27 @@ export class EngineRunner {
     };
   }
 
-  /**
-   * The account value at the spot best bids. The runner opens no perp positions, so no mark price
-   * is read: a position, were there one, would count as its margin only, with prices loading.
-   */
+  /** The account value: coins at the spot best bids, positions at the mark (a stale one flagged). */
   private value(): AccountValue {
-    return valueAccount(this.d.sim, (s) => this.d.market.bestBid(s), { mark: () => null }, this.d.symbols);
+    const perp = this.d.perpMarket;
+    const mark = (symbol: string) => {
+      const price = perp.markPrice(symbol);
+      return price === null ? null : { price, fresh: perp.isMarkFresh(symbol) };
+    };
+    return valueAccount(this.d.sim, (s) => this.d.spotMarket.bestBid(s), { mark }, this.d.symbols);
   }
 
-  /** Live (non-terminal) orders, newest first. */
+  /** Live (non-terminal) spot orders, newest first. */
   openOrders(): SpotOrder[] {
-    const live = new Set(['pending', 'open', 'partially_filled', 'triggered']);
     return [...this.d.sim.spot.state.orders.values()]
-      .filter((o) => live.has(o.status))
+      .filter((o) => LIVE.has(o.status))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /** Live (non-terminal) perp orders, newest first. */
+  openPerpOrders(): PerpOrder[] {
+    return [...this.d.sim.perp.state.orders.values()]
+      .filter((o) => LIVE.has(o.status))
       .sort((a, b) => b.createdAt - a.createdAt);
   }
 
@@ -279,8 +425,15 @@ export class EngineRunner {
 
   // ---- internals ----
 
-  private ctx(): EngineCtx {
-    return { now: this.d.now(), rng: this.d.rng, newId: this.newId, market: this.d.market, fees: this.d.fees };
+  private ctx(): SimCtx {
+    return {
+      now: this.d.now(),
+      rng: this.d.rng,
+      newId: this.newId,
+      spotMarket: this.d.spotMarket,
+      perpMarket: this.d.perpMarket,
+      fees: this.d.fees,
+    };
   }
 
   private refuseIfDead(): void {
@@ -292,11 +445,31 @@ export class EngineRunner {
     if (this.violations.length > 0) throw new RefusedError(INTEGRITY_REFUSAL);
   }
 
+  private marketOf(market: Market): RunnerMarket | RunnerPerpMarket {
+    return market === 'spot' ? this.d.spotMarket : this.d.perpMarket;
+  }
+
+  private ordersOf(market: Market): Map<string, LiveOrder> {
+    return market === 'spot' ? this.d.sim.spot.state.orders : this.d.sim.perp.state.orders;
+  }
+
+  /** The market whose engine holds the order in memory; null when neither does. */
+  private marketOfOrder(orderId: string): Market | null {
+    if (this.d.sim.spot.state.orders.has(orderId)) return 'spot';
+    if (this.d.sim.perp.state.orders.has(orderId)) return 'perp';
+    return null;
+  }
+
   /**
    * One engine call, then persist + schedule arrivals + broadcast. An exception from the engine
    * or the database is fatal: memory may be ahead of the DB, so the runner stops for good.
+   * `extra` notices (margin warnings) go out after the call's own.
    */
-  private apply<T extends ActionResult | EngineEvent[]>(call: (ctx: EngineCtx) => T, gaps: FeedGap[] = []): T {
+  private apply<T extends ActionResult | PerpActionResult | SimEvent[]>(
+    call: (ctx: SimCtx) => T,
+    gaps: FeedGap[] = [],
+    extra: () => Notice[] = () => [],
+  ): T {
     this.refuseIfDead();
     let result: T;
     try {
@@ -305,36 +478,37 @@ export class EngineRunner {
       this.die('engine call failed', e);
       throw e;
     }
-    this.commit(Array.isArray(result) ? result : result.ok ? result.events : [], gaps);
+    this.commit(Array.isArray(result) ? result : result.ok ? result.events : [], gaps, extra);
     return result;
   }
 
-  private commit(events: EngineEvent[], gaps: FeedGap[] = []): void {
+  private commit(events: SimEvent[], gaps: FeedGap[] = [], extra: () => Notice[] = () => []): void {
     const now = this.d.now();
     try {
       const cursor = now - this.cursorSavedAt >= CURSOR_FLUSH_MS;
-      if (persist(this.d.db, this.d.seasonId, this.d.sim, events, { feedGaps: gaps, cursor })) this.cursorSavedAt = now;
+      if (persist(this.d.db, this.d.seasonId, this.d.sim, events, { feedGaps: gaps, cursor, now })) this.cursorSavedAt = now;
     } catch (e) {
       this.die('persist failed', e);
       throw e;
     }
     for (const e of events) {
-      if (e.type === 'fill' && e.consumed) this.d.market.consume(e.fill.symbol, e.fill.side, e.consumed);
+      const market = eventMarket(e);
+      if (e.type === 'fill' && e.consumed) this.marketOf(market).consume(e.fill.symbol, e.fill.side, e.consumed);
       if ((e.type === 'order_placed' || e.type === 'order_triggered') && e.order.arrivesAt !== null) {
-        this.scheduleArrival(e.order.id, e.order.arrivesAt);
+        this.scheduleArrival(market, e.order.id, e.order.arrivesAt);
       }
     }
     this.publishState(events.length > 0);
-    for (const n of noticesFor(events, (s) => this.rulesOf(s))) this.d.onBroadcast({ type: 'notice', ...n });
+    for (const n of [...noticesFor(events, this.noticeLookup()), ...extra()]) this.notice(n);
   }
 
-  /** Every gap still open as a feed_gap ending now, and the trade cursor, in one transaction. */
+  /** Every gap still open as a feed_gap ending now, and the trade cursors, in one transaction. */
   private saveOnStop(): void {
     if (this.dead) return;
     const now = this.d.now();
     const gaps = this.gaps.takeAll(now);
     try {
-      persist(this.d.db, this.d.seasonId, this.d.sim, [], { feedGaps: gaps, cursor: true });
+      persist(this.d.db, this.d.seasonId, this.d.sim, [], { feedGaps: gaps, cursor: true, now });
       this.cursorSavedAt = now;
     } catch (e) {
       this.die('persist failed', e);
@@ -376,8 +550,8 @@ export class EngineRunner {
   }
 
   /** arrive() at arrivesAt; the engine ignores orders no longer waiting. */
-  private scheduleArrival(orderId: string, arrivesAt: number): void {
-    this.scheduleAt(arrivesAt, orderId, (ctx) => this.d.sim.spot.arrive(orderId, ctx));
+  private scheduleArrival(market: Market, orderId: string, arrivesAt: number): void {
+    this.scheduleAt(market, arrivesAt, orderId, (ctx) => this.d.sim.arrive(market, orderId, ctx));
   }
 
   /**
@@ -385,11 +559,11 @@ export class EngineRunner {
    * held back after a restart to be sent again never had its old arrival, so the cancel does not
    * wait for it.
    */
-  private scheduleCancel(orderId: string, cancelArrivesAt: number): void {
-    this.scheduleAt(cancelArrivesAt, orderId, (ctx) =>
+  private scheduleCancel(market: Market, orderId: string, cancelArrivesAt: number): void {
+    this.scheduleAt(market, cancelArrivesAt, orderId, (ctx) =>
       this.heldBack(orderId)
-        ? this.d.sim.spot.arriveCancelBeforeResend(orderId, ctx)
-        : this.d.sim.spot.arriveCancel(orderId, ctx),
+        ? this.d.sim.arriveCancelBeforeResend(market, orderId, ctx)
+        : this.d.sim.arriveCancel(market, orderId, ctx),
     );
   }
 
@@ -400,17 +574,17 @@ export class EngineRunner {
   }
 
   /**
-   * One engine call for an order at time `at` (re-armed if the timer fires early), persisted like
-   * any other. A pause is handled first; then stale data on the order's symbol, which the engine
-   * acts on (a deferred or rejected order), opens a gap before the call.
+   * One engine call for an order of `market` at time `at` (re-armed if the timer fires early),
+   * persisted like any other. A pause is handled first; then stale data on the order's market and
+   * symbol, which the engine acts on (a deferred or rejected order), opens a gap before the call.
    */
-  private scheduleAt(at: number, orderId: string, call: (ctx: EngineCtx) => EngineEvent[]): void {
+  private scheduleAt(market: Market, at: number, orderId: string, call: (ctx: SimCtx) => SimEvent[]): void {
     const fire = () => {
       const left = at - this.d.now();
       if (left > 0) return this.timer(fire, left);
       this.background(() => {
-        const symbol = this.d.sim.spot.state.orders.get(orderId)?.symbol;
-        if (symbol !== undefined) this.noteStale(symbol);
+        const symbol = this.ordersOf(market).get(orderId)?.symbol;
+        if (symbol !== undefined) this.noteStale(marketKey(market, symbol));
         else this.checkStall(this.d.now());
         this.apply(call);
       });
@@ -421,12 +595,14 @@ export class EngineRunner {
   /** Account and orders after every engine call; skipped only when nothing changed and there were no events. */
   private publishState(changed: boolean): void {
     const orders = this.openOrders();
-    const state = this.d.sim.spot.state;
-    const key = toJson({ b: state.ledger.balances, d: state.ledger.totalDeposited, o: orders });
+    const perpOrders = this.openPerpOrders();
+    const perp = this.d.sim.perp.state;
+    const ledger = this.d.sim.ledger;
+    const key = toJson({ b: ledger.balances, d: ledger.totalDeposited, o: orders, po: perpOrders, p: perp.positions });
     if (!changed && key === this.lastStateKey) return;
     this.lastStateKey = key;
     this.d.onBroadcast({ type: 'account', account: this.account() });
-    this.d.onBroadcast({ type: 'orders', orders });
+    this.d.onBroadcast({ type: 'orders', orders, perpOrders });
   }
 
   /**
@@ -443,34 +619,38 @@ export class EngineRunner {
   }
 
   /**
-   * Startup: first, a cancel in flight whose arrival time passed while the server was down has
-   * reached the exchange, so arriveCancel is applied now (one still to arrive, or one waiting for
-   * the exchange rules, gets its arriveCancel scheduled; onFresh delivers the latter). Then
-   * pending market orders are rejected (engine.rejectRestartedMarket); other pending orders are
-   * sent again once their symbol's data is first fresh, with a fresh arrival delay
+   * Startup, for each market: first, a cancel in flight whose arrival time passed while the server
+   * was down has reached the exchange, so arriveCancel is applied now (one still to arrive, or one
+   * waiting for the exchange rules, gets its arriveCancel scheduled; onFresh delivers the latter).
+   * Then pending market orders are rejected (rejectRestartedMarket); other pending orders are sent
+   * again once their market and symbol's data is first fresh, with a fresh arrival delay
    * (rearmWhenFresh). Triggered orders with an arrival time get their arrive() scheduled;
    * triggered orders and attached pairs waiting for data (arrivesAt null) are left to onFresh.
    */
   private recover(): void {
-    const state = this.d.sim.spot.state;
     const ctx = this.ctx();
-    const events: EngineEvent[] = [];
-    for (const { id } of [...state.orders.values()]) {
-      // Re-read: cancelling one leg of a pair settles its partner too. A pending order is sent
-      // again below, so its old arrival never happened and does not come before the cancel.
-      if (state.orders.get(id)!.cancelArrivesAt !== null) {
-        events.push(...this.d.sim.spot.arriveCancelBeforeResend(id, ctx));
+    const events: SimEvent[] = [];
+    for (const market of ['spot', 'perp'] as const) {
+      const orders = this.ordersOf(market);
+      for (const { id } of [...orders.values()]) {
+        // Re-read: cancelling one leg of a pair settles its partner too. A pending order is sent
+        // again below, so its old arrival never happened and does not come before the cancel.
+        if (orders.get(id)!.cancelArrivesAt !== null) events.push(...this.d.sim.arriveCancelBeforeResend(market, id, ctx));
       }
-    }
-    for (const o of [...state.orders.values()]) {
-      if (o.status !== 'pending') continue;
-      if (o.type === 'market') {
-        events.push(...this.d.sim.spot.rejectRestartedMarket(o.id, ctx));
-      } else if (o.arrivesAt !== null) {
-        const key = spotKey(o.symbol);
-        const ids = this.awaitingFresh.get(key) ?? new Set<string>();
-        ids.add(o.id);
-        this.awaitingFresh.set(key, ids);
+      for (const o of [...orders.values()]) {
+        if (o.status !== 'pending') continue;
+        if (o.type === 'market') {
+          events.push(
+            ...(market === 'spot'
+              ? this.d.sim.spot.rejectRestartedMarket(o.id, ctxFor(ctx, 'spot'))
+              : this.d.sim.perp.rejectRestartedMarket(o.id, ctxFor(ctx, 'perp'))),
+          );
+        } else if (o.arrivesAt !== null) {
+          const key = marketKey(market, o.symbol);
+          const ids = this.awaitingFresh.get(key) ?? new Set<string>();
+          ids.add(o.id);
+          this.awaitingFresh.set(key, ids);
+        }
       }
     }
     try {
@@ -478,44 +658,46 @@ export class EngineRunner {
     } catch {
       return; // fatal, already reported
     }
-    for (const o of state.orders.values()) {
-      if (o.status === 'triggered' && o.arrivesAt !== null) this.scheduleArrival(o.id, o.arrivesAt);
-      if (o.cancelArrivesAt !== null) this.scheduleCancel(o.id, o.cancelArrivesAt);
+    for (const market of ['spot', 'perp'] as const) {
+      for (const o of this.ordersOf(market).values()) {
+        if (o.status === 'triggered' && o.arrivesAt !== null) this.scheduleArrival(market, o.id, o.arrivesAt);
+        if (o.cancelArrivesAt !== null) this.scheduleCancel(market, o.id, o.cancelArrivesAt);
+      }
     }
   }
 
   /**
-   * Re-sends the pending orders recover() held back, for each symbol whose data is now fresh:
-   * a fresh arrival delay from now (a pair's legs share one), persisted, then arrive() scheduled.
-   * Until then they keep their old arrival time and nothing arrives them. A cancel of such an
-   * order that is already due (one that waited for the exchange rules) is delivered first.
+   * Re-sends the pending orders recover() held back, for each market and symbol whose data is now
+   * fresh: a fresh arrival delay from now (a pair's legs share one), persisted, then arrive()
+   * scheduled. Until then they keep their old arrival time and nothing arrives them. A cancel of
+   * such an order that is already due (one that waited for the exchange rules) is delivered first.
    */
   private rearmWhenFresh(): void {
     if (this.awaitingFresh.size === 0) return;
-    const state = this.d.sim.spot.state;
     const ctx = this.ctx();
     const delays = new Map<string, number>();
-    const armed: { id: string; at: number }[] = [];
-    const events: EngineEvent[] = [];
+    const armed: { market: Market; id: string; at: number }[] = [];
+    const events: SimEvent[] = [];
     for (const [key, ids] of this.awaitingFresh) {
-      if (!this.d.market.isFresh(splitKey(key).symbol)) continue;
+      if (!this.isFresh(key)) continue;
       this.awaitingFresh.delete(key);
+      const { market } = splitKey(key);
+      const orders = this.ordersOf(market);
       for (const id of ids) {
-        if (state.orders.get(id)?.cancelArrivesAt != null) {
-          events.push(...this.d.sim.spot.arriveCancelBeforeResend(id, ctx));
-        }
-        const o = state.orders.get(id);
+        if (orders.get(id)?.cancelArrivesAt != null) events.push(...this.d.sim.arriveCancelBeforeResend(market, id, ctx));
+        const o = orders.get(id);
         if (!o || o.status !== 'pending') continue; // cancelled meanwhile
-        const key = o.ocoGroupId ?? o.id;
-        const at = delays.get(key) ?? ctx.now + arrivalDelay(ctx);
-        delays.set(key, at);
-        putOrder(state, { ...o, arrivesAt: at });
-        armed.push({ id, at });
+        const group = o.ocoGroupId ?? o.id;
+        const at = delays.get(group) ?? ctx.now + arrivalDelay(ctx);
+        delays.set(group, at);
+        if (market === 'spot') putOrder(this.d.sim.spot.state, { ...(o as SpotOrder), arrivesAt: at });
+        else putPerpOrder(this.d.sim.perp.state, { ...(o as PerpOrder), arrivesAt: at });
+        armed.push({ market, id, at });
       }
     }
     if (armed.length === 0 && events.length === 0) return;
     this.commit(events);
-    for (const { id, at } of armed) this.scheduleArrival(id, at);
+    for (const { market, id, at } of armed) this.scheduleArrival(market, id, at);
   }
 
   // ---- feed gaps ----
@@ -533,20 +715,29 @@ export class EngineRunner {
     }
   }
 
-  /** The engine's trade cursor for a watched key (only spot feeds are watched). */
+  /** The trade cursor of the engine of the key's market, for its symbol. */
   private cursorOf(key: MarketKey): number | null {
     const { market, symbol } = splitKey(key);
-    if (market !== 'spot') throw new Error(`No engine trades ${key}`);
-    return this.d.sim.spot.state.lastTradeId[symbol] ?? null;
+    const cursors = market === 'spot' ? this.d.sim.spot.state.lastTradeId : this.d.sim.perp.state.lastTradeId;
+    return cursors[symbol] ?? null;
   }
 
   /**
-   * Every second. A symbol's freshness is the market's (rules, halts and feed health together).
-   * Stale data opens a gap. Fresh data closes the open gap, recorded as a feed_gap in the same
-   * transaction as onFresh; with no gap open, onFresh still runs when the engine has deferred work
-   * for the symbol, so work deferred during a stale stretch that no poll saw does not wait for a
-   * trade. A poll that finds the process was paused (checkStall) does only that. Last, the orders
-   * held back since startup whose data is now fresh are re-sent.
+   * A key's freshness is its market's (rules, halts and feed health together; for perps also the
+   * mark and the leverage tiers, so a stale mark is a gap only as part of that whole).
+   */
+  private isFresh(key: MarketKey): boolean {
+    const { market, symbol } = splitKey(key);
+    return this.marketOf(market).isFresh(symbol);
+  }
+
+  /**
+   * Every second, for every market and symbol. Stale data opens a gap. Fresh data closes the open
+   * gap, recorded as a feed_gap in the same transaction as onFresh; with no gap open, onFresh still
+   * runs when the market's engine has deferred work for the symbol, so work deferred during a
+   * stale stretch that no poll saw does not wait for a trade. A poll that finds the process was
+   * paused (checkStall) does only that. Last, the orders held back since startup whose data is now
+   * fresh are re-sent.
    */
   private pollHealth(): void {
     const now = this.d.now();
@@ -554,8 +745,7 @@ export class EngineRunner {
     this.lastPollAt = now;
     let changed = false;
     for (const key of paused ? [] : this.keys) {
-      const { symbol } = splitKey(key);
-      if (!this.d.market.isFresh(symbol)) changed = this.startGap(key, this.staleReason(symbol)) || changed;
+      if (!this.isFresh(key)) changed = this.startGap(key, this.staleReason(key)) || changed;
       else changed = this.freshAtPoll(key, now) || changed;
     }
     if (changed) this.broadcastHealth();
@@ -564,18 +754,19 @@ export class EngineRunner {
 
   /**
    * More than STALL_MS since the last poll means the process was paused (sleep, event-loop
-   * freeze). Every poll, timer-driven engine call and trade checks this first, and whichever runs
-   * first after the pause handles it, once: every symbol is treated as stale from the last poll,
-   * even if its data looks fresh (a gap opens there, or the open gap is kept; either closes only
-   * at a poll that finds the symbol fresh), and the feed health makes every book wait for a
-   * current depth event, so nothing executes on a book from before the pause. Returns whether
-   * there was a pause.
+   * freeze). Every poll, timer-driven engine call, trade and mark checks this first, and whichever
+   * runs first after the pause handles it, once: every feed health of both markets is told, so
+   * every book and mark waits for current data and nothing executes or liquidates on data from
+   * before the pause; and every key is treated as stale from the last poll, even if its data looks
+   * fresh (a gap opens there, or the open gap is kept; either closes only at a poll that finds the
+   * data fresh). Returns whether there was a pause.
    */
   private checkStall(now: number): boolean {
     const since = this.lastPollAt;
     if (!this.started || since === null || now - since <= STALL_MS) return false;
     this.lastPollAt = now;
-    this.d.health.markStalled(now);
+    this.d.health.spot.markStalled(now);
+    this.d.health.perp.markStalled(now);
     for (const key of this.keys) {
       if (!this.gaps.markPollOnly(key)) this.startGap(key, PAUSED_REASON, since);
     }
@@ -584,46 +775,71 @@ export class EngineRunner {
   }
 
   /**
-   * Before an engine call on `symbol` that is not a poll or a trade (an arrival, a cancel, an order
-   * from the owner): a pause is handled first; then stale data, which the engine acts on (a deferred
-   * or rejected order), opens a gap, so a stale stretch no poll or trade saw is still recorded.
+   * Before an engine call on a key that is not a poll or a trade (an arrival, a cancel, an order
+   * from the owner): a pause is handled first; then stale data, which the engine acts on (a
+   * deferred or rejected order), opens a gap, so a stale stretch no poll or trade saw is still recorded.
    */
-  private noteStale(symbol: string): void {
+  private noteStale(key: MarketKey): void {
     this.checkStall(this.d.now());
-    if (!this.d.market.isFresh(symbol) && this.startGap(spotKey(symbol), this.staleReason(symbol))) this.broadcastHealth();
+    if (!this.isFresh(key) && this.startGap(key, this.staleReason(key))) this.broadcastHealth();
   }
 
   /** A health poll found the key's data fresh. Returns whether its gap closed. */
   private freshAtPoll(key: MarketKey, now: number): boolean {
-    const { symbol } = splitKey(key);
+    const { market, symbol } = splitKey(key);
     this.gaps.markFresh(key, now);
     const gaps = this.gaps.take(key, now);
     if (this.violations.length > 0) {
       if (gaps.length > 0) this.commit([], gaps);
-    } else if (gaps.length > 0 || this.d.sim.spot.hasDeferredWork(symbol, this.ctx())) {
-      this.apply((ctx) => this.d.sim.spot.onFresh(symbol, ctx), gaps);
+    } else if (gaps.length > 0 || this.d.sim.hasDeferredWork(market, symbol, this.ctx())) {
+      this.apply((ctx) => this.d.sim.onFresh(market, symbol, ctx), gaps);
     }
-    if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${symbol}` });
+    if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${label(key)}` });
     return gaps.length > 0;
   }
 
   /**
-   * A live trade. On stale data the engine skips it, so the interruption is saved first: a gap
-   * opens now, from the last fresh moment. On fresh data the open gap (unless it is a pause,
-   * which a poll closes) is recorded as a feed_gap in the same transaction as the trade's own
-   * changes, so the trade cursor never moves past a skipped trade before its gap is recorded.
+   * A live trade of `market`, sent to that market's engine only. On stale data the engine skips
+   * it, so the interruption is saved first: a gap opens now, from the last fresh moment. On fresh
+   * data the open gap (unless it is a pause, which a poll closes) is recorded as a feed_gap in the
+   * same transaction as the trade's own changes, so the trade cursor never moves past a skipped
+   * trade before its gap is recorded.
    */
-  private onTrade(symbol: string, trade: AggTrade): void {
+  private onTrade(market: Market, symbol: string, trade: AggTrade): void {
     const now = this.d.now();
-    const key = spotKey(symbol);
+    const key = marketKey(market, symbol);
     this.checkStall(now);
-    const fresh = this.d.market.isFresh(symbol);
-    const opened = !fresh && this.startGap(key, this.staleReason(symbol));
+    const fresh = this.isFresh(key);
+    const opened = !fresh && this.startGap(key, this.staleReason(key));
     const gaps = fresh && !this.gaps.isPollOnly(key) ? this.gaps.take(key, now) : [];
-    this.apply((ctx) => this.d.sim.spot.onTrade(symbol, trade, ctx), gaps);
+    this.apply((ctx) => this.d.sim.onTrade(market, symbol, trade, ctx), gaps);
     if (fresh) this.gaps.markFresh(key, now);
-    if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${symbol}` });
+    if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${label(key)}` });
     if (opened || gaps.length > 0) this.broadcastHealth();
+  }
+
+  /**
+   * A mark price update: the perp engine liquidates on it or warns of the margin ratio (it acts
+   * only on a fresh mark). A pause is handled first, so a mark from before it is never used. The
+   * mark alone neither opens nor closes a gap: the poll follows the market's freshness.
+   */
+  private onMark(symbol: string, mark: RunnerMark): void {
+    this.checkStall(this.d.now());
+    let warnings: MarginWarning[] = [];
+    this.apply(
+      (ctx) => {
+        const r = this.d.sim.onMark(symbol, mark.markPrice, ctx);
+        warnings = r.warnings;
+        return r.events;
+      },
+      [],
+      () => warnings.map((w) => marginWarningNotice(w, this.sideOf(w), this.perpRulesOf(w.symbol))),
+    );
+  }
+
+  private sideOf(w: MarginWarning): 'long' | 'short' {
+    const p = this.d.sim.perp.state.positions[w.symbol];
+    return p?.side ?? 'long';
   }
 
   /**
@@ -632,16 +848,18 @@ export class EngineRunner {
    */
   private startGap(key: MarketKey, reason: string, pausedSince: number | null = null): boolean {
     if (!this.gaps.start(key, reason, pausedSince)) return false;
-    this.notice({ kind: 'feed_gap', level: 'warn', text: `Live data interrupted for ${splitKey(key).symbol}: ${reason}` });
+    this.notice({ kind: 'feed_gap', level: 'warn', text: `Live data interrupted for ${label(key)}: ${reason}` });
     return true;
   }
 
-  private staleReason(symbol: string): string {
-    return this.d.market.healthSnapshot()[symbol]?.reason ?? 'Data stale';
+  private staleReason(key: MarketKey): string {
+    const { market, symbol } = splitKey(key);
+    return this.marketOf(market).healthSnapshot()[symbol]?.reason ?? 'Data stale';
   }
 
+  /** The spot health map, as the clients read it (perp health joins it with the perp API). */
   private broadcastHealth(): void {
-    this.d.onBroadcast({ type: 'health', health: this.d.market.healthSnapshot() });
+    this.d.onBroadcast({ type: 'health', health: this.d.spotMarket.healthSnapshot() });
   }
 
   /**
@@ -659,13 +877,47 @@ export class EngineRunner {
     this.d.onBroadcast({ type: 'notice', ...n });
   }
 
-  private rulesOf(symbol: string): SpotRules | null {
+  private noticeLookup(): NoticeLookup {
+    return {
+      spotRules: (s) => this.spotRulesOf(s),
+      perpRules: (s) => this.perpRulesOf(s),
+      liquidationPrice: (s) => {
+        const p = this.d.sim.perp.state.positions[s];
+        const brackets = this.bracketsOf(s);
+        return p && brackets ? liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin) : null;
+      },
+    };
+  }
+
+  private spotRulesOf(symbol: string): SpotRules | null {
     try {
-      return this.d.market.rules(symbol);
+      return this.d.spotMarket.rules(symbol);
     } catch {
       return null;
     }
   }
+
+  private perpRulesOf(symbol: string): PerpRules | null {
+    try {
+      return this.d.perpMarket.rules(symbol);
+    } catch {
+      return null;
+    }
+  }
+
+  private bracketsOf(symbol: string): Bracket[] | null {
+    try {
+      return this.d.perpMarket.brackets(symbol);
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** How a key is named to the owner: the symbol for spot, `BTCUSDT perp` for a perpetual. */
+function label(key: MarketKey): string {
+  const { market, symbol } = splitKey(key);
+  return market === 'spot' ? symbol : `${symbol} perp`;
 }
 
 /** The order a submit created (its first event names it: placed or rejected). */
@@ -673,67 +925,4 @@ export function submittedOrder(events: EngineEvent[]): SpotOrder {
   const first = events.find((e) => 'order' in e) as { order: SpotOrder } | undefined;
   if (!first) throw new Error('submit produced no order');
   return first.order;
-}
-
-// ---- notices ----
-
-/** One notice per fill, partial fill, rejection (one per pair), late cancel, trigger and thin-book cancel. */
-export function noticesFor(events: EngineEvent[], rulesOf: (symbol: string) => SpotRules | null): Notice[] {
-  const out: Notice[] = [];
-  const rejectedPairs = new Set<string>();
-  for (const e of events) {
-    switch (e.type) {
-      case 'fill': {
-        const text = fillText(e.fill, rulesOf(e.fill.symbol));
-        if (e.order.status === 'partially_filled') {
-          out.push({ kind: 'partial_fill', level: 'info', text: `Partial fill: ${text}` });
-        } else {
-          out.push({ kind: 'fill', level: 'info', text });
-        }
-        break;
-      }
-      case 'order_rejected':
-        if (e.order.ocoGroupId !== null) {
-          if (rejectedPairs.has(e.order.ocoGroupId)) break;
-          rejectedPairs.add(e.order.ocoGroupId);
-        }
-        out.push({ kind: 'rejected', level: 'error', text: e.reason });
-        break;
-      case 'cancel_rejected':
-        out.push({ kind: 'cancel_rejected', level: 'error', text: e.reason });
-        break;
-      case 'order_triggered': {
-        const rules = rulesOf(e.order.symbol);
-        const label = e.order.type === 'stop_loss' ? 'Stop' : 'Take-profit';
-        const price = rules ? e.lastPrice.toFixed(rules.tickSize.decimalPlaces()) : e.lastPrice.toString();
-        out.push({ kind: 'triggered', level: 'warn', text: `${label} triggered at ${price}` });
-        break;
-      }
-      case 'order_cancelled':
-        if (e.reason === 'thin_book') {
-          const base = baseOf(e.order.symbol, rulesOf(e.order.symbol));
-          out.push({
-            kind: 'thin_book',
-            level: 'warn',
-            text: `Book too thin: ${e.cancelledQty} ${base} not filled and cancelled`,
-          });
-        }
-        break;
-      default:
-        break;
-    }
-  }
-  return out;
-}
-
-/** `Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC` (price at tick decimals + 2; slippage rounded up). */
-function fillText(f: Fill, rules: SpotRules | null): string {
-  const verb = f.side === 'buy' ? 'Bought' : 'Sold';
-  const price = rules ? f.price.toFixed(rules.tickSize.decimalPlaces() + 2) : f.price.toString();
-  const slippage = f.slippageUsd.toFixed(2, Decimal.ROUND_UP);
-  return `${verb} ${f.qty} ${baseOf(f.symbol, rules)} @ ${price} · slippage $${slippage} · fee ${f.fee} ${f.feeAsset}`;
-}
-
-function baseOf(symbol: string, rules: SpotRules | null): string {
-  return rules?.base ?? symbol.replace(/USDT$/, '');
 }

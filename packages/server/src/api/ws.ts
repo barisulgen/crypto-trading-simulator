@@ -1,4 +1,4 @@
-import type { AggTrade, BookSnapshot, Market, SpotOrder } from '@sim/engine';
+import type { AggTrade, BookSnapshot, Market, PerpOrder, SpotOrder } from '@sim/engine';
 import { toJson } from '../db/store.ts';
 import type { Logger } from '../log.ts';
 import { INTERVALS } from '../market/candles.ts';
@@ -45,7 +45,7 @@ export interface HubSocket {
 export interface HubDeps {
   market: HubMarket;
   candles: Record<Market, { subscribe(symbol: string, interval: string, cb: (c: Candle) => void): () => void }>;
-  runner: { account(): AccountSnapshot; openOrders(): SpotOrder[] };
+  runner: { account(): AccountSnapshot; openOrders(): SpotOrder[]; openPerpOrders(): PerpOrder[] };
   symbols: string[];
   setTimer: SetTimer;
   logger: Logger;
@@ -117,7 +117,7 @@ export class ClientHub {
     this.sendTo(socket, { type: 'tickers', tickers: this.d.market.tickers() }, true);
     this.sendTo(socket, { type: 'health', health: this.d.market.healthSnapshot() }, true);
     this.sendTo(socket, { type: 'account', account: this.d.runner.account() }, true);
-    this.sendTo(socket, { type: 'orders', orders: this.d.runner.openOrders() }, true);
+    this.sendTo(socket, { type: 'orders', orders: this.d.runner.openOrders(), perpOrders: this.d.runner.openPerpOrders() }, true);
   }
 
   /** Send to every client (the runner's account, orders, notice and health messages). */

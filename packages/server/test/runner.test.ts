@@ -1,21 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { D, emptyPerpState, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
+import { D } from '@sim/engine';
 import type { AggTrade, SpotOrderRequest } from '@sim/engine';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
-import { loadLedger, loadSpotState, openGap, toJson, touchAlive } from '../src/db/store.ts';
-import { createLogger } from '../src/log.ts';
-import { EngineRunner, PAUSED_REASON, RefusedError, RESTART_REASON, submittedOrder } from '../src/runner.ts';
+import { openGap, toJson, touchAlive } from '../src/db/store.ts';
+import { PAUSED_REASON, RefusedError, RESTART_REASON, submittedOrder } from '../src/runner.ts';
 import { FeedGaps } from '../src/feedGaps.ts';
 import { marketKey, splitKey } from '../src/market/marketKey.ts';
 import type { MarketKey } from '../src/market/marketKey.ts';
 import { btcRules } from '../../engine/test/fixtures.ts';
-import { FakeClock, FakeHealth, TestMarket, liveStack } from './helpers.ts';
+import { FakeClock, TestMarket, TestPerpMarket, liveStack, runnerHarness } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
 const SYMBOLS = ['BTCUSDT'];
-const ASSETS = ['USDT', 'BTC'];
-const FEES = { maker: D('0.001'), taker: D('0.001') };
 
 let tradeId = 0;
 const trade = (price: string, qty = '1'): AggTrade => ({
@@ -36,60 +33,21 @@ const stopSell = (qty: string, triggerPrice: string): SpotOrderRequest => ({
   triggerPrice,
 });
 
-/** The gaps saved as open, as rows. */
-const openGapsOf = (db: Db) => db.prepare('SELECT symbol, started_at AS startedAt, reason FROM open_gaps').all();
-/** The recorded feed_gap payloads, oldest first. */
+/** The spot gaps saved as open, as rows (the perp feed of the same symbol has its own). */
+const openGapsOf = (db: Db) =>
+  db.prepare("SELECT symbol, started_at AS startedAt, reason FROM open_gaps WHERE market = 'spot'").all();
+/** The recorded spot feed_gap payloads, oldest first. */
 const gapsOf = (db: Db) =>
-  (db.prepare("SELECT payload FROM events WHERE type = 'feed_gap' ORDER BY id").all() as { payload: string }[]).map(
+  (db.prepare("SELECT payload FROM events WHERE type = 'feed_gap' AND market = 'spot' ORDER BY id").all() as { payload: string }[]).map(
     (r) => JSON.parse(r.payload),
   );
 
-interface Msg {
-  type: string;
-  [k: string]: any;
-}
-
-/** A runner over a ':memory:' (or given) DB, TestMarket, FakeHealth and a fake clock; rng 0 = 100 ms delays. */
-function setup(opts: { db?: Db; market?: TestMarket; clock?: FakeClock } = {}) {
-  const db = opts.db ?? openDb(':memory:');
-  const clock = opts.clock ?? new FakeClock(T0);
-  const seasonId = currentSeasonId(db, () => clock.now);
-  const market = opts.market ?? new TestMarket(SYMBOLS);
-  const health = new FakeHealth(() => clock.now);
-  const ledger = loadLedger(db, seasonId, ASSETS);
-  const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
-  const sim = new SimEngine(ledger, engine, new PerpEngine(emptyPerpState(ledger)));
-  const sent: Msg[] = [];
-  const fatal: unknown[] = [];
-  const logs: string[] = [];
-  const logger = createLogger([], (_s, line) => logs.push(line));
-  const runner = new EngineRunner({
-    db,
-    seasonId,
-    sim,
-    market,
-    health,
-    symbols: SYMBOLS,
-    fees: FEES,
-    now: () => clock.now,
-    rng: () => 0,
-    setTimer: clock.setTimer,
-    onBroadcast: (m) => sent.push(JSON.parse(toJson(m)) as Msg),
-    onFatal: (e) => fatal.push(e),
-    logger,
-  });
-  const notices = () => sent.filter((m) => m.type === 'notice').map((m) => m.text as string);
-  const orderRow = (id: string) =>
-    db.prepare('SELECT status, data FROM orders WHERE id = ?').get(id) as { status: string; data: string } | undefined;
-  const eventsOf = (type: string) =>
-    (db.prepare('SELECT time, symbol, payload FROM events WHERE type = ? ORDER BY id').all(type) as {
-      time: number;
-      symbol: string | null;
-      payload: string;
-    }[]).map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
-  const openGapRows = () => openGapsOf(db);
-  const gaps = () => gapsOf(db);
-  return { db, clock, seasonId, market, health, engine, runner, sent, fatal, logs, logger, notices, orderRow, eventsOf, openGapRows, gaps };
+/** runnerHarness, plus the spot gaps saved as open and recorded. */
+function setup(opts: { db?: Db; market?: TestMarket; perpMarket?: TestPerpMarket; clock?: FakeClock } = {}) {
+  const t = runnerHarness(opts);
+  const openGapRows = () => openGapsOf(t.db);
+  const gaps = () => gapsOf(t.db);
+  return { ...t, openGapRows, gaps };
 }
 
 /** Deposit 1000 USDT and buy 1 BTC at market (fills at 100.00 x 0.5 + 100.10 x 0.5). */
@@ -320,7 +278,7 @@ describe('EngineRunner', () => {
     const startAt = b.clock.now;
     b.runner.start();
     expect(b.orderRow(order.id)!.status).toBe('filled');
-    expect(b.eventsOf('feed_gap').map((g) => g.payload)).toEqual([
+    expect(b.gaps()).toEqual([
       // closed by a.runner.stop(): stale after the trade at T0 + 400, stopped at T0 + 5.5 s
       { startedAt: T0 + 400, endedAt: T0 + 5500, reason: 'Disconnected', lastTradeIdBefore: trigger.id },
       { startedAt: lastAlive, endedAt: startAt, reason: 'Server offline', lastTradeIdBefore: trigger.id },
@@ -720,7 +678,13 @@ describe('feed gaps', () => {
     t.clock.advance(1000); // the next poll finds the symbol fresh
     expect(t.gaps()).toEqual([{ startedAt: T, endedAt: T + 28_801_000, reason: PAUSED, lastTradeIdBefore: null }]);
     expect(t.openGapRows()).toEqual([]);
-    expect(t.notices()).toEqual([`Live data interrupted for BTCUSDT: ${PAUSED}`, 'Live data restored for BTCUSDT']);
+    // The pause is a gap in both markets' data, each closed by that poll.
+    expect(t.notices()).toEqual([
+      `Live data interrupted for BTCUSDT: ${PAUSED}`,
+      `Live data interrupted for BTCUSDT perp: ${PAUSED}`,
+      'Live data restored for BTCUSDT',
+      'Live data restored for BTCUSDT perp',
+    ]);
   });
 
   it('a submit rejected on stale data that no poll or trade saw records the gap', () => {
@@ -971,7 +935,10 @@ describe('feed gaps', () => {
     expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0 + 1000, reason: 'Server paused (sleep or freeze)' }]);
     t.clock.advance(0); // the overdue poll: the stall is already handled
     expect(t.health.stalls).toEqual([T0 + 9000]);
-    expect(t.notices().filter((n) => n.startsWith('Live data interrupted'))).toHaveLength(1);
+    expect(t.notices().filter((n) => n.startsWith('Live data interrupted'))).toEqual([
+      `Live data interrupted for BTCUSDT: ${PAUSED_REASON}`,
+      `Live data interrupted for BTCUSDT perp: ${PAUSED_REASON}`,
+    ]); // once per market
   });
 
   it('a wall clock stepping back never puts a gap start after its detection', () => {
@@ -1044,6 +1011,7 @@ describe('market keys', () => {
     a.market.trade('BTCUSDT', during); // processed, but only a poll ends the pause
     expect(a.engine.state.lastTradeId.BTCUSDT).toBe(during.id);
     expect(openRows(a.db)).toEqual([
+      { market: 'perp', symbol: 'BTCUSDT', startedAt: T0 + 10_000, reason: PAUSED, lastTradeIdBefore: null },
       { market: 'spot', symbol: 'BTCUSDT', startedAt: T0 + 10_000, reason: PAUSED, lastTradeIdBefore: first.id },
     ]);
 
@@ -1063,13 +1031,14 @@ describe('market keys', () => {
 
     const b = setup({ db: a.db, clock: new FakeClock(T0 + 60_000) });
     expect(openRows(b.db)).toEqual([
+      { market: 'perp', symbol: 'BTCUSDT', startedAt: T0, reason: 'Server offline', lastTradeIdBefore: null },
       { market: 'spot', symbol: 'BTCUSDT', startedAt: T0, reason: 'Server offline', lastTradeIdBefore: last.id },
     ]);
     b.runner.start();
     expect(b.gaps()).toEqual([{ startedAt: T0, endedAt: T0 + 60_000, reason: 'Server offline', lastTradeIdBefore: last.id }]);
   });
 
-  it("another market's gap and cursor for the same symbol are neither seeded, closed nor overwritten by the spot runner", () => {
+  it("each market's gap and cursor for the same symbol are seeded from its own rows and closed on their own", () => {
     const a = setup();
     a.runner.start();
     a.clock.advance(10_000);
@@ -1078,7 +1047,7 @@ describe('market keys', () => {
     a.clock.advance(1000); // fresh at the poll at T0 + 11 s
     a.market.setFresh('BTCUSDT', false);
     a.clock.advance(9000); // the spot gap opens at T0 + 11 s; the heartbeat reaches T0 + 20 s
-    // A second market's rows for the same symbol: an earlier gap and its own cursor.
+    // The perp market's rows for the same symbol: an earlier gap and its own cursor.
     a.db
       .prepare(
         "INSERT INTO open_gaps (season_id, market, symbol, started_at, reason, last_trade_id_before) VALUES (?, 'perp', 'BTCUSDT', ?, 'Mark price stale', 900)",
@@ -1087,18 +1056,27 @@ describe('market keys', () => {
     a.db.prepare("INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (?, 'perp', 'BTCUSDT', 900)").run(a.seasonId);
     const perpGap = { market: 'perp', symbol: 'BTCUSDT', startedAt: T0 + 500, reason: 'Mark price stale', lastTradeIdBefore: 900 };
 
-    // The process dies; the restart seeds the spot gap from its own row only.
-    const b = setup({ db: a.db, clock: new FakeClock(T0 + 30_000) });
+    // The process dies; the restart seeds each market's gap from its own row.
+    const perp = new TestPerpMarket();
+    perp.setFresh('BTCUSDT', false);
+    const b = setup({ db: a.db, clock: new FakeClock(T0 + 30_000), perpMarket: perp });
     expect(b.engine.state.lastTradeId).toEqual({ BTCUSDT: last.id });
+    expect(b.sim.perp.state.lastTradeId).toEqual({ BTCUSDT: 900 });
     expect(openRows(b.db)).toEqual([
       perpGap,
       { market: 'spot', symbol: 'BTCUSDT', startedAt: T0 + 11_000, reason: 'Disconnected', lastTradeIdBefore: last.id },
     ]);
-    b.runner.start();
+    b.runner.start(); // spot fresh, perp still stale: only the spot gap closes
     expect(b.gaps()).toEqual([{ startedAt: T0 + 11_000, endedAt: T0 + 30_000, reason: 'Disconnected', lastTradeIdBefore: last.id }]);
     expect(openRows(b.db)).toEqual([perpGap]);
     const next = trade('99.95');
     b.market.trade('BTCUSDT', next);
+    perp.setFresh('BTCUSDT', true);
+    b.clock.advance(1000);
+    expect(openRows(b.db)).toEqual([]);
+    expect(b.db.prepare("SELECT payload FROM events WHERE type = 'feed_gap' AND market = 'perp'").all()).toEqual([
+      { payload: JSON.stringify({ startedAt: T0 + 500, endedAt: T0 + 31_000, reason: 'Mark price stale', lastTradeIdBefore: 900 }) },
+    ]);
     b.runner.stop();
     expect(b.db.prepare('SELECT market, last_trade_id AS id FROM trade_cursor ORDER BY market').all()).toEqual([
       { market: 'perp', id: 900 },
@@ -1200,5 +1178,271 @@ describe('FeedGaps', () => {
       { market: 'perp', symbol: 'BTCUSDT', startedAt: T0 - 9000, endedAt: T0 + 60_000, reason: 'Disconnected', lastTradeIdBefore: 480 },
     ]);
     expect(gaps.has(SPOT)).toBe(true);
+  });
+});
+
+describe('perps through the runner', () => {
+  const perpTrade = (id: number, price: string, qty = '1'): AggTrade => ({ id, price: D(price), qty: D(qty), sellerInitiated: true, time: T0 });
+  const longMarket = (qty: string) => ({ symbol: 'BTCUSDT', side: 'buy' as const, type: 'market' as const, qty });
+  const idOf = (events: { type: string }[]) => (events[0] as unknown as { order: { id: string } }).order.id;
+  const perpRows = (db: Db) =>
+    db
+      .prepare(
+        "SELECT market, symbol, started_at AS startedAt, reason, last_trade_id_before AS lastTradeIdBefore FROM open_gaps WHERE market = 'perp'",
+      )
+      .all();
+  const perpGaps = (db: Db) =>
+    (db.prepare("SELECT payload FROM events WHERE type = 'feed_gap' AND market = 'perp' ORDER BY id").all() as { payload: string }[]).map(
+      (r) => JSON.parse(r.payload),
+    );
+
+  /** Leverage wallet 1000 and a market long 0.1 at 80000, 20x: margin 396, liquidation 76345.4. */
+  function withLong(t: ReturnType<typeof setup>) {
+    t.runner.deposit('leverage', D('1000'));
+    t.runner.submitPerp(longMarket('0.1'));
+    t.clock.advance(100);
+    expect(t.sim.perp.state.positions.BTCUSDT?.qty.toString()).toBe('0.1');
+  }
+
+  it('a perp market order persists, then broadcasts the account (with the position) and the orders', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('leverage', D('1000'));
+    const fillsAtBroadcast: unknown[] = [];
+    const push = t.sent.push.bind(t.sent);
+    t.sent.push = (...m) => {
+      for (const x of m) {
+        if (x.type === 'account') fillsAtBroadcast.push(t.db.prepare("SELECT count(*) AS n FROM fills WHERE market = 'perp'").get());
+      }
+      return push(...m);
+    };
+    const placed = t.runner.submitPerp(longMarket('0.1'));
+    expect(placed.map((e) => e.type)).toEqual(['order_placed']);
+    const id = idOf(placed);
+    expect(t.orderRow(id)).toMatchObject({ status: 'pending', market: 'perp' });
+    const pendingOrders = t.sent.filter((m) => m.type === 'orders').at(-1)!;
+    expect(pendingOrders.perpOrders.map((o: { id: string; status: string }) => [o.id, o.status])).toEqual([[id, 'pending']]);
+    expect(pendingOrders.orders).toEqual([]);
+
+    t.sent.length = 0;
+    fillsAtBroadcast.length = 0;
+    t.clock.advance(100); // the arrival: fills at 80000.0
+    expect(t.orderRow(id)!.status).toBe('filled');
+    expect(t.db.prepare('SELECT symbol FROM positions').all()).toEqual([{ symbol: 'BTCUSDT' }]);
+    expect(fillsAtBroadcast).toEqual([{ n: 1 }]); // the account went out after the fill was saved
+    const account = t.sent.filter((m) => m.type === 'account').at(-1)!.account;
+    expect(account.leverage.positions).toEqual([
+      expect.objectContaining({ symbol: 'BTCUSDT', side: 'long', qty: '0.1', margin: '396', markPrice: '80000', markFresh: true }),
+    ]);
+    expect(account.marksPaused).toEqual([]);
+    expect(t.sent.filter((m) => m.type === 'orders').at(-1)!.perpOrders).toEqual([]);
+    expect(t.notices()).toEqual(['Opened long 0.1 BTC @ 80000.0 · fee $4.00 · liq 76345.4']);
+    expect(t.perp.consumed.map((c) => [c.symbol, c.side, c.levels.map((l) => [`${l.price}`, `${l.qty}`])])).toEqual([
+      ['BTCUSDT', 'buy', [['80000', '0.1']]],
+    ]);
+    expect(t.fatal).toEqual([]);
+  });
+
+  it('reducing and closing fills give their realised P&L', () => {
+    const t = setup();
+    t.runner.start();
+    withLong(t);
+    t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.05', reduceOnly: true });
+    t.clock.advance(100); // sells at the best bid 79990.0
+    t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.05', reduceOnly: true });
+    t.clock.advance(100);
+    expect(t.notices().slice(1)).toEqual([
+      'Reduced long 0.05 BTC @ 79990.0 · fee $2.00 · P&L -$0.50 · liq 76345.4',
+      'Closed long 0.05 BTC @ 79990.0 · fee $2.00 · P&L -$0.50',
+    ]);
+  });
+
+  it('marks crossing margin ratios 0.5, 0.8 and 0.9 give one notice each; a repeat gives none', () => {
+    const t = setup();
+    t.runner.start();
+    withLong(t);
+    t.sent.length = 0;
+    for (const price of ['78000', '76600', '76600', '76400', '76370', '76370']) t.perp.mark('BTCUSDT', price);
+    expect(t.sent.filter((m) => m.type === 'notice').map((m) => [m.kind, m.level, m.text])).toEqual([
+      ['margin_warning', 'warn', 'Margin ratio 54.8% on BTCUSDT long — liquidation at 76345.4'],
+      ['margin_warning', 'error', 'Margin ratio 84.9% on BTCUSDT long — liquidation at 76345.4'],
+      ['margin_warning', 'error', 'Margin ratio 92.6% on BTCUSDT long — liquidation at 76345.4'],
+    ]);
+    // The warning level given is saved, so a restart does not repeat it.
+    const row = t.db.prepare('SELECT data FROM positions').get() as { data: string };
+    expect(JSON.parse(row.data).warnLevel).toBe(0.9);
+  });
+
+  it('a stale mark is never acted on', () => {
+    const t = setup();
+    t.runner.start();
+    withLong(t);
+    t.perp.setMarkFresh('BTCUSDT', false);
+    t.perp.mark('BTCUSDT', '70000');
+    expect(t.sim.perp.state.positions.BTCUSDT).toBeDefined();
+    expect(t.eventsOf('liquidation')).toEqual([]);
+  });
+
+  it('mark 76340 liquidates: persisted, with its notice', () => {
+    const t = setup();
+    t.runner.start();
+    withLong(t);
+    t.sent.length = 0;
+    t.perp.mark('BTCUSDT', '76340');
+    expect(t.eventsOf('liquidation').map((e) => e.payload.marginLost)).toEqual(['396']);
+    expect(t.eventsOf('position_closed').map((e) => e.payload.reason)).toEqual(['liquidated']);
+    expect(t.db.prepare('SELECT count(*) AS n FROM positions').get()).toEqual({ n: 0 });
+    expect(t.sent.filter((m) => m.type === 'notice').map((m) => [m.kind, m.level, m.text])).toEqual([
+      ['liquidation', 'error', 'LIQUIDATED: BTCUSDT long 0.1 at mark 76340.0 — margin lost $396.00 (fee $30.00)'],
+    ]);
+    expect(t.sent.filter((m) => m.type === 'account').at(-1)!.account.leverage.positions).toEqual([]);
+  });
+
+  it('a spot trade never fills a perp order, and a futures trade never fills a spot order', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    t.runner.deposit('leverage', D('1000'));
+    const spot = submittedOrder(t.runner.submit(limitBuy('99.50', '1')));
+    const perpId = idOf(t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '81000', qty: '0.01' }));
+    t.clock.advance(100);
+    expect([t.orderRow(spot.id)!.status, t.orderRow(perpId)!.status]).toEqual(['open', 'open']);
+
+    const spotTrade = { ...trade('82000'), sellerInitiated: false }; // would fill the perp sell at 81000, were it routed there
+    t.market.trade('BTCUSDT', spotTrade);
+    t.perp.trade('BTCUSDT', perpTrade(5000, '99')); // would fill the spot buy at 99.50, were it routed there
+    expect([t.orderRow(spot.id)!.status, t.orderRow(perpId)!.status]).toEqual(['open', 'open']);
+    expect(t.sim.spot.state.lastTradeId).toEqual({ BTCUSDT: spotTrade.id });
+    expect(t.sim.perp.state.lastTradeId).toEqual({ BTCUSDT: 5000 });
+
+    t.market.trade('BTCUSDT', trade('99.00', '5'));
+    t.perp.trade('BTCUSDT', { ...perpTrade(5001, '81500'), sellerInitiated: false });
+    expect([t.orderRow(spot.id)!.status, t.orderRow(perpId)!.status]).toEqual(['filled', 'filled']);
+    expect(t.fatal).toEqual([]);
+  });
+
+  it("perp gaps use the perp:<symbol> key, the perp feed's last frame and the perp cursor; spot stays live", () => {
+    const t = setup();
+    t.runner.start(); // fresh at the poll at T0
+    t.perp.trade('BTCUSDT', perpTrade(700, '80000', '0.001'));
+    t.clock.advance(1000);
+    t.perpHealth.lastFrame = T0 + 500; // the perp feed fell silent after this frame
+    t.perp.setFresh('BTCUSDT', false);
+    t.clock.advance(1000); // the poll at T0 + 2 s sees it
+    expect(perpRows(t.db)).toEqual([
+      { market: 'perp', symbol: 'BTCUSDT', startedAt: T0 + 500, reason: 'Disconnected', lastTradeIdBefore: 700 },
+    ]);
+    expect(t.openGapRows()).toEqual([]);
+    expect(t.notices()).toContain('Live data interrupted for BTCUSDT perp: Disconnected');
+    t.perp.trade('BTCUSDT', perpTrade(701, '80000', '0.001')); // skipped on stale data: the cursor stays
+    expect(t.sim.perp.state.lastTradeId.BTCUSDT).toBe(700);
+
+    t.perp.setFresh('BTCUSDT', true);
+    t.clock.advance(1000);
+    expect(perpGaps(t.db)).toEqual([{ startedAt: T0 + 500, endedAt: T0 + 3000, reason: 'Disconnected', lastTradeIdBefore: 700 }]);
+    expect(t.gaps()).toEqual([]);
+    expect(t.notices()).toContain('Live data restored for BTCUSDT perp');
+  });
+
+  it('a stale mark alone makes no gap while the market reports the symbol fresh', () => {
+    const t = setup();
+    t.runner.start();
+    t.perp.setMarkFresh('BTCUSDT', false);
+    t.clock.advance(3000);
+    expect(perpRows(t.db)).toEqual([]);
+  });
+
+  it('a detected pause is reported to the spot feed health and to the perp feed health', () => {
+    const t = setup();
+    t.runner.start();
+    t.clock.advance(1000);
+    t.clock.now += 30_000;
+    t.clock.advance(0);
+    expect(t.health.stalls).toEqual([T0 + 31_000]);
+    expect(t.perpHealth.stalls).toEqual([T0 + 31_000]);
+    t.clock.advance(1000); // the next poll finds the perp data fresh again
+    expect(perpGaps(t.db)).toEqual([{ startedAt: T0 + 1000, endedAt: T0 + 32_000, reason: PAUSED_REASON, lastTradeIdBefore: null }]);
+  });
+
+  it('the 1 s poll runs perp deferred work: an attached pair waiting for a last price arms without a trade', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('leverage', D('1000'));
+    t.runner.submitPerp({ ...longMarket('0.1'), attach: { stopLoss: '78000', takeProfit: '82000' } });
+    t.clock.advance(100); // the long fills at T0 + 100
+    t.perp.setLastPrice('BTCUSDT', null);
+    t.clock.advance(100); // its pair arrives at T0 + 200 with no last price: it waits
+    const legs = () => t.runner.openPerpOrders();
+    expect(legs().map((o) => [o.status, o.arrivesAt])).toEqual([
+      ['pending', null],
+      ['pending', null],
+    ]);
+    t.perp.setLastPrice('BTCUSDT', D('80000'));
+    t.clock.advance(800); // the poll at T0 + 1 s
+    expect(legs().map((o) => o.status)).toEqual(['open', 'open']);
+    expect(perpGaps(t.db)).toEqual([]);
+  });
+
+  it('restart: a pending perp market order is rejected; a pending perp limit is re-sent once the perp data is fresh', () => {
+    const a = setup();
+    a.runner.deposit('leverage', D('1000'));
+    const market = idOf(a.runner.submitPerp(longMarket('0.01')));
+    const limit = idOf(a.runner.submitPerp({ symbol: 'BTCUSDT', side: 'buy', type: 'limit', price: '79000', qty: '0.01' }));
+    a.runner.stop();
+
+    a.clock.advance(60_000);
+    const perp = new TestPerpMarket();
+    perp.setFresh('BTCUSDT', false);
+    const b = setup({ db: a.db, clock: a.clock, perpMarket: perp });
+    expect(b.orderRow(market)!.status).toBe('rejected');
+    expect(JSON.parse(b.orderRow(market)!.data).rejectReason).toBe('Server restarted before execution');
+    b.runner.start();
+    b.clock.advance(5000);
+    expect(b.sim.perp.state.orders.get(limit)!.status).toBe('pending');
+    perp.setFresh('BTCUSDT', true);
+    b.clock.advance(1000); // the poll finds it fresh: re-sent with a fresh 100 ms delay
+    expect(b.sim.perp.state.orders.get(limit)!.arrivesAt).toBe(b.clock.now + 100);
+    b.clock.advance(100);
+    expect(b.orderRow(limit)!.status).toBe('open');
+    expect(b.fatal).toEqual([]);
+  });
+
+  it('cancel works for a perp order: a request that lands after the arrival delay', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('leverage', D('1000'));
+    const id = idOf(t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'buy', type: 'limit', price: '79000', qty: '0.01' }));
+    t.clock.advance(100);
+    expect(t.runner.cancel(id)).toEqual({ ok: true, events: [] });
+    expect(t.orderRow(id)!.status).toBe('open');
+    t.clock.advance(100);
+    expect(t.orderRow(id)!.status).toBe('cancelled');
+    expect(t.runner.cancel(id)).toEqual({ ok: false, reason: 'Order is not open' });
+  });
+
+  it('equity snapshots value positions at the mark (leverage_value includes them) and skip a stale mark', () => {
+    const t = setup();
+    t.runner.start();
+    withLong(t);
+    t.perp.setMarkPrice('BTCUSDT', D('81000'));
+    t.clock.advance(60_000 - 100);
+    const snaps = () => t.db.prepare('SELECT total, leverage_value AS lev FROM equity_snapshots').all();
+    // free 600 + margin 396 + unrealised 0.1 x (81000 - 80000) = 1096
+    expect(snaps()).toEqual([{ total: '1096', lev: '1096' }]);
+    t.perp.setMarkFresh('BTCUSDT', false);
+    expect(t.runner.account().marksPaused).toEqual(['BTCUSDT']);
+    t.clock.advance(60_000);
+    expect(snaps()).toHaveLength(1);
+  });
+
+  it('a call with no events still prunes applied funding times older than 30 days (persist gets now)', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('leverage', D('1000'));
+    t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'buy', type: 'limit', price: '79000', qty: '0.01' });
+    t.sim.perp.state.funding.applied = { BTCUSDT: [T0 - 31 * 86_400_000, T0 - 86_400_000] };
+    t.clock.advance(100); // pending -> open: no events
+    const row = t.db.prepare('SELECT funding FROM perp_state').get() as { funding: string };
+    expect(JSON.parse(row.funding).applied).toEqual({ BTCUSDT: [T0 - 86_400_000] });
   });
 });

@@ -21,6 +21,7 @@ import { PerpFeed, perpHealth } from './market/perpFeed.ts';
 import { PerpMarketData } from './market/perpMarketData.ts';
 import { SpotFeed } from './market/spotFeed.ts';
 import { ConnectLimiter, defaultSetTimer } from './market/ws.ts';
+import { FundingService } from './funding/fundingService.ts';
 import { EngineRunner } from './runner.ts';
 import { onShutdownSignals } from './shutdownSignals.ts';
 
@@ -79,6 +80,7 @@ let shuttingDown = false;
 async function shutdown(code: number): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  funding.stop();
   runner.stop();
   hub?.stop();
   feed.close();
@@ -98,16 +100,26 @@ const runner = new EngineRunner({
   db,
   seasonId,
   sim,
-  market,
-  health,
+  spotMarket: market,
+  perpMarket,
+  // PerpMarketData reports a pause to both of its connections' FeedHealth.
+  health: { spot: health, perp: perpMarket },
   symbols: config.symbols,
-  fees: config.fees.spot,
+  fees: config.fees,
   now: Date.now,
   rng: Math.random,
   setTimer: defaultSetTimer,
   onBroadcast: (msg) => hub?.broadcast(msg),
   // Memory may be ahead of the database: never keep running (the runner has logged the cause).
   onFatal: () => setImmediate(() => void shutdown(1)),
+  logger,
+});
+const funding = new FundingService({
+  rest: futuresRest,
+  sim: runner,
+  market: perpMarket,
+  now: Date.now,
+  setTimer: defaultSetTimer,
   logger,
 });
 hub = new ClientHub({ market, candles, runner, symbols: config.symbols, setTimer: defaultSetTimer, logger });
@@ -127,13 +139,18 @@ app = await buildApp({
   webDist: existsSync(WEB_DIST) ? WEB_DIST : null,
 });
 
-// The runner listens for trades before the feed starts, so none is missed.
+// The runner listens for trades and marks before the feeds start, so none is missed. The perp
+// feed starts only once the futures rules and leverage tiers are loaded, so no futures trade or
+// mark reaches the engine before what it needs to act on it.
 runner.start();
+funding.start();
 hub.start();
 market.start();
 feed.start();
 perpMarket.start();
-perpFeed.start();
+void perpMarket.ready().then(() => {
+  if (!shuttingDown) perpFeed.start();
+});
 
 onShutdownSignals(process, () => void shutdown(0));
 
