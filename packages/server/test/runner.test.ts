@@ -350,6 +350,17 @@ describe('EngineRunner', () => {
     expect(b.orderRow(order.id)!.status).toBe('filled');
   });
 
+  it('a taker fill whose persist fails never reaches the own-liquidity overlay: the book is not reduced by it', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    t.runner.submit(marketBuy('1.2'));
+    t.db.exec('DROP TABLE fills'); // the fill's transaction fails
+    t.clock.advance(100); // the arrival: the engine fills, the persist fails
+    expect(t.fatal).toHaveLength(1);
+    expect(t.market.consumed).toEqual([]);
+  });
+
   it('a persist failure is fatal: logged, onFatal called, nothing more runs', () => {
     const t = setup();
     t.runner.start();

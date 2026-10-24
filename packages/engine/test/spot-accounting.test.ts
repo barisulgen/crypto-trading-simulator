@@ -372,6 +372,57 @@ describe('round trips wait for live sells', () => {
     expect(engine.state.basis.BTC!.roundTripId).toBeNull();
   });
 
+  /**
+   * 1.009 BTC held in trip rt0 (MIN_NOTIONAL 1) and a sell limit for 1 BTC at 101 resting: once it
+   * fills, the 0.009 BTC left is dust (worth 0.909 at 101, 0.8991 at the 99.90 bid).
+   */
+  function withDustAfterLimit() {
+    const market = new FakeMarket();
+    market.setRules('BTCUSDT', { ...btcRules, minNotional: D('1') });
+    const ctx = testCtx(market, { now: NOW });
+    const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
+    seedCoins(engine.state, 'BTC', D('1.009'));
+    const lim = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '101', qty: '1' }, ctx));
+    expect(arriveNow(engine, lim, ctx)).toEqual([]);
+    return { market, ctx, engine, lim };
+  }
+
+  it('an armed, then triggered, sell stop keeps the trip open while only dust is held; its execution closes it', () => {
+    const { ctx, engine } = withDustAfterLimit();
+    // A take-profit for the rest at 112 (worth 1.008 there): armed above the price.
+    const tp = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'take_profit', triggerPrice: '112', qty: '0.009' }, ctx));
+    expect(arriveNow(engine, tp, ctx)).toEqual([]);
+    expect(engine.state.orders.get(tp.id)!.status).toBe('open'); // armed
+    expect(engine.onTrade('BTCUSDT', trade('101.01', '1', false), ctx).map((e) => e.type)).toEqual(['fill']);
+    expect(s(engine.state.basis.BTC!.qty)).toBe('0.009');
+    expect(engine.state.basis.BTC!.roundTripId).toBe('rt0'); // dust, but the armed stop covers it
+
+    const triggered = engine.onTrade('BTCUSDT', trade('112', '1', false), ctx);
+    expect(triggered.map((e) => e.type)).toEqual(['order_triggered']);
+    expect(engine.state.basis.BTC!.roundTripId).toBe('rt0'); // executing: still covers it
+
+    const executed = arriveNow(engine, engine.state.orders.get(tp.id)!, ctx);
+    expect(executed.at(-1)!.type).toBe('round_trip_closed');
+    expect(engine.state.basis.BTC!.roundTripId).toBeNull();
+  });
+
+  it('a sell rejected on arrival closes the trip when only dust is left and no other sell is live', () => {
+    const { market, ctx, engine } = withDustAfterLimit();
+    const late = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '120', qty: '0.009' }, ctx));
+    expect(engine.onTrade('BTCUSDT', trade('101.01', '1', false), ctx).map((e) => e.type)).toEqual(['fill']);
+    expect(s(engine.state.basis.BTC!.qty)).toBe('0.009');
+    expect(engine.state.basis.BTC!.roundTripId).toBe('rt0'); // the sell on its way still covers the dust
+
+    market.setFresh('BTCUSDT', false);
+    const events = arriveNow(engine, late, ctx);
+    expect(events.map((e) => e.type)).toEqual(['order_rejected', 'round_trip_closed']);
+    const closed = events[1]!;
+    if (closed.type !== 'round_trip_closed') throw new Error('expected round_trip_closed');
+    expect(closed.roundTrip.id).toBe('rt0');
+    expect(engine.state.basis.BTC!.roundTripId).toBeNull();
+    expect(s(engine.state.basis.BTC!.qty)).toBe('0.009');
+  });
+
   it('a market sell that leaves dust does not close the trip while a part-filled sell limit still covers coins', () => {
     const market = new FakeMarket();
     const ctx = testCtx(market, { now: NOW });

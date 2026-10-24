@@ -1344,10 +1344,12 @@ describe('book reads on a trade', () => {
     const b = arm(engine, sellStop('98', '0.5'), ctx);
     market.bookCalls = 0;
     expect(triggerStops(engine.state, 'BTCUSDT', trade('99.50'), ctx)).toEqual([]);
+    expect(market.bookCalls).toBe(0);
 
     const first = only(triggerStops(engine.state, 'BTCUSDT', trade('99.00'), ctx), 'order_triggered');
     expect(first.order.id).toBe(a);
     expect(s(first.order.bestAtSubmit)).toBe('99.9');
+    expect(market.bookCalls).toBe(0);
 
     const c = arm(engine, sellStop('97', '0.5'), ctx);
     market.bookCalls = 0;
