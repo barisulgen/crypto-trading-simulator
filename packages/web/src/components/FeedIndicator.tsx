@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { useLive } from '../lib/live.ts';
+import { feedStatus, feedSummary, useLive } from '../lib/live.ts';
+import type { Connection, FeedState, FeedSummary, LiveData } from '../lib/live.ts';
+import type { Market } from '../lib/api.ts';
 
-type Overall = 'live' | 'partial' | 'down' | 'connecting';
+type Overall = 'live' | 'catching_up' | 'interrupted' | 'down' | 'connecting';
 
+/** Green: live. Amber: catching up after a gap. Red: interrupted, or our own connection lost. */
 const DOT: Record<Overall, string> = {
   live: 'bg-up rounded-full',
-  partial: 'border-2 border-accent rounded-full',
+  catching_up: 'bg-accent rounded-full',
+  interrupted: 'border-2 border-down rounded-full',
   down: 'bg-down rounded-[1px]',
   connecting: 'border-2 border-faint rounded-full',
 };
@@ -13,12 +17,84 @@ const DOT: Record<Overall, string> = {
 const canHover = () => matchMedia('(hover: hover)').matches;
 
 /**
- * Whether live data is flowing: the connection to our server plus the feed health of each coin.
- * Hover (desktop) or tap (phone) shows each coin's state and the reason it is stale.
+ * The indicator's summary: its tone, the desktop label and the shorter phone label. Interrupted
+ * feeds outrank those catching up, which outrank live ones.
+ */
+export function feedLabel(conn: Connection, f: FeedSummary): { tone: Overall; long: string; short: string } {
+  if (conn === 'down') return { tone: 'down', long: 'Server disconnected', short: 'Disconnected' };
+  if (conn === 'connecting' || f.known === 0) return { tone: 'connecting', long: 'Connecting', short: 'Connecting' };
+  if (f.interrupted > 0) {
+    const catching = f.catchingUp > 0 ? `, ${f.catchingUp} catching up` : '';
+    return { tone: 'interrupted', long: `${f.interrupted} of ${f.feeds} interrupted${catching}`, short: 'Interrupted' };
+  }
+  if (f.catchingUp > 0) return { tone: 'catching_up', long: `${f.catchingUp} catching up`, short: 'Catching up' };
+  return { tone: 'live', long: 'Live', short: 'Live' };
+}
+
+const MARKET_ROWS: { market: Market; label: string }[] = [
+  { market: 'spot', label: 'Spot' },
+  { market: 'perp', label: 'Perp' },
+];
+
+function StateText({ state, reason }: { state: FeedState; reason: string | null }) {
+  switch (state) {
+    case 'live':
+      return <span className="text-up">Live</span>;
+    case 'catching_up':
+      return (
+        <span className="text-fg">
+          <span className="font-semibold text-accent">Catching up</span> - applying the gap
+        </span>
+      );
+    case 'interrupted':
+      return (
+        <span className="text-fg">
+          <span className="text-down">Interrupted</span> {reason ? `- ${reason}` : ''}
+        </span>
+      );
+    default:
+      return <span className="text-faint">No status yet</span>;
+  }
+}
+
+/** Each coin with the state of its spot and its perp feed, and the reason a feed is interrupted. */
+export function FeedStatusList({
+  data,
+  symbols,
+}: {
+  data: Pick<LiveData, 'health' | 'markets' | 'catchingUp'>;
+  symbols: readonly string[];
+}) {
+  return (
+    <ul className="flex flex-col divide-y divide-line border-t border-line">
+      {symbols.map((s) => (
+        <li key={s} className="flex items-start gap-2 py-1.5 text-xs">
+          <span className="w-12 flex-none font-semibold">{s.replace(/USDT$/, '')}</span>
+          <div className="flex min-w-0 flex-col gap-0.5">
+            {MARKET_ROWS.map(({ market, label }) => (
+              <div key={market} className="flex min-w-0 gap-2">
+                <span className="w-8 flex-none text-faint">{label}</span>
+                <span className="min-w-0 [overflow-wrap:anywhere]">
+                  <StateText {...feedStatus(data, market, s)} />
+                </span>
+              </div>
+            ))}
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * Whether live data is flowing: the connection to our server plus the feed of each coin's spot
+ * and perp market. Hover (desktop) or tap (phone) shows each one's state and why it is not live.
  */
 export function FeedIndicator() {
   const conn = useLive((s) => s.conn);
   const health = useLive((s) => s.health);
+  const markets = useLive((s) => s.markets);
+  const catchingUp = useLive((s) => s.catchingUp);
   const symbols = useLive((s) => s.meta?.symbols) ?? Object.keys(health);
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -37,21 +113,9 @@ export function FeedIndicator() {
     };
   }, [open]);
 
-  const stale = symbols.filter((s) => health[s] && !health[s].fresh);
-  const known = symbols.filter((s) => health[s]).length;
-  const overall: Overall =
-    conn === 'down' ? 'down' : conn === 'connecting' || known === 0 ? 'connecting' : stale.length > 0 ? 'partial' : 'live';
-  const label =
-    overall === 'down'
-      ? 'Server disconnected'
-      : overall === 'connecting'
-        ? 'Connecting'
-        : overall === 'partial'
-          ? `${stale.length} of ${symbols.length} coins paused`
-          : 'Live';
-  // Phones: a shorter label, so the header stays on one line.
-  const shortLabel =
-    overall === 'down' ? 'Disconnected' : overall === 'partial' ? `${stale.length}/${symbols.length} paused` : label;
+  const data = { health, markets, catchingUp };
+  const { tone, long, short } = feedLabel(conn, feedSummary(data, symbols));
+  const text = tone === 'down' || tone === 'interrupted' ? 'text-down' : tone === 'catching_up' ? 'text-fg' : '';
 
   return (
     <div
@@ -67,10 +131,10 @@ export function FeedIndicator() {
         onClick={() => setOpen((o) => !o)}
         className="flex h-7 items-center gap-2 rounded-ctl px-2 text-xs text-muted hover:bg-raised"
       >
-        <span aria-hidden="true" className={`size-2.5 flex-none ${DOT[overall]}`} />
-        <span className={`whitespace-nowrap ${overall === 'down' ? 'text-down' : overall === 'partial' ? 'text-fg' : ''}`}>
-          <span className="desk:hidden">{shortLabel}</span>
-          <span className="hidden desk:inline">{label}</span>
+        <span aria-hidden="true" className={`size-2.5 flex-none ${DOT[tone]}`} />
+        <span className={`whitespace-nowrap ${text}`}>
+          <span className="desk:hidden">{short}</span>
+          <span className="hidden desk:inline">{long}</span>
         </span>
       </button>
       {open && (
@@ -86,28 +150,13 @@ export function FeedIndicator() {
             </span>
           </div>
           {conn === 'down' && (
-            <p className="mb-2 text-xs text-faint">Prices and balances below are frozen until the connection returns.</p>
+            <p className="mb-2 text-xs text-faint">Prices, balances and the states below are frozen until the connection returns.</p>
           )}
-          <ul className="flex flex-col divide-y divide-line border-t border-line">
-            {symbols.map((s) => {
-              const h = health[s];
-              return (
-                <li key={s} className="flex items-start gap-2 py-1.5 text-xs">
-                  <span className="w-12 flex-none font-semibold">{s.replace(/USDT$/, '')}</span>
-                  {!h ? (
-                    <span className="text-faint">No status yet</span>
-                  ) : h.fresh ? (
-                    <span className="text-up">Live</span>
-                  ) : (
-                    <span className="text-fg">
-                      <span className="text-accent">Paused</span> {h.reason ? `- ${h.reason}` : ''}
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-          <p className="mt-2 text-2xs text-faint">Trading on a paused coin waits for fresh data; nothing fills on an old price.</p>
+          <FeedStatusList data={data} symbols={symbols} />
+          <p className="mt-2 text-2xs text-faint">
+            Trading on an interrupted market waits for fresh data; nothing fills on an old price. A market catching up
+            applies what happened during the gap, marked estimated in the history, before trading on it resumes.
+          </p>
         </div>
       )}
     </div>

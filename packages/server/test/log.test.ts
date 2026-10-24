@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createLogger, redact } from '../src/log.ts';
+import { createLogger, listeningLine, redact } from '../src/log.ts';
 
 describe('redact', () => {
   it('replaces secrets, signatures and api-key headers', () => {
@@ -33,5 +33,15 @@ describe('createLogger', () => {
     expect(out[0]).toMatch(/^\d{4}-\d\d-\d\dT[\d:.]+Z info key \[REDACTED\] sig \?signature=\[REDACTED\]$/);
     expect(out[1]).toMatch(/ warn w$/);
     expect(out[2]).toMatch(/ error e$/);
+  });
+});
+
+describe('listeningLine', () => {
+  it('marks the data as test data only for a database recorded before catch-up existed', () => {
+    const at = { host: '127.0.0.1', port: 8787, seasonId: 1 };
+    expect(listeningLine({ ...at, testData: false })).toBe('Server listening on http://127.0.0.1:8787 (season 1)');
+    expect(listeningLine({ ...at, testData: true })).toBe(
+      'Server listening on http://127.0.0.1:8787 (season 1, TEST DATA - recorded before catch-up existed; npm run db:wipe starts real practice)',
+    );
   });
 });

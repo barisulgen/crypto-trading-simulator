@@ -12,8 +12,8 @@ import { fetchUnofficialBrackets, TierLoader } from './binance/tiers.ts';
 import { BinanceHistory } from './catchup/history.ts';
 import { loadConfig } from './config.ts';
 import { currentSeasonId, openDb } from './db/db.ts';
-import { loadLedger, loadPerpState, loadSpotState } from './db/store.ts';
-import { createLogger } from './log.ts';
+import { isTestData, loadLedger, loadPerpState, loadSpotState } from './db/store.ts';
+import { createLogger, listeningLine } from './log.ts';
 import { CandleService } from './market/candles.ts';
 import { FeedHealth } from './market/feedHealth.ts';
 import { LocalBook } from './market/localBook.ts';
@@ -174,7 +174,7 @@ onShutdownSignals(process, () => void shutdown(0));
 
 try {
   await app.listen({ host: config.host, port: config.port });
-  logger.info(`Server listening on http://${config.host}:${config.port} (season ${seasonId}, TEST DATA - Phase 1)`);
+  logger.info(listeningLine({ host: config.host, port: config.port, seasonId, testData: isTestData(db) }));
 } catch (e) {
   logger.error(`Could not listen on ${config.host}:${config.port}: ${(e as Error).message}`);
   await shutdown(1);

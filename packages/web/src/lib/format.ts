@@ -97,6 +97,11 @@ export function setPerpRules(rules: Record<string, SizeRules>): void {
   perpRulesBySymbol = rules;
 }
 
+/** The perpetual's tick size, once its rules have loaded. */
+export function perpTickSize(symbol: string): string | undefined {
+  return perpRulesBySymbol[symbol]?.tickSize;
+}
+
 /** Which market's rules size a figure: spot unless it says perp. */
 interface InMarket {
   market?: 'spot' | 'perp';
@@ -133,10 +138,10 @@ export function fmtPrice(symbol: string, value: Value, opts: Exact & InMarket = 
   return fmtNum(value, decimals(value, tick !== undefined ? tickDecimals(tick) : ownDecimals(value), opts));
 }
 
-/** A fill's (average) price: the tick-size decimals plus 2, as in the fill notices. */
-export function fmtAvgPrice(symbol: string, value: Value): string {
+/** A fill's (average) price: the tick-size decimals plus 2, as in the fill notices (the perpetual's with `market: 'perp'`). */
+export function fmtAvgPrice(symbol: string, value: Value, opts: InMarket = {}): string {
   if (value === null || value === undefined) return DASH;
-  const tick = rulesBySymbol[symbol]?.tickSize;
+  const tick = rulesOf(symbol, opts)?.tickSize;
   return fmtNum(value, tick !== undefined ? tickDecimals(tick) + 2 : ownDecimals(value));
 }
 

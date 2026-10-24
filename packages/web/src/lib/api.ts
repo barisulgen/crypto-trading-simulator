@@ -58,7 +58,8 @@ export interface Ticker {
   change24hPct: string;
 }
 
-export type HealthMap = Record<string, { fresh: boolean; reason: string | null }>;
+/** Spot feed health by symbol; `catchingUp` is set while the symbol's spot data catches up after a gap. */
+export type HealthMap = Record<string, { fresh: boolean; reason: string | null; catchingUp?: boolean }>;
 
 /** A market and symbol, as the server keys them: 'spot:BTCUSDT', 'perp:BTCUSDT'. */
 export type MarketKey = `${Market}:${string}`;

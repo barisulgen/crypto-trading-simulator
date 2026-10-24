@@ -67,6 +67,7 @@ function changed(s: PerpState, plan: MarginPlan, ctx: PerpCtx): PerpActionResult
         market: 'perp',
         time: ctx.now,
         symbol: pos.symbol,
+        side: pos.side,
         action,
         amount,
         marginAfter: margin,

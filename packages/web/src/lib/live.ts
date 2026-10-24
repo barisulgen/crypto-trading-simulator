@@ -222,6 +222,66 @@ export function feedOf(
   return market === 'spot' ? s.health[symbol] : s.markets[`perp:${symbol}`];
 }
 
+/**
+ * A feed's state as the owner is shown it: live; catching up (fresh again, but the gap's history is
+ * still being applied, so trading on it waits); interrupted (no fresh data); or not reported yet.
+ */
+export type FeedState = 'live' | 'catching_up' | 'interrupted' | 'unknown';
+
+const MARKETS: readonly Market[] = ['spot', 'perp'];
+
+/**
+ * The state of one market's symbol. Health comes from the per-market map (spot falls back to the
+ * per-symbol one); catching up from the list of keys catching up or either map's flag. A feed that
+ * is not fresh is interrupted, whatever catch-up is pending.
+ */
+export function feedStatus(
+  s: Pick<LiveData, 'health' | 'markets' | 'catchingUp'>,
+  market: Market,
+  symbol: string,
+): { state: FeedState; reason: string | null } {
+  const key = `${market}:${symbol}`;
+  const spot = market === 'spot' ? s.health[symbol] : undefined;
+  const h = s.markets[key] ?? spot;
+  if (h && !h.fresh) return { state: 'interrupted', reason: h.reason };
+  if (s.catchingUp.includes(key) || s.markets[key]?.catchingUp === true || spot?.catchingUp === true) {
+    return { state: 'catching_up', reason: null };
+  }
+  return h ? { state: 'live', reason: null } : { state: 'unknown', reason: null };
+}
+
+export interface FeedSummary {
+  /** Every feed: both markets of every coin. */
+  feeds: number;
+  /** Feeds the server has reported on. */
+  known: number;
+  interrupted: number;
+  catchingUp: number;
+}
+
+/** How many of the coins' spot and perp feeds are interrupted or catching up. */
+export function feedSummary(s: Pick<LiveData, 'health' | 'markets' | 'catchingUp'>, symbols: readonly string[]): FeedSummary {
+  const out: FeedSummary = { feeds: symbols.length * MARKETS.length, known: 0, interrupted: 0, catchingUp: 0 };
+  for (const symbol of symbols) {
+    for (const market of MARKETS) {
+      const { state } = feedStatus(s, market, symbol);
+      if (state !== 'unknown') out.known += 1;
+      if (state === 'interrupted') out.interrupted += 1;
+      if (state === 'catching_up') out.catchingUp += 1;
+    }
+  }
+  return out;
+}
+
+/** The feeds catching up now, in coin order, spot before perp. */
+export function catchingUpFeeds(s: Pick<LiveData, 'health' | 'markets' | 'catchingUp'>, symbols: readonly string[]): Selection[] {
+  const out: Selection[] = [];
+  for (const symbol of symbols) {
+    for (const market of MARKETS) if (feedStatus(s, market, symbol).state === 'catching_up') out.push({ symbol, market });
+  }
+  return out;
+}
+
 /** Whether a book, trades or kline message is for the market and coin shown (no market means spot). */
 function isSelected(s: LiveData, msg: { market?: Market; symbol: string }): boolean {
   return msg.symbol === s.selected.symbol && (msg.market ?? 'spot') === s.selected.market;

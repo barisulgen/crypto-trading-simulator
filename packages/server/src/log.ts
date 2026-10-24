@@ -34,3 +34,12 @@ export function createLogger(secrets: readonly string[], write: WriteFn = defaul
   };
   return { info: emit('info', 'stdout'), warn: emit('warn', 'stderr'), error: emit('error', 'stderr') };
 }
+
+/**
+ * The startup line: where the server listens and the season; a database recorded before catch-up
+ * existed (meta.test_data) is marked as test data, a new one is not.
+ */
+export function listeningLine(o: { host: string; port: number; seasonId: number; testData: boolean }): string {
+  const test = o.testData ? ', TEST DATA - recorded before catch-up existed; npm run db:wipe starts real practice' : '';
+  return `Server listening on http://${o.host}:${o.port} (season ${o.seasonId}${test})`;
+}

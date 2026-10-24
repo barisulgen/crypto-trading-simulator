@@ -220,6 +220,8 @@ export type PerpEvent = (
       market: 'perp';
       time: number;
       symbol: string;
+      /** The side of the position the margin went into or came out of. */
+      side: PositionSide;
       action: 'add' | 'remove';
       amount: Decimal;
       marginAfter: Decimal;

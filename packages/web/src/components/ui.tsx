@@ -200,7 +200,7 @@ export function Interrupted({ reason }: { reason: string | null }) {
     <div role="status" className="absolute inset-0 z-10 flex items-center justify-center bg-panel/80 p-4">
       <div className="flex max-w-[16rem] flex-col items-center gap-1 rounded-panel border border-line bg-panel px-4 py-3 text-center shadow-[0_6px_20px_rgb(0_0_0/0.3)]">
         <span className="flex items-center gap-2 text-sm font-semibold text-fg">
-          <span aria-hidden="true" className="size-2.5 flex-none rounded-full border-2 border-accent" />
+          <span aria-hidden="true" className="size-2.5 flex-none rounded-full border-2 border-down" />
           Live data interrupted
         </span>
         <span className="text-xs text-muted">{reason ?? 'No fresh data from Binance'}</span>

@@ -1,5 +1,5 @@
 import { fmtPct, fmtPrice, signOf } from '../lib/format.ts';
-import { feedOf, useLive } from '../lib/live.ts';
+import { feedStatus, useLive } from '../lib/live.ts';
 import { fmtFundingPct } from '../lib/market.ts';
 import { MarketSwitch } from './MarketSwitch.tsx';
 
@@ -22,8 +22,8 @@ export function changeClass(value: string | null | undefined, dp = 2): string {
 /**
  * The 10 coins of the market shown (the switch above them picks spot or the perpetuals) with
  * last price and 24 h change, and for perpetuals the funding rate; selecting one loads it
- * everywhere else. A coin whose feed is stale gets a hollow dot; a funding rate from a stale mark
- * is dimmed.
+ * everywhere else. A coin whose feed is interrupted gets a hollow red dot, one catching up after a
+ * gap an amber dot; a funding rate from a stale mark is dimmed.
  */
 export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
   const coins = useLive((s) => s.meta?.coins) ?? FALLBACK_COINS;
@@ -32,6 +32,7 @@ export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
   const marks = useLive((s) => s.marks);
   const health = useLive((s) => s.health);
   const markets = useLive((s) => s.markets);
+  const catchingUp = useLive((s) => s.catchingUp);
   const selected = useLive((s) => s.selected.symbol);
   const select = useLive((s) => s.select);
   const down = useLive((s) => s.conn === 'down');
@@ -54,7 +55,7 @@ export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
         {coins.map((coin) => {
           const symbol = `${coin}USDT`;
           const t = tickers[symbol];
-          const h = feedOf({ health, markets }, market, symbol);
+          const feed = feedStatus({ health, markets, catchingUp }, market, symbol);
           const mark = perp ? marks[symbol] : undefined;
           const on = symbol === selected;
           return (
@@ -74,11 +75,18 @@ export function CoinList({ onPicked }: { onPicked?(symbol: string): void }) {
                   <span className="font-semibold">{coin}</span>
                   {/* Only where the list is wide enough (phones); the narrow desktop column would collide with the price. */}
                   <span className="hidden text-2xs text-faint @min-[16rem]:inline">/USDT</span>
-                  {h && !h.fresh && (
+                  {feed.state === 'interrupted' && (
                     <span
-                      title={h.reason ?? 'Paused'}
-                      aria-label={`Paused: ${h.reason ?? 'no fresh data'}`}
-                      className="ml-1 size-2 flex-none self-center rounded-full border-2 border-accent"
+                      title={feed.reason ?? 'Live data interrupted'}
+                      aria-label={`Interrupted: ${feed.reason ?? 'no fresh data'}`}
+                      className="ml-1 size-2 flex-none self-center rounded-full border-2 border-down"
+                    />
+                  )}
+                  {feed.state === 'catching_up' && (
+                    <span
+                      title="Catching up after a data gap: trading resumes when it is done"
+                      aria-label="Catching up after a data gap"
+                      className="ml-1 size-2 flex-none self-center rounded-full bg-accent"
                     />
                   )}
                 </span>

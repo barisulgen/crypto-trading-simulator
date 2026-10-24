@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AccountBar } from './components/AccountBar.tsx';
+import { CatchUpIndicator } from './components/CatchUpIndicator.tsx';
 import { FeedIndicator } from './components/FeedIndicator.tsx';
 import { LiquidationAlert } from './components/LiquidationAlert.tsx';
 import { LoginScreen } from './components/LoginScreen.tsx';
@@ -86,6 +87,7 @@ export function App() {
         <>
           <Header path={route.path} />
           <AccountBar />
+          <CatchUpIndicator />
           <main className="min-h-0 flex-1">
             {route.path === '/history' ? <HistoryPage params={route.params} /> : <TradePage />}
           </main>

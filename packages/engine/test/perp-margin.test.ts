@@ -103,7 +103,7 @@ describe('addMargin', () => {
     expect(events).toHaveLength(1);
     const e = events[0]!;
     if (e.type !== 'margin_changed') throw new Error(e.type);
-    expect(e).toMatchObject({ market: 'perp', symbol: 'BTCUSDT', action: 'add', time: ctx.now });
+    expect(e).toMatchObject({ market: 'perp', symbol: 'BTCUSDT', side: 'long', action: 'add', time: ctx.now });
     expect(e.amount.toString()).toBe('100');
     expect(e.marginAfter.toString()).toBe('496');
     expect(e.liquidationPriceAfter?.toFixed(8)).toBe('75341.36546185');
@@ -140,7 +140,7 @@ describe('removeMargin', () => {
     const events = ok(engine.removeMargin('BTCUSDT', '186', ctx));
     const e = events[0]!;
     if (e.type !== 'margin_changed') throw new Error(e.type);
-    expect(e).toMatchObject({ market: 'perp', symbol: 'BTCUSDT', action: 'remove' });
+    expect(e).toMatchObject({ market: 'perp', symbol: 'BTCUSDT', side: 'long', action: 'remove' });
     expect(e.amount.toString()).toBe('186');
     expect(e.marginAfter.toString()).toBe('210');
     expect(e.liquidationPriceAfter?.toFixed(8)).toBe('78212.85140562');

@@ -10,6 +10,7 @@ import {
   EMPTY_FILTERS,
   EVENT_TYPES,
   HISTORY_COINS,
+  MARKET_FILTERS,
   describeEvent,
   filterParams,
   hasFilters,
@@ -146,11 +147,7 @@ function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(
             <Segmented
               label="Market"
               value={filters.market ?? 'all'}
-              options={[
-                { value: 'all', label: 'All' },
-                { value: 'spot', label: 'Spot' },
-                { value: 'leverage', label: 'Leverage', title: 'Leverage trading arrives in Phase 2; deposits and transfers show here' },
-              ]}
+              options={[{ value: 'all', label: 'All', title: 'Both markets and every account event' }, ...MARKET_FILTERS]}
               onChange={(v) => set({ market: v === 'all' ? null : v })}
             />
           </div>
@@ -202,13 +199,34 @@ const BADGE: Record<EventView['tone'], string> = {
 const TONE: Record<Tone, string> = { up: 'text-up', down: 'text-down', muted: 'text-muted' };
 
 /** Desktop: time | event | coin | details on one dense line. Phones: a card with the details two to a line. */
-const GRID = 'desk:grid desk:grid-cols-[9.75rem_10rem_3.25rem_minmax(0,1fr)] desk:gap-x-3';
+const GRID = 'desk:grid desk:grid-cols-[9.75rem_10rem_4.5rem_minmax(0,1fr)] desk:gap-x-3';
+
+/**
+ * The badge of an event a catch-up produced: 'estimated', with what it was estimated from as its
+ * tooltip; a tap (phones have no hover) shows the same text under the row.
+ */
+function EstimatedBadge({ text, open, onToggle }: { text: string; open: boolean; onToggle(): void }) {
+  return (
+    <button
+      type="button"
+      title={text}
+      aria-expanded={open}
+      aria-label={`Estimated: ${text}`}
+      onClick={onToggle}
+      className="inline-flex rounded-ctl border border-dashed border-accent px-1.5 text-2xs leading-[1.125rem] font-semibold whitespace-nowrap text-fg hover:bg-accent-soft"
+    >
+      estimated
+    </button>
+  );
+}
 
 function EventLine({ row }: { row: HistoryRow }) {
   const v = describeEvent(row);
+  const [why, setWhy] = useState(false);
+  const estimated = v.estimated ? `${v.estimated.why} ${v.estimated.gap}.` : null;
   return (
     <li className={`flex flex-col gap-2 border-b border-line/60 px-3 py-2.5 text-xs desk:py-1.5 ${GRID}`}>
-      <div className="flex items-center gap-2 desk:contents">
+      <div className="flex flex-wrap items-center gap-2 desk:contents">
         <time
           dateTime={Number.isFinite(row.time) ? new Date(row.time).toISOString() : undefined}
           title={fmtDateTime(row.time)}
@@ -216,13 +234,17 @@ function EventLine({ row }: { row: HistoryRow }) {
         >
           <span>{fmtDate(row.time)}</span> <span className="text-fg">{fmtClock(row.time)}</span>
         </time>
-        <span className="desk:pt-px">
+        <span className="flex flex-wrap items-center gap-1 desk:items-start desk:pt-px">
           <span className={`inline-flex rounded-ctl border px-1.5 text-2xs leading-[1.125rem] font-semibold whitespace-nowrap ${BADGE[v.tone]}`}>
             {v.label}
           </span>
+          {estimated !== null && <EstimatedBadge text={estimated} open={why} onToggle={() => setWhy(!why)} />}
         </span>
         {v.coin !== null ? (
-          <span className="font-semibold desk:pt-px">{v.coin}</span>
+          <span className="whitespace-nowrap desk:pt-px">
+            <span className="font-semibold">{v.coin}</span>
+            {v.market !== null && <span className="ml-1 text-2xs text-muted">{v.market}</span>}
+          </span>
         ) : (
           <span className="hidden text-faint desk:inline desk:pt-px">-</span>
         )}
@@ -242,6 +264,24 @@ function EventLine({ row }: { row: HistoryRow }) {
           <p className="mt-1.5 desk:mt-0.5">
             <span className="mr-1.5 text-2xs text-faint">{v.note.label}</span>
             <span className="[overflow-wrap:anywhere]">{v.note.text}</span>
+          </p>
+        )}
+        {v.list && (
+          <div className="mt-1.5 desk:mt-0.5">
+            <span className="text-2xs text-faint">{v.list.label}</span>
+            <ul className="mt-0.5 flex list-disc flex-col gap-0.5 pl-4">
+              {v.list.items.map((item, i) => (
+                <li key={i} className="[overflow-wrap:anywhere]">
+                  {item}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {why && estimated !== null && (
+          <p className="mt-1.5 rounded-ctl border border-dashed border-accent/70 px-2 py-1 desk:mt-0.5">
+            <span className="mr-1.5 text-2xs text-faint">Estimated</span>
+            <span className="[overflow-wrap:anywhere]">{estimated}</span>
           </p>
         )}
       </div>
@@ -341,7 +381,7 @@ export function HistoryPage({ params }: { params: URLSearchParams }) {
     ) : (
       <Message>
         <p className="text-sm text-muted">Nothing recorded yet</p>
-        Deposits, orders, fills and feed gaps will be listed here as they happen.
+        Deposits, orders, fills, positions, funding, liquidations and feed gaps will be listed here as they happen.
       </Message>
     );
   } else {
