@@ -335,6 +335,22 @@ function savedPerpKeys(db: Db): Map<number, string> {
 }
 
 /**
+ * Before the first save of a season's perp state on this database handle: it must have been
+ * loaded (loadPerpState) when the database already holds positions or funding state, since a
+ * commit writes the perp state in full and an empty one would delete every saved position.
+ */
+function refuseUnloadedPerpState(db: Db, seasonId: number): void {
+  const held = db
+    .prepare('SELECT 1 FROM positions WHERE season_id = ? UNION ALL SELECT 1 FROM perp_state WHERE season_id = ? LIMIT 1')
+    .get(seasonId, seasonId);
+  if (held !== undefined) {
+    throw new Error(
+      `persist: the perp state of season ${seasonId} was never loaded (loadPerpState), but the database holds positions or funding state; refusing to overwrite them`,
+    );
+  }
+}
+
+/**
  * Write everything one engine call changed, in a single transaction. Call it after every engine
  * call, even with no events: pending -> open has none, but the order's row must still follow.
  * Orders written, spot and perp: those changed since the last call (takeDirty) and each one an
@@ -344,6 +360,8 @@ function savedPerpKeys(db: Db): Map<number, string> {
  * writes the balances, basis, account, trade cursors, every open position (deleting the rows of
  * positions no longer open), every leverage setting and the funding state. A call with none of
  * these writes nothing but the trade cursors, and that only when `cursor` is set.
+ * Throws, writing nothing, when the season's perp state was never loaded on this database handle
+ * while the database holds positions or funding state (see refuseUnloadedPerpState).
  * Applied funding times more than 30 days before `now` (else the latest event's time) are dropped
  * first. Afterwards finished orders leave memory (evictTerminal). Returns whether the cursors were written.
  */
@@ -360,7 +378,9 @@ export function persist(
   const now = extra.now ?? events.reduce<number | null>((t, e) => (t === null || e.time > t ? e.time : t), null);
   if (now !== null) pruneAppliedFunding(perp.funding, now);
   const perpKey = perpStateKey(perp);
-  const perpChanged = perpKey !== (savedPerpKeys(db).get(seasonId) ?? EMPTY_PERP_KEY);
+  const savedKey = savedPerpKeys(db).get(seasonId);
+  if (savedKey === undefined) refuseUnloadedPerpState(db, seasonId);
+  const perpChanged = perpKey !== (savedKey ?? EMPTY_PERP_KEY);
   const dirty = takeDirty(state);
   const perpDirty = takePerpDirty(perp);
   const changed = events.length > 0 || dirty.length > 0 || perpDirty.length > 0 || gaps.length > 0 || perpChanged;

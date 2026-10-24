@@ -1162,6 +1162,72 @@ describe('perps: persist and loadPerpState', () => {
   });
 });
 
+describe('perps: a perp state that was never loaded', () => {
+  /** The scenario saved in a database file, reopened as a restart would: a new handle, nothing loaded. */
+  async function reopened() {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'sim-db-'));
+    const file = join(dir, 'sim.sqlite');
+    const handles: Db[] = [];
+    const first = openDb(file);
+    handles.push(first);
+    const seasonId = currentSeasonId(first);
+    const ledger = loadLedger(first, seasonId, ASSETS);
+    const sim = new SimEngine(ledger, new SpotEngine(loadSpotState(first, seasonId, ledger)), new PerpEngine(loadPerpState(first, seasonId, ledger)));
+    const ctx = perpCtx(new FakePerpMarket(), { now: NOW });
+    sim.deposit('leverage', D('1000'), ctx);
+    const open = sim.perp.submit(perpMarketOrder('buy', '0.1'), ctx);
+    persist(first, seasonId, sim, [...open, ...perpArrive(sim.perp, perpPlaced(open), ctx)]);
+    first.close();
+    const db = openDb(file);
+    handles.push(db);
+    const cleanup = () => {
+      for (const h of handles) if (h.open) h.close();
+      rmSync(dir, { recursive: true, force: true });
+    };
+    return { db, seasonId, cleanup };
+  }
+
+  it('persist refuses to write over saved positions with a perp state that was not loaded from the database', async () => {
+    const { db, seasonId, cleanup } = await reopened();
+    try {
+      const ledger = loadLedger(db, seasonId, ASSETS);
+      const blind = new SimEngine(ledger, new SpotEngine(loadSpotState(db, seasonId, ledger)), new PerpEngine(emptyPerpState(ledger)));
+      expect(() => persist(db, seasonId, blind, [])).toThrow(
+        `persist: the perp state of season ${seasonId} was never loaded (loadPerpState), but the database holds positions or funding state; refusing to overwrite them`,
+      );
+      expect(db.prepare('SELECT count(*) c FROM positions').get()).toEqual({ c: 1 });
+
+      // Loaded first, the same call goes through and keeps the position.
+      const loaded = reloadSim(db, seasonId);
+      expect(() => persist(db, seasonId, loaded, [], { cursor: true })).not.toThrow();
+      expect(db.prepare('SELECT count(*) c FROM positions').get()).toEqual({ c: 1 });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('a funding state row alone is enough to refuse', async () => {
+    const { db, seasonId, cleanup } = await reopened();
+    try {
+      db.prepare('DELETE FROM positions').run();
+      const ledger = loadLedger(db, seasonId, ASSETS);
+      const blind = new SimEngine(ledger, new SpotEngine(emptySpotState(ledger)), new PerpEngine(emptyPerpState(ledger)));
+      expect(() => persist(db, seasonId, blind, [])).toThrow(/was never loaded/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('a database with no perp rows needs no load: a new season persists from an empty perp state', () => {
+    const { ctx, sim, db, seasonId } = perpSetup();
+    sim.deposit('leverage', D('100'), ctx);
+    expect(() => persist(db, seasonId, sim, [])).not.toThrow();
+  });
+});
+
 describe('checkInvariants: perps', () => {
   it('leverage locked USDT must equal the sum of live perp order locks', () => {
     const { db, seasonId } = perpScenario();
