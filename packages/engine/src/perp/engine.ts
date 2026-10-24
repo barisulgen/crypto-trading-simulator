@@ -12,7 +12,7 @@ import {
 } from '../spot/engine.ts';
 import type { ActionResult, AggTrade } from '../types.ts';
 import { applyFunding, closeFundingWindow, openFundingWindow } from './funding.ts';
-import { arriveLimit, matchTrade, previewLimit, submitLimit } from './limit.ts';
+import { arriveLimit, fillAt, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import { checkMark, isolatedModel } from './liquidation.ts';
 import type { LiquidationModel } from './liquidation.ts';
 import { addMargin, removeMargin, setLeverage, setMarginMode } from './margin.ts';
@@ -25,6 +25,7 @@ import {
   arriveStop,
   arriveTriggered,
   canArmNow,
+  closeAtEstimate,
   dueTriggered,
   executeDue,
   setPositionTpSl,
@@ -91,6 +92,26 @@ export class PerpEngine {
   /** What follows every action that can fill: the attached legs of orders filled for the first time are placed. */
   private finish(events: PerpEvent[], ctx: PerpCtx): PerpEvent[] {
     return activateAttached(this.s, events, ctx);
+  }
+
+  /**
+   * Fill `qty` of a limit or post-only order at `price` with the fee of `liquidity`, without walking
+   * any book: the fill path catch-up shares with the live maker fills, for trades replayed from
+   * history. The attached legs of an opening order it fills for the first time are placed.
+   */
+  fillAt(order: PerpOrder, qty: Decimal, price: Decimal, liquidity: 'maker' | 'taker', ctx: PerpCtx): PerpEvent[] {
+    return this.finish(fillAt(this.s, order, qty, price, liquidity, ctx), ctx);
+  }
+
+  /**
+   * A triggered close-position stop closes the whole position at `worst`, a price estimated from
+   * history (catch-up) with no book to walk, with the taker fee. It never loses more than the
+   * position's isolated margin: the price is capped at the bankruptcy price and the fee at what the
+   * margin leaves, and the rest of the wallet is never touched. With no position left it is
+   * cancelled (position_closed).
+   */
+  closeAt(order: PerpOrder, worst: Decimal, ctx: PerpCtx): PerpEvent[] {
+    return this.finish(closeAtEstimate(this.s, order, worst, ctx), ctx);
   }
 
   /** A submitted order reaches the exchange, without its finish; a no-op unless pending and due. */

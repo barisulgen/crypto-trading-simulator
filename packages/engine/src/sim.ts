@@ -1,6 +1,7 @@
 import type { Decimal } from './decimal.ts';
 import { deposit, transfer } from './account/ledger.ts';
-import { spotCatchUpNeeds } from './catchup/plan.ts';
+import { perpCatchUpNeeds, spotCatchUpNeeds } from './catchup/plan.ts';
+import { applyPerpCatchUp } from './catchup/perp.ts';
 import { applySpotCatchUp } from './catchup/spot.ts';
 import type { Candle1m, CatchUpEvent, CatchUpInput, CatchUpNeeds } from './catchup/types.ts';
 import type { Ledger } from './account/ledger.ts';
@@ -181,7 +182,8 @@ export class SimEngine {
  * What a catch-up run over the gap [from, to) of `market`/`symbol` needs beyond its last-price
  * candles: the minutes whose trades must be fetched (a candle went strictly through a resting limit
  * or post-only order that had reached the exchange by that minute's end), and whether mark candles
- * and funding history are needed. Reads only.
+ * and funding history are needed (perps: while a position is open or an opening order rests, and
+ * funding also while a funding window waits to settle). Reads only.
  */
 export function catchUpNeeds(
   sim: SimEngine,
@@ -191,17 +193,21 @@ export function catchUpNeeds(
   to: number,
   candles: Candle1m[],
 ): CatchUpNeeds {
-  if (market === 'perp') throw new Error('Catch-up for the perp market is not available yet');
-  return spotCatchUpNeeds(sim.spot.state, symbol, from, to, candles);
+  return market === 'spot'
+    ? spotCatchUpNeeds(sim.spot.state, symbol, from, to, candles)
+    : perpCatchUpNeeds(sim.perp.state, symbol, from, to, candles);
 }
 
 /**
  * Apply what would have happened during a gap in live data, minute by minute, from candles and
- * replayed trades (no historical book exists, so nothing reads the live one). Every event is dated
- * at the moment it represents and carries `catchUp`; a `catch_up` summary follows when an order or
- * a position existed during the gap. No events at all when nothing did.
+ * replayed trades (no historical book exists, so nothing reads the live one); for perps also from
+ * mark candles and settled funding. Perp limit orders are cancelled at the start of the gap when
+ * its trades are 'unavailable'. Every event is dated at the moment it represents and carries
+ * `catchUp`; a `catch_up` summary follows when an order or a position existed during the gap. No
+ * events at all when nothing did.
  */
 export function applyCatchUp(sim: SimEngine, input: CatchUpInput, ctx: SimCtx): SimEvent[] {
-  if (input.market === 'perp') throw new Error('Catch-up for the perp market is not available yet');
-  return applySpotCatchUp(sim.spot, input, ctxFor(ctx, 'spot'));
+  return input.market === 'spot'
+    ? applySpotCatchUp(sim.spot, input, ctxFor(ctx, 'spot'))
+    : applyPerpCatchUp(sim.perp, input, ctxFor(ctx, 'perp'));
 }

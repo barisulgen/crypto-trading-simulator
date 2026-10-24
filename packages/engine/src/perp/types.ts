@@ -1,3 +1,4 @@
+import type { CatchUpTag } from '../catchup/types.ts';
 import type { Decimal } from '../decimal.ts';
 import type { BookSnapshot, CancelReason, FeeSchedule, Fill, OrderStatus, PriceLevel, Side } from '../types.ts';
 
@@ -156,6 +157,13 @@ export interface PerpFill extends Omit<Fill, 'roundTripId'> {
   marginIn: Decimal | null;
   /** A reducing fill's loss that neither the position's margin nor free leverage USDT could cover; null when none. */
   uncovered: Decimal | null;
+  /**
+   * Set on a close estimated from history that was held to the position's margin: its price capped
+   * at the bankruptcy price, or its fee cut to what the margin left. Absent otherwise.
+   */
+  bankruptcyCapped?: true;
+  /** With bankruptcyCapped: the price the close would have filled at without the cap. */
+  uncappedPrice?: Decimal;
 }
 
 /** Estimate shown before submitting. Amounts are null when they cannot be estimated. */
@@ -201,7 +209,11 @@ export interface MarginWarning {
   liquidationPrice: Decimal | null;
 }
 
-export type PerpEvent =
+/**
+ * Events a catch-up run produced carry `catchUp`: the gap and what the event was estimated from;
+ * their time is the moment they represent.
+ */
+export type PerpEvent = (
   | { type: 'leverage_set'; market: 'perp'; time: number; symbol: string; leverage: number }
   | {
       type: 'margin_changed';
@@ -290,7 +302,12 @@ export type PerpEvent =
       funding: Decimal;
       holdMs: number;
       reason: PositionCloseReason;
-    };
+      /** Set when the closing fill was held to the position's margin (see PerpFill). */
+      bankruptcyCapped?: true;
+      /** With bankruptcyCapped: the price the close would have filled at without the cap. */
+      uncappedPrice?: Decimal;
+    }
+) & { catchUp?: CatchUpTag };
 
 /** The outcome of an owner action on the perp account: its events, or why it was refused. */
 export type PerpActionResult = { ok: true; events: PerpEvent[] } | { ok: false; reason: string };

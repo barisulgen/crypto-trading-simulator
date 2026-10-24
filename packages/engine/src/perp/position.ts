@@ -1,7 +1,7 @@
 import { D, Decimal, roundDown8 } from '../decimal.ts';
 import type { OrderStatus, PriceLevel } from '../types.ts';
 import { trackFundingWindow } from './funding.ts';
-import { perpFee } from './math.ts';
+import { bankruptcyPrice, perpFee } from './math.ts';
 import { cancelOrder, liveOrders, remainingQty } from './orders.ts';
 import { creditUsdt, debitUsdt, freeUsdt, putOrder, releaseUsdt, spendUsdt } from './state.ts';
 import type { PerpState } from './state.ts';
@@ -223,6 +223,74 @@ export function applyReducingFill(
   return { order: after, events: [fillEvent(fill, after, t, ctx)], closed };
 }
 
+/** How a close estimated from history was held to the position's margin; null when it was not. */
+export type MarginCap = { uncappedPrice: Decimal } | null;
+
+/**
+ * Close the whole position at `worst`, a price estimated from history, with the taker fee, never
+ * losing more than the position's isolated margin and never touching the rest of the wallet. The
+ * price is capped at the bankruptcy price (rounded to 8 decimals toward the owner, so it is no
+ * worse), the loss at the margin, and the fee at what the margin leaves after the loss; the wallet
+ * receives what is left after that. `cap` records the uncapped price when either cap applied.
+ * The caller has checked that the order closes the symbol's position.
+ */
+export function applyMarginCappedClose(
+  s: PerpState,
+  order: PerpOrder,
+  worst: Decimal,
+  ctx: PerpCtx,
+): { order: PerpOrder; events: PerpEvent[]; closed: Position; price: Decimal; cap: MarginCap } {
+  const held = s.positions[order.symbol]!;
+  const long = held.side === 'long';
+  const bankrupt = bankruptcyPrice(held.side, held.qty, held.entryPrice, held.margin);
+  const beyond = long ? worst.lt(bankrupt) : worst.gt(bankrupt);
+  const price = beyond ? bankrupt.toDecimalPlaces(8, long ? Decimal.ROUND_UP : Decimal.ROUND_DOWN) : worst;
+  const qty = held.qty;
+  const quote = qty.mul(price);
+  const rate = ctx.fees.taker;
+  const pnl = Decimal.max(pnlOf(held, qty, quote), held.margin.neg());
+  const left = held.margin.plus(pnl);
+  const fullFee = perpFee(quote, rate);
+  const fee = Decimal.min(fullFee, left);
+  const cap: MarginCap = beyond || fee.lt(fullFee) ? { uncappedPrice: worst } : null;
+  creditUsdt(s, left.minus(fee));
+
+  const closed: Position = {
+    ...held,
+    qty: D(0),
+    margin: D(0),
+    realizedPnl: held.realizedPnl.plus(pnl),
+    fees: held.fees.plus(fee),
+  };
+  delete s.positions[order.symbol];
+  trackFundingWindow(s, order.symbol);
+
+  const t: PerpFillTerms = {
+    qty,
+    price,
+    quote,
+    liquidity: 'taker',
+    rate,
+    bestAtArrival: null,
+    slippageUsd: D(0),
+    driftUsd: D(0),
+  };
+  const made = makeFill(order, t, fee, { positionId: held.id, marginIn: null, uncovered: null, realizedPnl: pnl }, ctx);
+  const fill: PerpFill = cap
+    ? { ...made, feeUsd: Decimal.min(made.feeUsd, fee), bankruptcyCapped: true, uncappedPrice: cap.uncappedPrice }
+    : made;
+  const after: PerpOrder = {
+    ...order,
+    status: 'filled',
+    filledQty: order.filledQty.plus(qty),
+    filledQuote: order.filledQuote.plus(quote),
+    fee: order.fee.plus(fee),
+    realizedPnl: order.realizedPnl.plus(pnl),
+  };
+  putOrder(s, after);
+  return { order: after, events: [fillEvent(fill, after, t, ctx)], closed, price, cap };
+}
+
 /**
  * Statuses an order is cancelled from when its position closes. A triggered stop is already
  * executing: it is cancelled (position_closed) when it arrives and finds no position.
@@ -231,7 +299,8 @@ const CANCELLED_ON_CLOSE: ReadonlySet<OrderStatus> = new Set(['pending', 'open',
 
 /**
  * The position has closed: record it, then cancel every reduce-only or close-position order left on
- * the symbol (reason position_closed), since nothing is left for them to reduce.
+ * the symbol (reason position_closed), since nothing is left for them to reduce. `cap` marks a
+ * closing fill that was held to the position's margin.
  */
 export function positionClosed(
   s: PerpState,
@@ -239,21 +308,21 @@ export function positionClosed(
   exitPrice: Decimal,
   reason: PositionCloseReason,
   ctx: PerpCtx,
+  cap: MarginCap = null,
 ): PerpEvent[] {
-  const events: PerpEvent[] = [
-    {
-      type: 'position_closed',
-      market: 'perp',
-      time: ctx.now,
-      position: closed,
-      exitPrice,
-      realizedPnl: closed.realizedPnl,
-      fees: closed.fees,
-      funding: closed.funding,
-      holdMs: ctx.now - closed.openedAt,
-      reason,
-    },
-  ];
+  const record: PerpEvent = {
+    type: 'position_closed',
+    market: 'perp',
+    time: ctx.now,
+    position: closed,
+    exitPrice,
+    realizedPnl: closed.realizedPnl,
+    fees: closed.fees,
+    funding: closed.funding,
+    holdMs: ctx.now - closed.openedAt,
+    reason,
+  };
+  const events: PerpEvent[] = [cap ? { ...record, bankruptcyCapped: true, uncappedPrice: cap.uncappedPrice } : record];
   for (const o of liveOrders(s, closed.symbol)) {
     if (!(o.reduceOnly || o.closePosition) || !CANCELLED_ON_CLOSE.has(o.status)) continue;
     events.push(...cancelOrder(s, o, 'position_closed', remainingQty(o), ctx));

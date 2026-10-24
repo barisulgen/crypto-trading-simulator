@@ -77,6 +77,14 @@ export function liquidationPrice(
 }
 
 /**
+ * The price at which closing the whole position loses exactly its isolated margin: E − M ÷ Q for a
+ * long, E + M ÷ Q for a short. Unrounded.
+ */
+export function bankruptcyPrice(side: PositionSide, qty: Decimal, entry: Decimal, margin: Decimal): Decimal {
+  return entry.minus(margin.div(qty).mul(dir(side)));
+}
+
+/**
  * The price an order's margin is reserved at. A limit buy uses its price; every other order reserves
  * margin at no less than the mark (sells) and the last price plus 0.15 %.
  */

@@ -1,5 +1,4 @@
-import { D } from '../decimal.ts';
-import type { Decimal } from '../decimal.ts';
+import { D, Decimal } from '../decimal.ts';
 import { trackFundingWindow } from './funding.ts';
 import { bracketsOrNull } from './market.ts';
 import { liquidationPrice, liquidationSplit, maintenanceMargin, marginBalance, marginRatio } from './math.ts';
@@ -129,6 +128,24 @@ export function liquidate(
   };
   events.push(...positionClosed(s, closed, price, 'liquidated', ctx));
   return events;
+}
+
+/**
+ * Liquidate the symbol's position at `liquidationPrice`, its own, for when the mark is known only
+ * to have reached that price within a span (a 1-minute mark candle), not where it was at any
+ * moment: the price is used as the mark, rounded to 8 decimals against the owner (down for a long,
+ * up for a short). A no-op without a position.
+ */
+export function liquidateAtLiquidationPrice(
+  s: PerpState,
+  symbol: string,
+  liquidationPrice: Decimal,
+  ctx: PerpCtx,
+): PerpEvent[] {
+  const held = s.positions[symbol];
+  if (!held) return [];
+  const mark = liquidationPrice.toDecimalPlaces(8, held.side === 'long' ? Decimal.ROUND_DOWN : Decimal.ROUND_UP);
+  return liquidate(s, symbol, mark, rulesOrNull(symbol, ctx)?.liquidationFee ?? null, ctx);
 }
 
 /**

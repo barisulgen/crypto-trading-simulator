@@ -383,6 +383,15 @@ describe('spot catch-up: limit orders from replayed trades', () => {
     expect(s(t.stored(id).filledQty)).toBe('0.3');
   });
 
+  it('a trade repeated in the fetched list (a page boundary) is used once', () => {
+    const t = setup({ usdt: '200000' });
+    const id = place(t, { side: 'buy', type: 'limit', qty: '2.0', price: '60000' });
+    const repeated = trade(101, '59950', '0.3', true, T(12, 5, 10));
+    const events = run(t, input(candles([candle(T(12, 5), '59900', '60050')]), [repeated, { ...repeated }]));
+    expect(ofType(events, 'fill').map((e) => s(e.fill.qty))).toEqual(['0.3']);
+    expect(s(t.stored(id).filledQty)).toBe('0.3');
+  });
+
   it('two runs over overlapping gaps use a shared trade once, and the live feed then ignores it', () => {
     const t = setup({ usdt: '200000' });
     const id = place(t, { side: 'buy', type: 'limit', qty: '2.0', price: '60000' });

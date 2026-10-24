@@ -9,7 +9,19 @@ import type { SpotState } from '../spot/state.ts';
 import { expireTriggered, trigger, waitingToArm } from '../spot/stops.ts';
 import { isStopType, isTriggered } from '../spot/triggers.ts';
 import type { AggTrade, EngineCtx, EngineEvent, MarketView, SpotOrder, SpotRules } from '../types.ts';
-import { floorMinute, inGap, MINUTE_MS, restingLimit, usableTrades, walkedCandles } from './plan.ts';
+import {
+  floorMinute,
+  hhmm,
+  hhmmss,
+  inGap,
+  lower,
+  MINUTE_MS,
+  reachingPrice,
+  restingLimit,
+  usableTrades,
+  walkedCandles,
+  worstPrice,
+} from './plan.ts';
 import type { Candle1m, CatchUpBasis, CatchUpEvent, CatchUpInput } from './types.ts';
 
 /**
@@ -37,24 +49,6 @@ function historical(live: MarketView, last: Decimal | null): MarketView {
     rules: (symbol) => live.rules(symbol),
   };
 }
-
-/** The price a stop fills at inside a minute: the low for a sell, the high for a buy. */
-function worstPrice(side: SpotOrder['side'], c: Candle1m): Decimal {
-  return side === 'sell' ? c.low : c.high;
-}
-
-/**
- * The candle extreme that tells whether a stop triggered in the minute: the high for those that
- * trigger on a rise (buy stop-loss, sell take-profit), the low for the others.
- */
-function reachingPrice(o: SpotOrder, c: Candle1m): Decimal {
-  const upward = (o.type === 'stop_loss') === (o.side === 'buy');
-  return upward ? c.high : c.low;
-}
-
-/** Times in summary lines, in UTC and saying so: "12:04 UTC", "12:04:50 UTC". */
-const hhmm = (t: number) => `${new Date(t).toISOString().slice(11, 16)} UTC`;
-const hhmmss = (t: number) => `${new Date(t).toISOString().slice(11, 19)} UTC`;
 
 class SpotCatchUp {
   private readonly s: SpotState;
@@ -345,8 +339,6 @@ class SpotCatchUp {
     }
   }
 }
-
-const lower = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
 /** How an order reads at the start of a summary line: "Stop-loss", "Buy take-profit", "Limit buy". */
 function label(o: SpotOrder): string {

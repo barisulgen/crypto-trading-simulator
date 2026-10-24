@@ -21,7 +21,7 @@ import {
   slotsInUse,
 } from './orders.ts';
 import type { PerpAttach } from './orders.ts';
-import { applyReducingFill, positionClosed } from './position.ts';
+import { applyMarginCappedClose, applyReducingFill, positionClosed } from './position.ts';
 import type { PerpFillTerms } from './position.ts';
 import { validatePerpOrder } from './rules.ts';
 import { leverageFor, putOrder } from './state.ts';
@@ -347,7 +347,7 @@ export function triggerStops(s: PerpState, symbol: string, trade: AggTrade, ctx:
  * recorded so the fill's drift measures trigger → execution. Its untriggered partner is cancelled
  * now (oco): a triggered order is certain to execute.
  */
-function trigger(s: PerpState, order: PerpOrder, last: Decimal, ctx: PerpCtx): PerpEvent[] {
+export function trigger(s: PerpState, order: PerpOrder, last: Decimal, ctx: PerpCtx): PerpEvent[] {
   const triggered: PerpOrder = {
     ...order,
     status: 'triggered',
@@ -447,4 +447,15 @@ function executeTriggered(s: PerpState, order: PerpOrder, ctx: PerpCtx): PerpEve
     events.push(...positionClosed(s, filled.closed, walk.avgPrice!, order.type as StopType, ctx));
   }
   return events;
+}
+
+/**
+ * A triggered close-position stop executes at `worst`, a price estimated from history with no
+ * book to walk: the whole position closes with the taker fee, never losing more than its margin
+ * (applyMarginCappedClose). With no position left it is cancelled (position_closed).
+ */
+export function closeAtEstimate(s: PerpState, order: PerpOrder, worst: Decimal, ctx: PerpCtx): PerpEvent[] {
+  if (!opposite(s, order.symbol, order.side)) return cancelOrder(s, order, 'position_closed', remainingQty(order), ctx);
+  const done = applyMarginCappedClose(s, order, worst, ctx);
+  return [...done.events, ...positionClosed(s, done.closed, done.price, order.type as StopType, ctx, done.cap)];
 }

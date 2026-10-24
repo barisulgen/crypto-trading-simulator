@@ -279,6 +279,22 @@ export function matchTrade(s: PerpState, symbol: string, trade: AggTrade, ctx: P
 }
 
 function makerFill(s: PerpState, order: PerpOrder, allocated: Decimal, ctx: PerpCtx): PerpEvent[] {
+  return fillAt(s, order, allocated, order.price!, 'maker', ctx);
+}
+
+/**
+ * Fill `allocated` of a limit or post-only order at `price` with the fee of `liquidity`, without
+ * walking any book: the path live maker fills and catch-up share. A reduce-only order fills at
+ * most the position.
+ */
+export function fillAt(
+  s: PerpState,
+  order: PerpOrder,
+  allocated: Decimal,
+  price: Decimal,
+  liquidity: 'maker' | 'taker',
+  ctx: PerpCtx,
+): PerpEvent[] {
   let qty = allocated;
   let position: Position | null = null;
   if (order.reduceOnly) {
@@ -289,13 +305,12 @@ function makerFill(s: PerpState, order: PerpOrder, allocated: Decimal, ctx: Perp
     // offered to later orders: sharing it again could only fill the owner more (conservative).
     qty = Decimal.min(allocated, position.qty);
   }
-  const price = order.price!;
   const terms: PerpFillTerms = {
     qty,
     price,
     quote: qty.mul(price),
-    liquidity: 'maker',
-    rate: ctx.fees.maker,
+    liquidity,
+    rate: liquidity === 'maker' ? ctx.fees.maker : ctx.fees.taker,
     bestAtArrival: ctx.market.best(order.symbol, order.side),
     slippageUsd: D(0),
     driftUsd: D(0),
