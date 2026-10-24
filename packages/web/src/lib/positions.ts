@@ -250,8 +250,8 @@ const CATCHING_UP_BLOCK = 'Catching up after a data gap: closing, margin and sto
 /**
  * Why each action on a position is off, or null when it is on. While the symbol catches up the
  * server refuses them all (409). Without live data (the mark stale or missing, or the perp feed
- * stale) a market close and new stops would be rejected; adding margin needs no live data, and the
- * margin dialog itself says when a removal cannot be made.
+ * stale) a market close and new stops would be rejected, and a margin change is refused (409): a
+ * change made inside a gap would decide what its catch-up finds.
  */
 export function actionBlocks(
   p: Pick<WirePosition, 'catchingUp' | 'markFresh' | 'markPrice'>,
@@ -264,7 +264,7 @@ export function actionBlocks(
       : p.markPrice === null || !p.markFresh
         ? 'No live mark price: the server would reject it now'
         : null;
-  return { close: stale, margin: null, tpsl: stale };
+  return { close: stale, margin: stale, tpsl: stale };
 }
 
 // ---- chart ----

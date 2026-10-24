@@ -330,7 +330,7 @@ export class PerpEngine {
     return setMarginMode(mode);
   }
 
-  /** Move free leverage USDT into the symbol's position. Needs no live data. */
+  /** Move free leverage USDT into the symbol's position; refused while its data is not live. */
   addMargin(symbol: string, amount: string, ctx: PerpCtx): PerpActionResult {
     return addMargin(this.s, symbol, amount, ctx);
   }

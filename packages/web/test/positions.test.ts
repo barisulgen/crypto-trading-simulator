@@ -283,17 +283,17 @@ describe('chart lines of a position', () => {
 });
 
 describe('position actions', () => {
-  it('while catching up all are off (the server answers 409); on a stale mark or feed only adding margin stays', () => {
+  it('while catching up all are off (the server answers 409); on a stale mark or feed all are off too, margin included', () => {
     const catching = actionBlocks(wire({ catchingUp: true }), undefined);
     expect([catching.close, catching.margin, catching.tpsl].every((r) => r !== null && /^Catching up/.test(r))).toBe(true);
-    expect(actionBlocks(wire({ markFresh: false }), undefined)).toEqual({
-      close: 'No live mark price: the server would reject it now',
-      margin: null,
-      tpsl: 'No live mark price: the server would reject it now',
+    const noMark = 'No live mark price: the server would reject it now';
+    expect(actionBlocks(wire({ markFresh: false }), undefined)).toEqual({ close: noMark, margin: noMark, tpsl: noMark });
+    const interrupted = 'Live data interrupted (Binance depth stream interrupted): the server would reject it now';
+    expect(actionBlocks(wire(), { fresh: false, reason: 'Binance depth stream interrupted' })).toEqual({
+      close: interrupted,
+      margin: interrupted,
+      tpsl: interrupted,
     });
-    expect(actionBlocks(wire(), { fresh: false, reason: 'Binance depth stream interrupted' }).close).toBe(
-      'Live data interrupted (Binance depth stream interrupted): the server would reject it now',
-    );
     expect(actionBlocks(wire(), { fresh: true, reason: null })).toEqual({ close: null, margin: null, tpsl: null });
   });
 
@@ -431,11 +431,12 @@ describe('a position row', () => {
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>(Close|Close part|Margin|SL\/TP)<\/button>/);
   });
 
-  it('on a stale mark the close actions are off (the server would reject them) but adding margin is not', () => {
+  it('on a stale mark the close and margin actions are off, with the reason (the server would refuse them)', () => {
     const html = row(wire({ markFresh: false }));
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Close<\/button>/);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Close part<\/button>/);
-    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Margin<\/button>/);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*title="No live mark price: the server would reject it now"[^>]*>Margin<\/button>/);
+    expect(row(wire())).not.toMatch(/<button[^>]*disabled=""[^>]*>Margin<\/button>/);
   });
 });
 

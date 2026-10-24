@@ -4,7 +4,15 @@ import type { AggTrade, SpotOrderRequest } from '@sim/engine';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
 import { openGap, toJson, touchAlive } from '../src/db/store.ts';
-import { INTEGRITY_REFUSAL, PAUSED_REASON, RefusedError, RESTART_REASON, submittedOrder } from '../src/runner.ts';
+import {
+  INTEGRITY_REFUSAL,
+  LEVERAGE_TRANSFER_STALE_REFUSAL,
+  MARGIN_STALE_REFUSAL,
+  PAUSED_REASON,
+  RefusedError,
+  RESTART_REASON,
+  submittedOrder,
+} from '../src/runner.ts';
 import { FeedGaps } from '../src/feedGaps.ts';
 import { marketKey, splitKey } from '../src/market/marketKey.ts';
 import type { MarketKey } from '../src/market/marketKey.ts';
@@ -43,7 +51,7 @@ const gapsOf = (db: Db) =>
   );
 
 /** runnerHarness, plus the spot gaps saved as open and recorded. */
-function setup(opts: { db?: Db; market?: TestMarket; perpMarket?: TestPerpMarket; clock?: FakeClock } = {}) {
+function setup(opts: { db?: Db; market?: TestMarket; perpMarket?: TestPerpMarket; clock?: FakeClock; symbols?: string[] } = {}) {
   const t = runnerHarness(opts);
   const openGapRows = () => openGapsOf(t.db);
   const gaps = () => gapsOf(t.db);
@@ -1369,6 +1377,53 @@ describe('perps through the runner', () => {
       rejectReason: INTEGRITY_REFUSAL,
     });
     expect(b.runner.positions()[0]!.maxRemovableMargin).toBeNull();
+  });
+
+  it('while the perp data is stale, margin changes are refused with the reason; the preview gives it and nothing is removable', async () => {
+    const t = setup();
+    t.runner.start();
+    withLong(t);
+    t.perp.setFresh('BTCUSDT', false); // no poll has seen it yet: the action itself opens the gap
+    expect(() => t.runner.addMargin('BTCUSDT', '1')).toThrow(MARGIN_STALE_REFUSAL);
+    expect(t.runner.gate(marketKey('perp', 'BTCUSDT'))).toBe('stale');
+    expect(() => t.runner.removeMargin('BTCUSDT', '1')).toThrow(MARGIN_STALE_REFUSAL);
+    expect(t.runner.previewMargin('BTCUSDT', 'add', '1')).toEqual({
+      marginAfter: null,
+      liquidationPriceAfter: null,
+      maxRemovable: null,
+      rejectReason: MARGIN_STALE_REFUSAL,
+    });
+    expect(t.runner.positions()[0]!.maxRemovableMargin).toBeNull();
+    expect(t.sim.perp.state.positions.BTCUSDT!.margin.toString()).toBe('396');
+    expect(t.eventsOf('margin_changed')).toEqual([]);
+
+    // Back, and caught up (the position was open across the gap): margin changes are taken again.
+    t.perp.setFresh('BTCUSDT', true);
+    t.clock.advance(1000);
+    await settle();
+    expect(t.runner.gate(marketKey('perp', 'BTCUSDT'))).toBe('live');
+    expect(t.runner.addMargin('BTCUSDT', '1').ok).toBe(true);
+    expect(t.runner.positions()[0]!.maxRemovableMargin).not.toBeNull();
+  });
+
+  it('transfers out of the leverage wallet are refused while a perp with a position is stale; one with nothing open does not block them', () => {
+    const t = setup({ symbols: ['BTCUSDT', 'ETHUSDT'] });
+    t.market.setFresh('ETHUSDT', true);
+    t.perp.setFresh('ETHUSDT', true);
+    t.runner.start();
+    withLong(t);
+    t.runner.deposit('spot', D('100'));
+    t.perp.setFresh('ETHUSDT', false); // nothing open on the ETH perp
+    t.clock.advance(1000);
+    expect(t.runner.gate(marketKey('perp', 'ETHUSDT'))).toBe('stale');
+    expect(t.runner.transfer('leverage', 'spot', D('1')).ok).toBe(true);
+    t.perp.setFresh('BTCUSDT', false);
+    t.clock.advance(1000);
+    expect(t.runner.gate(marketKey('perp', 'BTCUSDT'))).toBe('stale');
+    expect(() => t.runner.transfer('leverage', 'spot', D('1'))).toThrow(LEVERAGE_TRANSFER_STALE_REFUSAL);
+    // Into the leverage wallet, and deposits, change nothing a catch-up could charge.
+    expect(t.runner.transfer('spot', 'leverage', D('1')).ok).toBe(true);
+    expect(t.runner.deposit('leverage', D('1')).ok).toBe(true);
   });
 
   it('a spot trade never fills a perp order, and a futures trade never fills a spot order', () => {

@@ -15,7 +15,13 @@ import type { Db } from '../src/db/db.ts';
 import { loadLedger, loadPerpState, loadSpotState } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import type { Candle } from '../src/market/candles.ts';
-import { CATCHING_UP_REFUSAL, EngineRunner, LEVERAGE_TRANSFER_REFUSAL } from '../src/runner.ts';
+import {
+  CATCHING_UP_REFUSAL,
+  EngineRunner,
+  LEVERAGE_TRANSFER_REFUSAL,
+  LEVERAGE_TRANSFER_STALE_REFUSAL,
+  MARGIN_STALE_REFUSAL,
+} from '../src/runner.ts';
 import { FakeClock, FakeHealth, FakeHistory, TestMarket, TestPerpMarket } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
@@ -831,6 +837,31 @@ describe('perp REST', () => {
     expect(recentPerp.every((o: any) => o.market === 'perp')).toBe(true);
     const recentSpot = (await t.call('GET', '/api/orders?status=recent')).body.orders;
     expect(recentSpot.map((o: any) => [o.market, o.status])).toEqual([['spot', 'filled']]);
+  });
+
+  it('while the perp data is stale, margin changes and leverage transfers are refused with a 409 and the reason', async () => {
+    const t = await perpApp();
+    await openLong(t);
+    t.perpMarket.setFresh('BTCUSDT', false);
+    t.clock.advance(1000); // the poll opens the gap
+    expect(t.runner.gate('perp:BTCUSDT')).toBe('stale');
+    for (const action of ['add', 'remove']) {
+      expect(await t.call('POST', '/api/perp/margin', { symbol: 'BTCUSDT', action, amount: '1' })).toMatchObject({
+        status: 409,
+        body: { error: MARGIN_STALE_REFUSAL },
+      });
+      expect((await t.call('POST', '/api/perp/margin/preview', { symbol: 'BTCUSDT', action, amount: '1' })).body).toEqual({
+        marginAfter: null,
+        liquidationPriceAfter: null,
+        maxRemovable: null,
+        rejectReason: MARGIN_STALE_REFUSAL,
+      });
+    }
+    expect((await t.call('GET', '/api/positions')).body.positions[0]).toMatchObject({ maxRemovableMargin: null });
+    expect(await t.call('POST', '/api/transfer', { from: 'leverage', to: 'spot', amount: '1' })).toMatchObject({
+      status: 409,
+      body: { error: LEVERAGE_TRANSFER_STALE_REFUSAL },
+    });
   });
 
   it('while a perp catches up after a gap, its actions and leverage transfers are refused with a 409 and the reason', async () => {

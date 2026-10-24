@@ -22,7 +22,14 @@ import { isTestData, queryFills, queryHistory, recentOrders, toJson } from '../d
 import type { Logger } from '../log.ts';
 import { INTERVALS } from '../market/candles.ts';
 import type { Candle } from '../market/candles.ts';
-import { CATCHING_UP_REFUSAL, LEVERAGE_TRANSFER_REFUSAL, RefusedError, submittedOrder } from '../runner.ts';
+import {
+  CATCHING_UP_REFUSAL,
+  LEVERAGE_TRANSFER_REFUSAL,
+  LEVERAGE_TRANSFER_STALE_REFUSAL,
+  MARGIN_STALE_REFUSAL,
+  RefusedError,
+  submittedOrder,
+} from '../runner.ts';
 import type { EngineRunner } from '../runner.ts';
 import { registerAuth } from './auth.ts';
 import type { ClientHub } from './ws.ts';
@@ -63,7 +70,12 @@ const HISTORY_MAX = 200;
 const FILLS_MAX = 500;
 const RECENT_ORDERS = 100;
 /** Refusals that are the account's state, not the server's: the request may be repeated once it changes. */
-const CONFLICTS: ReadonlySet<string> = new Set([CATCHING_UP_REFUSAL, LEVERAGE_TRANSFER_REFUSAL]);
+const CONFLICTS: ReadonlySet<string> = new Set([
+  CATCHING_UP_REFUSAL,
+  LEVERAGE_TRANSFER_REFUSAL,
+  LEVERAGE_TRANSFER_STALE_REFUSAL,
+  MARGIN_STALE_REFUSAL,
+]);
 /** Engine refusals that are the server's temporary state (data not loaded or not live): 503, like missing rules. */
 const UNAVAILABLE: ReadonlySet<string> = new Set([TIERS_NOT_LOADED, MARGIN_MARK_UNAVAILABLE]);
 
@@ -183,7 +195,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
 
   app.setErrorHandler((err: unknown, req, reply) => {
     if (err instanceof InputError) return send(reply, 400, { error: err.message });
-    // A key catching up refuses with its reason (409: retry once it is done); a stopped engine is 503.
+    // A key catching up or stale refuses with its reason (409: retry once it is live); a stopped engine is 503.
     if (err instanceof RefusedError) return send(reply, CONFLICTS.has(err.message) ? 409 : 503, { error: err.message });
     const status = (err as { statusCode?: number }).statusCode;
     const message = err instanceof Error ? err.message : String(err);

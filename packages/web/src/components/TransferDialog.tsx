@@ -3,12 +3,16 @@ import type { FormEvent } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import type { Wallet } from '../lib/api.ts';
 import { fmtUsdFloor } from '../lib/format.ts';
-import { useLive } from '../lib/live.ts';
+import { leverageTransferBlock, useLive } from '../lib/live.ts';
 import { Button, Dialog, ErrorText, TextField } from './ui.tsx';
 
 const NAME: Record<Wallet, string> = { spot: 'Spot wallet', leverage: 'Leverage wallet' };
 
-/** Move free USDT between the spot and leverage wallets. Transfers are logged, not deposits. */
+/**
+ * Move free USDT between the spot and leverage wallets. Transfers are logged, not deposits. Out of
+ * the leverage wallet it is off, with the reason, while the server would refuse it (a perpetual
+ * catching up, or one with a position or orders on stale data).
+ */
 export function TransferDialog({ open, onClose }: { open: boolean; onClose(): void }) {
   const [from, setFrom] = useState<Wallet>('spot');
   const [amount, setAmount] = useState('');
@@ -19,6 +23,8 @@ export function TransferDialog({ open, onClose }: { open: boolean; onClose(): vo
   const pushNotice = useLive((s) => s.pushNotice);
   const to: Wallet = from === 'spot' ? 'leverage' : 'spot';
   const free = account?.balances[from].USDT?.free;
+  const leverageBlock = useLive(leverageTransferBlock);
+  const blocked = from === 'leverage' ? leverageBlock : null;
 
   useEffect(() => {
     if (open) {
@@ -87,8 +93,9 @@ export function TransferDialog({ open, onClose }: { open: boolean; onClose(): vo
             </span>
           }
         />
+        {blocked && <ErrorText>{blocked}</ErrorText>}
         <ErrorText>{error}</ErrorText>
-        <Button type="submit" tone="primary" className="h-10" disabled={busy || amount.trim() === ''}>
+        <Button type="submit" tone="primary" className="h-10" disabled={busy || blocked !== null || amount.trim() === ''}>
           {busy ? 'Transferring...' : 'Transfer'}
         </Button>
       </form>

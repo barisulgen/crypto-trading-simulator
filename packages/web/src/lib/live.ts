@@ -282,6 +282,31 @@ export function catchingUpFeeds(s: Pick<LiveData, 'health' | 'markets' | 'catchi
   return out;
 }
 
+/**
+ * Why a transfer out of the leverage wallet is off now, or null: while any perpetual catches up, or
+ * while one with a position or open orders has stale data (its feed interrupted or its mark stale),
+ * the server refuses it (409), since that catch-up may still charge funding or margin to the wallet.
+ */
+export function leverageTransferBlock(
+  s: Pick<LiveData, 'health' | 'markets' | 'catchingUp' | 'positions' | 'perpOrders'>,
+): string | null {
+  const perps = new Set([
+    ...Object.keys(s.markets).filter((k) => k.startsWith('perp:')).map((k) => k.slice(5)),
+    ...s.catchingUp.filter((k) => k.startsWith('perp:')).map((k) => k.slice(5)),
+  ]);
+  if ([...perps].some((symbol) => feedStatus(s, 'perp', symbol).state === 'catching_up')) {
+    return 'Catching up after a data gap: transfers from the leverage wallet resume when it is done';
+  }
+  const open = [...(s.positions ?? []).map((p) => p.symbol), ...s.perpOrders.map((o) => o.symbol)];
+  for (const symbol of new Set(open)) {
+    const markStale = (s.positions ?? []).some((p) => p.symbol === symbol && !p.markFresh);
+    if (feedStatus(s, 'perp', symbol).state === 'interrupted' || markStale) {
+      return `Live data interrupted on ${symbol.replace(/USDT$/, '')} perp: transfers from the leverage wallet resume once it is back and caught up`;
+    }
+  }
+  return null;
+}
+
 /** Whether a book, trades or kline message is for the market and coin shown (no market means spot). */
 function isSelected(s: LiveData, msg: { market?: Market; symbol: string }): boolean {
   return msg.symbol === s.selected.symbol && (msg.market ?? 'spot') === s.selected.market;

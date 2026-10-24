@@ -85,6 +85,9 @@ export type { Gate, Notice };
 export const INTEGRITY_REFUSAL = 'Account state failed integrity check; see server log';
 export const PAUSED_REASON = 'Server paused (sleep or freeze)';
 export const LEVERAGE_TRANSFER_REFUSAL = 'Catching up after a data gap; transfers from the leverage wallet resume when it is done';
+export const LEVERAGE_TRANSFER_STALE_REFUSAL =
+  'Live data interrupted on a perpetual with a position or open orders; transfers from the leverage wallet resume once it is back and caught up';
+export const MARGIN_STALE_REFUSAL = 'Live data interrupted; margin changes resume once it is back and caught up';
 const STOPPED_REFUSAL = 'Server stopped after an internal error; see server log';
 
 const HEALTH_POLL_MS = 1000;
@@ -146,7 +149,8 @@ export interface PositionView extends Position {
   liquidationPrice: Decimal | null;
   /**
    * The most margin a removal may take now, as the engine judges it at the fresh mark; null while
-   * the mark is stale or missing or the tiers are not loaded (a removal is then refused).
+   * the symbol's data is stale or catching up, the mark is stale or missing, or the tiers are not
+   * loaded (a removal is then refused).
    */
   maxRemovableMargin: Decimal | null;
 }
@@ -364,13 +368,20 @@ export class EngineRunner implements FundingSim {
   }
 
   /**
-   * Refused out of the leverage wallet while any perp key catches up: its run may still charge
-   * funding or lock margin from that wallet's free USDT, as of the gap.
+   * Refused out of the leverage wallet while any perp key catches up, or while a perp key with
+   * anything open (a position, an order, a funding window) has stale data: its catch-up may still
+   * charge funding or lock margin from that wallet's free USDT, as of the gap.
    */
   transfer(from: Wallet, to: Wallet, amount: Decimal): ActionResult {
     this.refuseTrading();
-    if (from === 'leverage' && this.catchUp.keys().some((k) => splitKey(k).market === 'perp')) {
-      throw new RefusedError(LEVERAGE_TRANSFER_REFUSAL);
+    if (from === 'leverage') {
+      if (this.catchUp.keys().some((k) => splitKey(k).market === 'perp')) throw new RefusedError(LEVERAGE_TRANSFER_REFUSAL);
+      for (const symbol of this.d.symbols) {
+        const key = perpKey(symbol);
+        if (!this.somethingOpen(key)) continue;
+        this.noteStale(key);
+        if (this.gate(key) !== 'live') throw new RefusedError(LEVERAGE_TRANSFER_STALE_REFUSAL);
+      }
     }
     return this.apply((ctx) => this.d.sim.transfer(from, to, amount, ctx));
   }
@@ -426,12 +437,12 @@ export class EngineRunner implements FundingSim {
 
   /**
    * Read-only: what adding or removing margin would do now; nothing is persisted. While the action
-   * itself would be refused (integrity failure, the symbol catching up) the answer is that refusal,
-   * with nothing removable.
+   * itself would be refused (integrity failure, the symbol's data stale or catching up) the answer
+   * is that refusal, with nothing removable.
    */
   previewMargin(symbol: string, action: 'add' | 'remove', amount: string): MarginPreview {
     this.refuseIfDead();
-    const refusal = this.tradingRefusal(perpKey(symbol));
+    const refusal = this.marginRefusal(symbol);
     if (refusal !== null) return { marginAfter: null, liquidationPriceAfter: null, maxRemovable: null, rejectReason: refusal };
     return this.d.sim.previewMargin(symbol, action, amount, this.ctx());
   }
@@ -446,13 +457,15 @@ export class EngineRunner implements FundingSim {
     return this.apply((ctx) => this.d.sim.setMarginMode(symbol, mode, ctx));
   }
 
+  /** Refused while the symbol's perp data is not live (see marginRefusal). */
   addMargin(symbol: string, amount: string): PerpActionResult {
-    this.refuseTrading(perpKey(symbol));
+    this.refuseMarginChange(symbol);
     return this.apply((ctx) => this.d.sim.addMargin(symbol, amount, ctx));
   }
 
+  /** Refused while the symbol's perp data is not live (see marginRefusal). */
   removeMargin(symbol: string, amount: string): PerpActionResult {
-    this.refuseTrading(perpKey(symbol));
+    this.refuseMarginChange(symbol);
     return this.apply((ctx) => this.d.sim.removeMargin(symbol, amount, ctx));
   }
 
@@ -610,8 +623,7 @@ export class EngineRunner implements FundingSim {
           marginRatio: null,
           liquidationPrice: brackets ? liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin) : null,
           // Nothing is removable while a removal would be refused anyway.
-          maxRemovableMargin:
-            this.tradingRefusal(perpKey(p.symbol)) === null ? this.d.sim.maxRemovable(p.symbol, ctx) : null,
+          maxRemovableMargin: this.marginRefusal(p.symbol) === null ? this.d.sim.maxRemovable(p.symbol, ctx) : null,
         };
         if (mark === null) return view;
         const pnl = unrealizedPnl(p.side, p.qty, p.entryPrice, mark);
@@ -665,6 +677,27 @@ export class EngineRunner implements FundingSim {
     if (this.violations.length > 0) return INTEGRITY_REFUSAL;
     if (key !== undefined && this.catchUp.isCatchingUp(key)) return CATCHING_UP_REFUSAL;
     return null;
+  }
+
+  /**
+   * Why a margin change on the symbol's position would be refused now, or null: as any action, and
+   * also while its perp data is stale (a gap open, or not fresh now). A gap's catch-up judges its
+   * minutes on the position as it then is, so a margin change made inside the gap would erase or
+   * misdate a liquidation that happened in it; on the exchange the position may already be gone.
+   */
+  private marginRefusal(symbol: string): string | null {
+    const key = perpKey(symbol);
+    const refusal = this.tradingRefusal(key);
+    if (refusal !== null) return refusal;
+    return this.gate(key) !== 'live' || !this.isFresh(key) ? MARGIN_STALE_REFUSAL : null;
+  }
+
+  /** Refuses a margin change (see marginRefusal); stale data no poll saw yet opens its gap first. */
+  private refuseMarginChange(symbol: string): void {
+    this.refuseIfDead();
+    this.noteStale(perpKey(symbol));
+    const refusal = this.marginRefusal(symbol);
+    if (refusal !== null) throw new RefusedError(refusal);
   }
 
   private marketOf(market: Market): RunnerMarket | RunnerPerpMarket {

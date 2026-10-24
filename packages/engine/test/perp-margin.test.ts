@@ -122,11 +122,19 @@ describe('addMargin', () => {
     expect(refused(engine.addMargin('BTCUSDT', '1.123456789', ctx))).toBe('Too many decimals: at most 8');
   });
 
-  it('needs no live data', () => {
-    const { engine, ctx, market } = setup();
+  // A margin change made while the data is not live could erase or misdate a liquidation that the
+  // gap's catch-up would find (on the exchange the position may be gone already): refused.
+  it('is refused without live data: a stale mark, or stale market data', () => {
+    const { engine, ctx, market, lev, position } = setup();
     openLong(engine, ctx);
     market.setMarkFresh('BTCUSDT', false);
+    expect(refused(engine.addMargin('BTCUSDT', '1', ctx))).toBe('Mark price unavailable; try again when live data is back');
+    market.setMarkFresh('BTCUSDT', true);
     market.setFresh('BTCUSDT', false);
+    expect(refused(engine.addMargin('BTCUSDT', '1', ctx))).toBe('Mark price unavailable; try again when live data is back');
+    expect(position()!.margin.toString()).toBe('396');
+    expect(lev().free.toString()).toBe('600');
+    market.setFresh('BTCUSDT', true);
     expect(ok(engine.addMargin('BTCUSDT', '1', ctx))).toHaveLength(1);
   });
 });
@@ -148,13 +156,17 @@ describe('removeMargin', () => {
     expect(lev().free.toString()).toBe('786');
   });
 
-  it('is refused when the mark is stale, while addMargin still works', () => {
+  it('is refused when the mark or the market data is stale, as an add is', () => {
     const { engine, ctx, market, position } = setup();
     openLong(engine, ctx);
+    market.setMarkPrice('BTCUSDT', D('82000'));
     market.setMarkFresh('BTCUSDT', false);
     expect(refused(engine.removeMargin('BTCUSDT', '1', ctx))).toBe('Mark price unavailable; try again when live data is back');
+    expect(refused(engine.addMargin('BTCUSDT', '1', ctx))).toBe('Mark price unavailable; try again when live data is back');
+    market.setMarkFresh('BTCUSDT', true);
+    market.setFresh('BTCUSDT', false);
+    expect(refused(engine.removeMargin('BTCUSDT', '1', ctx))).toBe('Mark price unavailable; try again when live data is back');
     expect(position()!.margin.toString()).toBe('396');
-    expect(ok(engine.addMargin('BTCUSDT', '1', ctx))).toHaveLength(1);
   });
 
   it('is refused without a position, and without any mark price', () => {
@@ -194,13 +206,17 @@ describe('previewMargin', () => {
     expect(lev().free.toString()).toBe('600');
   });
 
-  it('with a stale mark: no maximum and the removal refused, while an add still previews', () => {
+  it('with a stale mark or stale market data: no maximum, and both a removal and an add refused', () => {
     const { engine, ctx, market } = setup();
     openLong(engine, ctx);
-    market.setMarkFresh('BTCUSDT', false);
-    const remove = engine.previewMargin('BTCUSDT', 'remove', '1', ctx);
-    expect(remove).toMatchObject({ rejectReason: 'Mark price unavailable; try again when live data is back', maxRemovable: null });
-    expect(engine.previewMargin('BTCUSDT', 'add', '1', ctx).rejectReason).toBeNull();
+    for (const stale of [() => market.setMarkFresh('BTCUSDT', false), () => market.setFresh('BTCUSDT', false)]) {
+      market.setMarkFresh('BTCUSDT', true);
+      market.setFresh('BTCUSDT', true);
+      stale();
+      const reason = 'Mark price unavailable; try again when live data is back';
+      expect(engine.previewMargin('BTCUSDT', 'remove', '1', ctx)).toMatchObject({ rejectReason: reason, maxRemovable: null });
+      expect(engine.previewMargin('BTCUSDT', 'add', '1', ctx)).toMatchObject({ rejectReason: reason, maxRemovable: null });
+    }
   });
 
   it('gives the refusal without a position, over the free balance, or for a bad amount', () => {
@@ -224,6 +240,9 @@ describe('maxRemovable', () => {
     market.setMarkFresh('BTCUSDT', false);
     expect(engine.maxRemovable('BTCUSDT', ctx)).toBeNull();
     market.setMarkFresh('BTCUSDT', true);
+    market.setFresh('BTCUSDT', false);
+    expect(engine.maxRemovable('BTCUSDT', ctx)).toBeNull();
+    market.setFresh('BTCUSDT', true);
     market.clearBrackets('BTCUSDT');
     expect(engine.maxRemovable('BTCUSDT', ctx)).toBeNull();
   });

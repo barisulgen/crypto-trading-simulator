@@ -5,7 +5,7 @@ import type { FormEvent, ReactNode } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import type { WireMarginPreview } from '../lib/api.ts';
 import { fmtFloor, fmtPrice, fmtUsdFloor } from '../lib/format.ts';
-import { useLive } from '../lib/live.ts';
+import { feedOf, useLive } from '../lib/live.ts';
 import { cmpDec, liqPriceAtTick } from '../lib/market.ts';
 import { actionBlocks, marginSubmitReady } from '../lib/positions.ts';
 import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
@@ -54,6 +54,7 @@ export function MarginDialog({ symbol, onClose }: { symbol: string | null; onClo
   const free = useLive((s) => s.account?.balances.leverage.USDT?.free);
   const tick = useLive((s) => (symbol ? (s.meta?.perp?.[symbol]?.rules?.tickSize ?? undefined) : undefined));
   const down = useLive((s) => s.conn !== 'open');
+  const feed = useLive((s) => (symbol ? feedOf(s, 'perp', symbol) : undefined));
   const pushNotice = useLive((s) => s.pushNotice);
   const [action, setAction] = useState<Action>('add');
   const [amount, setAmount] = useState('');
@@ -74,7 +75,7 @@ export function MarginDialog({ symbol, onClose }: { symbol: string | null; onClo
   const answer = useMarginPreview(key, version);
   const preview = answer.key === key ? answer : NO_PREVIEW;
   const current = answer.key === key;
-  const blocked = p ? actionBlocks(p, undefined).margin : null;
+  const blocked = p ? actionBlocks(p, feed).margin : null;
   // The server's figure, at its fresh mark; while our connection is down it may be out of date.
   const removable = p && !down ? p.maxRemovableMargin : null;
   const noRemove =

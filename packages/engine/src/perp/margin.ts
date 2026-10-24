@@ -11,7 +11,7 @@ import type { Bracket, MarginPreview, PerpActionResult, PerpCtx, Position } from
 
 /** Leverage, margin mode and the margin of open isolated positions. */
 
-/** Margin cannot be removed without a fresh mark price: a temporary refusal. */
+/** Margin cannot be added or removed without live data (a fresh mark price): a temporary refusal. */
 export const MARGIN_MARK_UNAVAILABLE = 'Mark price unavailable; try again when live data is back';
 const MAX_DECIMALS = 8;
 
@@ -86,9 +86,12 @@ interface MarginPlan {
   liquidationPrice: Decimal | null;
 }
 
-/** The mark a removal is judged at: a fresh, valid one, else null (never a stale one). */
-function removalMark(symbol: string, ctx: PerpCtx): Decimal | null {
-  return ctx.market.isMarkFresh(symbol) ? validMark(symbol, ctx) : null;
+/**
+ * The mark a margin change is judged at: a fresh, valid one while the symbol's market data is live,
+ * else null (never a stale one).
+ */
+function liveMark(symbol: string, ctx: PerpCtx): Decimal | null {
+  return ctx.market.isFresh(symbol) && ctx.market.isMarkFresh(symbol) ? validMark(symbol, ctx) : null;
 }
 
 function removable(pos: Position, tiers: Bracket[], mark: Decimal): Decimal {
@@ -105,8 +108,10 @@ function removable(pos: Position, tiers: Bracket[], mark: Decimal): Decimal {
 
 /**
  * Every check of an add or a removal, in the order the actions make them, without changing
- * anything: the change it would make, or why it is refused. An add needs no live data (more margin
- * only adds safety); a removal is limited to maxRemovableMargin at a fresh mark.
+ * anything: the change it would make, or why it is refused. Both need live data: while it is
+ * stale the position may already have been liquidated on the exchange, and a change made then
+ * would decide what the gap's catch-up finds. A removal is limited to maxRemovableMargin at the
+ * fresh mark.
  */
 function planMargin(
   s: PerpState,
@@ -119,8 +124,8 @@ function planMargin(
   if (!pos) return { reason: `No open position on ${symbol}` };
   const tiers = bracketsOrNull(symbol, ctx);
   if (!tiers) return { reason: TIERS_NOT_LOADED };
-  const mark = action === 'remove' ? removalMark(symbol, ctx) : null;
-  if (action === 'remove' && !mark) return { reason: MARGIN_MARK_UNAVAILABLE };
+  const mark = liveMark(symbol, ctx);
+  if (!mark) return { reason: MARGIN_MARK_UNAVAILABLE };
   const read = readMargin(input);
   if ('reason' in read) return read;
   let margin: Decimal;
@@ -131,7 +136,7 @@ function planMargin(
     }
     margin = pos.margin.plus(read.amount);
   } else {
-    const max = removable(pos, tiers, mark!);
+    const max = removable(pos, tiers, mark);
     if (read.amount.gt(max)) return { reason: `At most ${max.toString()} USDT can be removed now` };
     margin = pos.margin.minus(read.amount);
   }
@@ -139,7 +144,7 @@ function planMargin(
   return { pos, action, amount: read.amount, margin, liquidationPrice: liq };
 }
 
-/** Move free leverage USDT into the position's margin. Needs no live data: more margin only adds safety. */
+/** Move free leverage USDT into the position's margin. Never while the data is stale (see planMargin). */
 export function addMargin(s: PerpState, symbol: string, input: string, ctx: PerpCtx): PerpActionResult {
   const plan = planMargin(s, symbol, 'add', input, ctx);
   if ('reason' in plan) return fail(plan.reason);
@@ -149,7 +154,7 @@ export function addMargin(s: PerpState, symbol: string, input: string, ctx: Perp
 
 /**
  * Move margin from the position back to free leverage USDT, up to maxRemovableMargin at the current
- * mark. Never acts on a stale mark.
+ * mark. Never acts on stale data.
  */
 export function removeMargin(s: PerpState, symbol: string, input: string, ctx: PerpCtx): PerpActionResult {
   const plan = planMargin(s, symbol, 'remove', input, ctx);
@@ -160,12 +165,12 @@ export function removeMargin(s: PerpState, symbol: string, input: string, ctx: P
 
 /**
  * The margin that may be removed from the symbol's position now: maxRemovableMargin at a fresh
- * mark. Null without a position, the leverage tiers or a fresh mark (a removal is then refused).
+ * mark. Null without a position, the leverage tiers or live data (a removal is then refused).
  */
 export function maxRemovable(s: PerpState, symbol: string, ctx: PerpCtx): Decimal | null {
   const pos = s.positions[symbol];
   const tiers = bracketsOrNull(symbol, ctx);
-  const mark = removalMark(symbol, ctx);
+  const mark = liveMark(symbol, ctx);
   return pos && tiers && mark ? removable(pos, tiers, mark) : null;
 }
 

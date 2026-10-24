@@ -5,7 +5,7 @@ import { CatchUpIndicatorView } from '../src/components/CatchUpIndicator.tsx';
 import { FeedStatusList, feedLabel } from '../src/components/FeedIndicator.tsx';
 import { TestBannerView } from '../src/components/TestBanner.tsx';
 import type { MarketHealth } from '../src/lib/api.ts';
-import { catchingUpFeeds, feedStatus, feedSummary, initialLiveData } from '../src/lib/live.ts';
+import { catchingUpFeeds, feedStatus, feedSummary, initialLiveData, leverageTransferBlock } from '../src/lib/live.ts';
 import type { LiveData } from '../src/lib/live.ts';
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
@@ -77,6 +77,32 @@ describe('feed status per coin and market', () => {
       { symbol: 'ETHUSDT', market: 'spot' },
       { symbol: 'ETHUSDT', market: 'perp' },
     ]);
+  });
+});
+
+describe('transfers from the leverage wallet', () => {
+  const position = { symbol: 'BTCUSDT', markFresh: true } as unknown as NonNullable<LiveData['positions']>[number];
+  const order = { symbol: 'ETHUSDT' } as unknown as LiveData['perpOrders'][number];
+
+  it('are open while every perpetual is live, or a stale one has nothing open', () => {
+    expect(leverageTransferBlock({ ...state(), positions: [position] })).toBeNull();
+    const ethDown = { 'perp:ETHUSDT': { fresh: false, reason: 'Disconnected', catchingUp: false } };
+    expect(leverageTransferBlock({ ...state({ markets: ethDown }), positions: [position] })).toBeNull();
+  });
+
+  it('are off while any perpetual catches up, as the server refuses them (409)', () => {
+    expect(leverageTransferBlock({ ...state({ catchingUp: ['perp:ETHUSDT'] }), positions: [] })).toBe(
+      'Catching up after a data gap: transfers from the leverage wallet resume when it is done',
+    );
+  });
+
+  it('are off while a perpetual with a position or open orders has stale data or a stale mark', () => {
+    const btcDown = { 'perp:BTCUSDT': { fresh: false, reason: 'Disconnected', catchingUp: false } };
+    const why = (s: string) => `Live data interrupted on ${s} perp: transfers from the leverage wallet resume once it is back and caught up`;
+    expect(leverageTransferBlock({ ...state({ markets: btcDown }), positions: [position] })).toBe(why('BTC'));
+    expect(leverageTransferBlock({ ...state(), positions: [{ ...position, markFresh: false }] })).toBe(why('BTC'));
+    const ethDown = { 'perp:ETHUSDT': { fresh: false, reason: 'Disconnected', catchingUp: false } };
+    expect(leverageTransferBlock({ ...state({ markets: ethDown }), positions: [], perpOrders: [order] })).toBe(why('ETH'));
   });
 });
 
