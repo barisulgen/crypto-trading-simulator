@@ -70,19 +70,31 @@ export function valueTitle(h: HoldingRow): string | undefined {
     : `Last real bid at ${fmtClock(h.bidAt)} — live data interrupted`;
 }
 
-/** 'Prices paused (N coins)' while any held coin is valued without a live bid, else null. */
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * 'Prices paused (1 coin, 2 positions)' while any held coin is valued without a live bid or any
+ * open position without a live mark, else null.
+ */
 export function pricesPausedLabel(account: AccountSnapshot): string | null {
-  const n = account.pricesPaused.length;
-  return n === 0 ? null : `Prices paused (${n} ${n === 1 ? 'coin' : 'coins'})`;
+  const coins = account.pricesPaused.length;
+  const positions = account.marksPaused?.length ?? 0;
+  if (coins === 0 && positions === 0) return null;
+  const parts = [coins > 0 && count(coins, 'coin', 'coins'), positions > 0 && count(positions, 'position', 'positions')];
+  return `Prices paused (${parts.filter(Boolean).join(', ')})`;
 }
 
 /**
- * True while a held coin has never had a bid since the server started: its value is a placeholder 0,
- * so total value and net P&L would show a loss that is not real. (A coin priced earlier that is now
- * stale is a different case: 'Prices paused'.)
+ * True while something counted in the total has never been priced since the server started: a
+ * held coin with no bid (as for its holdings row, `priced` false: its value is a placeholder 0) or
+ * an open position with no mark (it counts as its margin only), or the server says so. Total value
+ * and net P&L would then show a figure that is not real. (A coin or position priced earlier that is
+ * now stale is a different case: 'Prices paused'.)
  */
 export function pricesLoading(account: AccountSnapshot): boolean {
-  return account.coins.some((c) => cmpDec(c.qty, '0') > 0 && cmpDec(c.bid, '0') <= 0);
+  if (account.pricesLoading) return true;
+  if (account.coins.some((c) => cmpDec(c.qty, '0') > 0 && cmpDec(c.bid, '0') <= 0)) return true;
+  return (account.leverage?.positions ?? []).some((p) => p.markPrice === null);
 }
 
 /** Average fill price of an order (filled quote / filled qty) with `dp` decimals; null before any fill. */

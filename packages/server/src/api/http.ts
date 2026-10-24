@@ -423,6 +423,14 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     return send(reply, 200, { position: position(s) });
   });
 
+  // Read-only: what the same body would do on POST /api/perp/margin; a refusal is its rejectReason (200).
+  app.post('/api/perp/margin/preview', async (req, reply) => {
+    const b = only(objectBody(req), ['symbol', 'action', 'amount']);
+    const s = symbol(reqStr(b, 'symbol'));
+    const action = oneOf(b, 'action', ['add', 'remove'] as const);
+    return send(reply, 200, d.runner.previewMargin(s, action, reqStr(b, 'amount')));
+  });
+
   // Close-position stops on the symbol's position; refused ones are recorded and returned with 200.
   app.post('/api/perp/tpsl', async (req, reply) => {
     const b = only(objectBody(req), ['symbol', 'stopLoss', 'takeProfit']);

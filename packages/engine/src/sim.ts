@@ -7,6 +7,7 @@ import type { Candle1m, CatchUpEvent, CatchUpInput, CatchUpNeeds } from './catch
 import type { Ledger } from './account/ledger.ts';
 import type { PerpEngine } from './perp/engine.ts';
 import type {
+  MarginPreview,
   MarginWarning,
   PerpActionResult,
   PerpCtx,
@@ -157,6 +158,16 @@ export class SimEngine {
 
   removeMargin(symbol: string, amount: string, ctx: SimCtx): PerpActionResult {
     return this.perp.removeMargin(symbol, amount, ctxFor(ctx, 'perp'));
+  }
+
+  /** What adding or removing margin would do now; nothing is changed. */
+  previewMargin(symbol: string, action: 'add' | 'remove', amount: string, ctx: SimCtx): MarginPreview {
+    return this.perp.previewMargin(symbol, action, amount, ctxFor(ctx, 'perp'));
+  }
+
+  /** The margin that may be removed from the symbol's position now; null without a fresh mark. */
+  maxRemovable(symbol: string, ctx: SimCtx): Decimal | null {
+    return this.perp.maxRemovable(symbol, ctxFor(ctx, 'perp'));
   }
 
   setPositionTpSl(symbol: string, input: { stopLoss?: string; takeProfit?: string }, ctx: SimCtx): PerpEvent[] {

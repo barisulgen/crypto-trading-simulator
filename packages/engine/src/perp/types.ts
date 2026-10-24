@@ -309,5 +309,17 @@ export type PerpEvent = (
     }
 ) & { catchUp?: CatchUpTag };
 
+/**
+ * What adding or removing margin would do now, as the action itself would judge it: the margin and
+ * the (unrounded) liquidation price after it, or the refusal. `maxRemovable` is the most a removal
+ * may take at the current fresh mark, null without one (or without the tiers or a position).
+ */
+export interface MarginPreview {
+  marginAfter: Decimal | null;
+  liquidationPriceAfter: Decimal | null;
+  maxRemovable: Decimal | null;
+  rejectReason: string | null;
+}
+
 /** The outcome of an owner action on the perp account: its events, or why it was refused. */
 export type PerpActionResult = { ok: true; events: PerpEvent[] } | { ok: false; reason: string };

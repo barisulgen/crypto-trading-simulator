@@ -1,144 +1,42 @@
-// Open orders, holdings, recent fills and (Phase 2) positions, under the chart.
+// Open orders, holdings, recent fills and positions, under the chart.
 import { useEffect, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { api, ApiError } from '../lib/api.ts';
-import type { WireFill, WireOrder } from '../lib/api.ts';
+import type { Market, WireFillRow, WireOrder, WirePerpOrder } from '../lib/api.ts';
 import { ORDER_TYPE_LABEL, driftSign, fmtBalance, fmtCost, fmtDrift, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
 import { avgFill, holdingRows, valueTitle } from '../lib/holdings.ts';
 import type { HoldingRow } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
+import type { LiveState } from '../lib/live.ts';
 import { cmpDec, floorToStep, fmtClock, fmtChartTime } from '../lib/market.ts';
 import { AttachPairDialog } from './AttachPairDialog.tsx';
 import type { PairTarget } from './AttachPairDialog.tsx';
 import { changeClass } from './CoinList.tsx';
+import { Actions, Cell, Empty, Row, Table } from './ListTable.tsx';
+import type { Col } from './ListTable.tsx';
+import { PositionsTab } from './PositionsTab.tsx';
 import { Button } from './ui.tsx';
 
 type Tab = 'orders' | 'holdings' | 'fills' | 'positions';
 
 const FILLS_SHOWN = 50;
 
-// ---- a table that becomes compact cards in a narrow panel ----
+const MARKET_LABEL: Record<Market, string> = { spot: 'Spot', perp: 'Perp' };
 
-/**
- * Container-query classes: from `md` (40rem) or `lg` (52rem) of panel width a list is a table
- * with a header row. Narrower (900-1279 px desktops, phones) each row is a card: a head line of
- * the `head` cells and the actions, then the other cells, labelled, four to a line. The labels
- * stay for screen readers in the table layout (the header row is visual only).
- */
-const WIDE = {
-  md: {
-    head: 'hidden @min-[40rem]:grid',
-    row: '@min-[40rem]:grid @min-[40rem]:grid-cols-(--cols) @min-[40rem]:items-center @min-[40rem]:py-1.5',
-    cell: '@min-[40rem]:order-none @min-[40rem]:basis-auto',
-    label: '@min-[40rem]:sr-only',
-    right: '@min-[40rem]:text-right',
-    action: '@min-[40rem]:order-none @min-[40rem]:ml-0',
-    narrowOnly: '@min-[40rem]:hidden',
-  },
-  lg: {
-    head: 'hidden @min-[52rem]:grid',
-    row: '@min-[52rem]:grid @min-[52rem]:grid-cols-(--cols) @min-[52rem]:items-center @min-[52rem]:py-1.5',
-    cell: '@min-[52rem]:order-none @min-[52rem]:basis-auto',
-    label: '@min-[52rem]:sr-only',
-    right: '@min-[52rem]:text-right',
-    action: '@min-[52rem]:order-none @min-[52rem]:ml-0',
-    narrowOnly: '@min-[52rem]:hidden',
-  },
-} as const;
-type Width = keyof typeof WIDE;
-
-interface Col {
-  label: string;
-  right?: boolean;
-  title?: string;
-}
-
-function Table({
-  cols,
-  template,
-  width = 'md',
-  action = false,
-  children,
-}: {
-  cols: Col[];
-  /** grid-template-columns of the wide layout (an action column last when `action`). */
-  template: string;
-  width?: Width;
-  action?: boolean;
-  children: ReactNode;
-}) {
-  const w = WIDE[width];
-  return (
-    <div className="@container" style={{ '--cols': template } as CSSProperties}>
-      <div
-        aria-hidden="true"
-        className={`${w.head} sticky top-0 z-[1] grid-cols-(--cols) gap-x-2 border-b border-line bg-panel px-3 py-1 text-2xs whitespace-nowrap text-faint`}
-      >
-        {cols.map((c) => (
-          <span key={c.label} title={c.title} className={c.right ? 'text-right' : ''}>
-            {c.label}
-          </span>
-        ))}
-        {action && <span />}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function Row({ width = 'md', children }: { width?: Width; children: ReactNode }) {
-  const w = WIDE[width];
-  return (
-    <div className={`flex flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-line/60 px-3 py-2 text-xs ${w.row}`}>
-      {children}
-      {/* Card layout: ends the head line; the labelled cells (order 1) follow. */}
-      <span aria-hidden="true" className={`order-0 h-0 basis-full ${w.narrowOnly}`} />
-    </div>
-  );
-}
-
-function Cell({
-  label,
-  head = false,
-  right,
-  width = 'md',
-  title,
-  children,
-}: {
-  label: string;
-  /** On a card: in the head line, unlabelled. */
-  head?: boolean;
-  right?: boolean;
-  width?: Width;
-  title?: string;
-  children: ReactNode;
-}) {
-  const w = WIDE[width];
-  const place = head ? 'order-0' : 'order-1 basis-[calc(25%-0.375rem)]';
-  return (
-    <div title={title} className={`min-w-0 ${place} ${w.cell} ${right ? w.right : ''}`}>
-      <span className={head ? 'sr-only' : `block text-2xs text-faint ${w.label}`}>{label}</span>
-      {/* Never truncated: a value too wide for its column wraps instead of being cut off. */}
-      <span className="block [overflow-wrap:anywhere]">{children}</span>
-    </div>
-  );
-}
-
-/** Buttons: at the end of the head line on a card, the last column in a table. */
-function Actions({ width = 'md', children }: { width?: Width; children?: ReactNode }) {
-  return <div className={`order-0 ml-auto flex justify-end gap-2 ${WIDE[width].action}`}>{children}</div>;
-}
-
-function Empty({ children }: { children: ReactNode }) {
-  return <p className="m-auto max-w-[32ch] p-6 text-center text-xs text-faint">{children}</p>;
+/** The tick size of a symbol in a market (the perpetual's own differs from the spot pair's). */
+function tickOf(s: LiveState, market: Market, symbol: string): string | undefined {
+  return market === 'perp' ? (s.meta?.perp?.[symbol]?.rules?.tickSize ?? undefined) : s.meta?.rules[symbol]?.tickSize;
 }
 
 // ---- open orders ----
 
-function statusLabel(o: WireOrder): string {
+/** An open order of either market, tagged with it. */
+type AnyOrder = (WireOrder & { market: 'spot' }) | (WirePerpOrder & { market: 'perp' });
+
+function statusLabel(o: Pick<WireOrder, 'status' | 'arrivesAt' | 'type'>): string {
   switch (o.status) {
     case 'pending':
-      // A pair attached to a buy waits for fresh data to arm; anything else is in its arrival delay.
+      // Stops attached to an entry wait for fresh data to arm; anything else is in its arrival delay.
       return o.arrivesAt === null ? 'Waiting for data' : 'Pending';
     case 'open':
       return o.type === 'stop_loss' || o.type === 'take_profit' ? 'Armed' : 'Open';
@@ -152,7 +50,7 @@ function statusLabel(o: WireOrder): string {
 }
 
 /** A triggered stop or a market order in flight is already executing: no Cancel (the engine refuses it). */
-function cancellable(o: WireOrder): boolean {
+function cancellable(o: Pick<WireOrder, 'status' | 'type'>): boolean {
   return o.status !== 'triggered' && o.type !== 'market';
 }
 
@@ -163,60 +61,81 @@ function Cancelling() {
 
 const ORDER_COLS: Col[] = [
   { label: 'Coin' },
+  { label: 'Market' },
   { label: 'Type' },
   { label: 'Side' },
   { label: 'Price / trigger', right: true },
   { label: 'Amount', right: true },
   { label: 'Filled', right: true },
   { label: 'Avg fill', right: true },
+  { label: 'Margin', right: true, title: 'Leverage-wallet USDT a perp order keeps locked as margin' },
   { label: 'Status' },
 ];
-/** Minimums + gaps + padding fit the 40rem breakpoint (33 + 4 + 1.5 rem); the fr parts share the rest. */
+/** Minimums + gaps + padding fit the 52rem breakpoint (39 + 5 + 1.5 rem); the fr parts share the rest. */
 const ORDER_TEMPLATE =
-  'minmax(2.5rem,0.7fr) minmax(4.5rem,1fr) 2.25rem minmax(4.5rem,1.2fr) minmax(3.5rem,1fr) minmax(3.5rem,1fr) minmax(4.5rem,1.2fr) minmax(4.25rem,1fr) 3.5rem';
+  'minmax(2.5rem,0.7fr) 2.5rem minmax(4.5rem,1fr) 2.25rem minmax(4.5rem,1.2fr) minmax(3.5rem,1fr) minmax(3.5rem,1fr) minmax(4.5rem,1.2fr) minmax(3.5rem,1fr) minmax(4.25rem,1fr) 3.5rem';
 
-function OrderRow({ o, onCancel, cancel = true }: { o: WireOrder; onCancel(o: WireOrder): void; cancel?: boolean }) {
-  const base = o.symbol.replace(/USDT$/, '');
-  const tick = useLive((s) => s.meta?.rules[o.symbol]?.tickSize);
+/** What a perp order is beyond its type: closing the whole position, or reduce-only. */
+function perpFlag(o: WirePerpOrder): string | null {
+  if (o.closePosition) return 'close position';
+  return o.reduceOnly ? 'reduce-only' : null;
+}
+
+function OrderRow({ o, onCancel, cancel = true }: { o: AnyOrder; onCancel(o: AnyOrder): void; cancel?: boolean }) {
+  const w = 'lg';
+  const market = o.market;
+  const tick = useLive((s) => tickOf(s, market, o.symbol));
   const price =
-    o.type === 'market' ? 'Market' : fmtPrice(o.symbol, o.type === 'limit' || o.type === 'post_only' ? o.price : o.triggerPrice);
+    o.type === 'market'
+      ? 'Market'
+      : fmtPrice(o.symbol, o.type === 'limit' || o.type === 'post_only' ? o.price : o.triggerPrice, { market });
   const avg = avgFill(o.filledQuote, o.filledQty, tickDecimals(tick ?? '0.01') + 2);
+  const flag = o.market === 'perp' ? perpFlag(o) : null;
+  const attach = o.attach;
   return (
-    <Row>
-      <Cell label="Coin" head>
-        <span className="font-semibold">{base}</span>
+    <Row width={w}>
+      <Cell width={w} label="Coin" head>
+        <span className="font-semibold">{o.symbol.replace(/USDT$/, '')}</span>
+      </Cell>
+      <Cell width={w} label="Market" head>
+        <span className="text-muted">{MARKET_LABEL[market]}</span>
       </Cell>
       <Cell
+        width={w}
         label="Type"
         head
         title={
-          o.attach
-            ? `Stop-loss ${o.attach.stopLoss} / take-profit ${o.attach.takeProfit} attached: placed when this buy finishes`
+          attach
+            ? `Stop-loss ${attach.stopLoss ?? '-'} / take-profit ${attach.takeProfit ?? '-'} attached: placed when this order ${market === 'perp' ? 'first fills' : 'finishes'}`
             : undefined
         }
       >
-        {ORDER_TYPE_LABEL[o.type]}
-        {o.attach && <span className="ml-1 text-faint">+SL/TP</span>}
+        <span className="whitespace-nowrap">{ORDER_TYPE_LABEL[o.type]}</span>
+        {attach && <span className="ml-1 text-faint">+SL/TP</span>}
+        {flag && <span className="block text-2xs whitespace-nowrap text-faint">{flag}</span>}
       </Cell>
-      <Cell label="Side" head>
+      <Cell width={w} label="Side" head>
         <span className={o.side === 'buy' ? 'text-up' : 'text-down'}>{o.side === 'buy' ? 'Buy' : 'Sell'}</span>
       </Cell>
-      <Cell label="Price / trigger" right>
+      <Cell width={w} label="Price / trigger" right>
         {price}
       </Cell>
-      <Cell label="Amount" right>
-        {o.qty !== null ? fmtQty(o.symbol, o.qty) : fmtUsd(o.quoteQty)}
+      <Cell width={w} label="Amount" right>
+        {o.qty !== null ? fmtQty(o.symbol, o.qty, { market }) : o.quoteQty !== null ? fmtUsd(o.quoteQty) : 'Position'}
       </Cell>
-      <Cell label="Filled" right>
-        {fmtQty(o.symbol, o.filledQty)}
+      <Cell width={w} label="Filled" right>
+        {fmtQty(o.symbol, o.filledQty, { market })}
       </Cell>
-      <Cell label="Avg fill" right>
+      <Cell width={w} label="Avg fill" right>
         {avg === null ? '-' : fmtNum(avg, tickDecimals(tick ?? '0.01') + 2)}
       </Cell>
-      <Cell label="Status" head>
+      <Cell width={w} label="Margin" right>
+        {o.market === 'perp' ? (signOf(o.lockAmount) > 0 ? fmtCost(o.lockAmount) : 'None') : '-'}
+      </Cell>
+      <Cell width={w} label="Status" head>
         <span className={o.status === 'triggered' ? 'font-semibold text-accent' : 'text-muted'}>{statusLabel(o)}</span>
       </Cell>
-      <Actions>
+      <Actions width={w}>
         {cancel &&
           cancellable(o) &&
           (o.cancelArrivesAt !== null ? (
@@ -231,12 +150,13 @@ function OrderRow({ o, onCancel, cancel = true }: { o: WireOrder; onCancel(o: Wi
   );
 }
 
-/** Open orders, newest first; the two legs of a linked pair stay together under one Cancel. */
+/** Open orders of both markets, newest first; the two legs of a linked pair stay together under one Cancel. */
 function OpenOrders() {
-  const orders = useLive((s) => s.orders);
+  const spot = useLive((s) => s.orders);
+  const perp = useLive((s) => s.perpOrders);
   const pushNotice = useLive((s) => s.pushNotice);
 
-  async function cancel(o: WireOrder) {
+  async function cancel(o: AnyOrder) {
     try {
       await api.cancelOrder(o.id);
     } catch (e) {
@@ -244,6 +164,10 @@ function OpenOrders() {
     }
   }
 
+  const orders: AnyOrder[] = [
+    ...spot.map((o) => ({ ...o, market: 'spot' as const })),
+    ...perp.map((o) => ({ ...o, market: 'perp' as const })),
+  ].sort((a, b) => b.createdAt - a.createdAt);
   if (orders.length === 0) return <Empty>No open orders.</Empty>;
   const seen = new Set<string>();
   const items: ReactNode[] = [];
@@ -252,16 +176,17 @@ function OpenOrders() {
       items.push(<OrderRow key={o.id} o={o} onCancel={cancel} />);
       continue;
     }
-    if (seen.has(o.ocoGroupId)) continue;
-    seen.add(o.ocoGroupId);
+    const group = `${o.market}:${o.ocoGroupId}`;
+    if (seen.has(group)) continue;
+    seen.add(group);
     const legs = orders
-      .filter((l) => l.ocoGroupId === o.ocoGroupId)
+      .filter((l) => l.market === o.market && l.ocoGroupId === o.ocoGroupId)
       .sort((a, b) => (a.type === b.type ? 0 : a.type === 'stop_loss' ? -1 : 1));
     const executing = legs.some((l) => !cancellable(l));
     // One cancel covers the pair, whichever leg it was sent for.
     const cancelling = legs.some((l) => l.cancelArrivesAt !== null);
     items.push(
-      <div key={o.ocoGroupId} role="group" aria-label="Linked pair" className="border-l-2 border-faint">
+      <div key={group} role="group" aria-label="Linked pair" className="border-l-2 border-faint">
         <div className="flex items-center justify-between gap-2 px-3 pt-1.5 text-2xs text-muted">
           <span>Linked pair - when one triggers, the other is cancelled</span>
           {!executing &&
@@ -280,7 +205,7 @@ function OpenOrders() {
     );
   }
   return (
-    <Table cols={ORDER_COLS} template={ORDER_TEMPLATE} action>
+    <Table cols={ORDER_COLS} template={ORDER_TEMPLATE} width="lg" action>
       {items}
     </Table>
   );
@@ -381,6 +306,7 @@ function Holdings() {
 const FILL_COLS: Col[] = [
   { label: 'Time' },
   { label: 'Coin' },
+  { label: 'Market' },
   { label: 'Side' },
   { label: 'Qty', right: true },
   { label: 'Price', right: true },
@@ -390,8 +316,9 @@ const FILL_COLS: Col[] = [
   { label: 'Role' },
   { label: 'Fee', right: true },
 ];
+/** Minimums + gaps + padding fit the 52rem breakpoint (44 + 5 + 1.5 rem). */
 const FILL_TEMPLATE =
-  '4.5rem minmax(2.5rem,0.6fr) 2.5rem minmax(4.5rem,1fr) minmax(5.5rem,1.2fr) minmax(5rem,1fr) minmax(3.5rem,0.8fr) minmax(4.5rem,0.9fr) 3rem minmax(6rem,1.3fr)';
+  '4.5rem minmax(2.5rem,0.6fr) 2.5rem 2.5rem minmax(4.5rem,1fr) minmax(5.5rem,1.2fr) minmax(5rem,1fr) minmax(3.5rem,0.8fr) minmax(4.5rem,0.9fr) 3rem minmax(6rem,1.3fr)';
 
 /** Delay drift in words ('cost $0.08' / 'gain $0.02'), coloured as its effect on the owner. */
 function drift(driftUsd: string): ReactNode {
@@ -399,8 +326,9 @@ function drift(driftUsd: string): ReactNode {
   return <span className={s > 0 ? 'text-down' : s < 0 ? 'text-up' : 'text-muted'}>{fmtDrift(driftUsd)}</span>;
 }
 
-function FillLine({ f }: { f: WireFill }) {
-  const tick = useLive((s) => s.meta?.rules[f.symbol]?.tickSize);
+function FillLine({ f }: { f: WireFillRow }) {
+  const market = f.market;
+  const tick = useLive((s) => tickOf(s, market, f.symbol));
   const w = 'lg';
   return (
     <Row width={w}>
@@ -410,17 +338,20 @@ function FillLine({ f }: { f: WireFill }) {
       <Cell width={w} label="Coin" head>
         <span className="font-semibold">{f.symbol.replace(/USDT$/, '')}</span>
       </Cell>
+      <Cell width={w} label="Market" head>
+        <span className="text-muted">{MARKET_LABEL[market]}</span>
+      </Cell>
       <Cell width={w} label="Side" head>
         <span className={f.side === 'buy' ? 'text-up' : 'text-down'}>{f.side === 'buy' ? 'Buy' : 'Sell'}</span>
       </Cell>
       <Cell width={w} label="Qty" right>
-        {fmtQty(f.symbol, f.qty)}
+        {fmtQty(f.symbol, f.qty, { market })}
       </Cell>
       <Cell width={w} label="Price" right>
         {fmtNum(f.price, tickDecimals(tick ?? '0.01') + 2)}
       </Cell>
       <Cell width={w} label="Best at arrival" right>
-        {fmtPrice(f.symbol, f.bestAtArrival)}
+        {fmtPrice(f.symbol, f.bestAtArrival, { market })}
       </Cell>
       <Cell width={w} label="Slippage" right>
         {/* An unsigned cost (always >= 0), as in the preview and the fill notices. */}
@@ -439,19 +370,22 @@ function FillLine({ f }: { f: WireFill }) {
   );
 }
 
-/** The latest fills on every coin; reloaded whenever fills may have changed or after a reconnect. */
+/**
+ * The latest fills of both markets on every coin, newest first; reloaded whenever fills may have
+ * changed or after a reconnect.
+ */
 function RecentFills() {
   const fillSeq = useLive((s) => s.fillSeq);
   const reconnects = useLive((s) => s.reconnects);
-  const [fills, setFills] = useState<WireFill[] | null>(null);
+  const [fills, setFills] = useState<WireFillRow[] | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
     let current = true;
-    api.fills({ limit: FILLS_SHOWN }).then(
-      (f) => {
+    Promise.all([api.fills({ limit: FILLS_SHOWN }), api.fills({ limit: FILLS_SHOWN, market: 'perp' })]).then(
+      ([spot, perp]) => {
         if (!current) return;
-        setFills(f);
+        setFills([...spot, ...perp].sort((a, b) => b.time - a.time).slice(0, FILLS_SHOWN));
         setError('');
       },
       (e: unknown) => {
@@ -470,7 +404,7 @@ function RecentFills() {
       {error && <p className="px-3 py-1 text-2xs text-down">Could not refresh: {error}</p>}
       <Table cols={FILL_COLS} template={FILL_TEMPLATE} width="lg">
         {fills.map((f) => (
-          <FillLine key={f.id} f={f} />
+          <FillLine key={`${f.market}:${f.id}`} f={f} />
         ))}
       </Table>
     </>
@@ -479,16 +413,23 @@ function RecentFills() {
 
 // ---- tabs ----
 
-/** Bottom tabs of the trade screen: open orders, holdings, recent fills, positions (Phase 2). */
+/**
+ * Bottom tabs of the trade screen: open orders, holdings, recent fills and positions. While any
+ * position is open its tab comes first, and is the one shown until the owner picks another.
+ */
 export function BottomTabs() {
-  const [tab, setTab] = useState<Tab>('orders');
-  const openCount = useLive((s) => s.orders.length);
+  const [picked, setTab] = useState<Tab | null>(null);
+  const openCount = useLive((s) => s.orders.length + s.perpOrders.length);
   const holdingCount = useLive((s) => s.account?.coins.length ?? 0);
+  const positionCount = useLive((s) => s.positions?.length ?? 0);
+  const tab = picked ?? (positionCount > 0 ? 'positions' : 'orders');
+  const positionsTab = { id: 'positions' as const, label: 'Positions', count: positionCount };
   const tabs: { id: Tab; label: string; count?: number }[] = [
+    ...(positionCount > 0 ? [positionsTab] : []),
     { id: 'orders', label: 'Open orders', count: openCount },
     { id: 'holdings', label: 'Holdings', count: holdingCount },
     { id: 'fills', label: 'Recent fills' },
-    { id: 'positions', label: 'Positions' },
+    ...(positionCount > 0 ? [] : [positionsTab]),
   ];
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -525,7 +466,7 @@ export function BottomTabs() {
         {tab === 'orders' && <OpenOrders />}
         {tab === 'holdings' && <Holdings />}
         {tab === 'fills' && <RecentFills />}
-        {tab === 'positions' && <Empty>Leverage arrives in Phase 2</Empty>}
+        {tab === 'positions' && <PositionsTab />}
       </div>
     </div>
   );

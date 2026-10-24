@@ -29,6 +29,7 @@ import type {
   FeeSchedule,
   Ledger,
   Market,
+  MarginPreview,
   MarginWarning,
   MarketView,
   OcoRequest,
@@ -143,6 +144,11 @@ export interface PositionView extends Position {
   maintenanceMargin: Decimal | null;
   marginRatio: Decimal | null;
   liquidationPrice: Decimal | null;
+  /**
+   * The most margin a removal may take now, as the engine judges it at the fresh mark; null while
+   * the mark is stale or missing or the tiers are not loaded (a removal is then refused).
+   */
+  maxRemovableMargin: Decimal | null;
 }
 
 /** Account value plus the raw wallet balances and each held coin's average-cost basis. */
@@ -417,6 +423,12 @@ export class EngineRunner implements FundingSim {
     return this.d.sim.preview('perp', req, this.ctx());
   }
 
+  /** Read-only: what adding or removing margin would do now; nothing is persisted. */
+  previewMargin(symbol: string, action: 'add' | 'remove', amount: string): MarginPreview {
+    this.refuseIfDead();
+    return this.d.sim.previewMargin(symbol, action, amount, this.ctx());
+  }
+
   setLeverage(symbol: string, leverage: number): PerpActionResult {
     this.refuseTrading(perpKey(symbol));
     return this.apply((ctx) => this.d.sim.setLeverage(symbol, leverage, ctx));
@@ -572,6 +584,7 @@ export class EngineRunner implements FundingSim {
   /** Every open position at the last mark received, oldest first (see PositionView). */
   positions(): PositionView[] {
     const perp = this.d.perpMarket;
+    const ctx = this.ctx();
     return Object.values(this.d.sim.perp.state.positions)
       .sort((a, b) => a.openedAt - b.openedAt)
       .map((p): PositionView => {
@@ -589,6 +602,7 @@ export class EngineRunner implements FundingSim {
           maintenanceMargin: null,
           marginRatio: null,
           liquidationPrice: brackets ? liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin) : null,
+          maxRemovableMargin: this.d.sim.maxRemovable(p.symbol, ctx),
         };
         if (mark === null) return view;
         const pnl = unrealizedPnl(p.side, p.qty, p.entryPrice, mark);

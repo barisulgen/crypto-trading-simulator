@@ -1332,6 +1332,15 @@ describe('perps through the runner', () => {
     expect(t.sent.filter((m) => m.type === 'notice').map((m) => [m.kind, m.level, m.text])).toEqual([
       ['liquidation', 'error', 'LIQUIDATED: BTCUSDT long 0.1 at mark 76340.0 — margin lost $396.00 (fee $30.00)'],
     ]);
+    // The same figures as data, for the owner's alert: exact decimal strings, rounded only for display.
+    expect(t.sent.filter((m) => m.type === 'notice')[0]!.liquidation).toEqual({
+      symbol: 'BTCUSDT',
+      side: 'long',
+      qty: '0.1',
+      markPrice: '76340',
+      marginLost: '396',
+      liquidationFee: '30',
+    });
     expect(t.sent.filter((m) => m.type === 'account').at(-1)!.account.leverage.positions).toEqual([]);
   });
 

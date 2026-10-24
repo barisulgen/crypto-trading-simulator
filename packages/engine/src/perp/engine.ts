@@ -15,7 +15,7 @@ import { applyFunding, closeFundingWindow, openFundingWindow } from './funding.t
 import { arriveLimit, fillAt, matchTrade, previewLimit, submitLimit } from './limit.ts';
 import { checkMark, isolatedModel, liquidateOnMarkRange } from './liquidation.ts';
 import type { LiquidationModel } from './liquidation.ts';
-import { addMargin, removeMargin, setLeverage, setMarginMode } from './margin.ts';
+import { addMargin, maxRemovable, previewMargin, removeMargin, setLeverage, setMarginMode } from './margin.ts';
 import { arriveMarket, bracketsOrNull, liveDataReason, previewMarket, submitMarket } from './market.ts';
 import { afterOwnFills, cancelOrder, newPerpOrder, noPerpFields, rejectOrder, rejectPending, remainingQty } from './orders.ts';
 import { leverageFor, putOrder } from './state.ts';
@@ -34,6 +34,7 @@ import {
 } from './stops.ts';
 import type { PerpState } from './state.ts';
 import type {
+  MarginPreview,
   MarginWarning,
   PerpActionResult,
   PerpCtx,
@@ -337,6 +338,16 @@ export class PerpEngine {
   /** Move margin out of the symbol's position, at most what stays safe at a fresh mark price. */
   removeMargin(symbol: string, amount: string, ctx: PerpCtx): PerpActionResult {
     return removeMargin(this.s, symbol, amount, ctx);
+  }
+
+  /** What adding or removing margin would do right now, without changing state. */
+  previewMargin(symbol: string, action: 'add' | 'remove', amount: string, ctx: PerpCtx): MarginPreview {
+    return previewMargin(this.s, symbol, action, amount, ctx);
+  }
+
+  /** The margin that may be removed from the symbol's position now; null without a fresh mark. */
+  maxRemovable(symbol: string, ctx: PerpCtx): Decimal | null {
+    return maxRemovable(this.s, symbol, ctx);
   }
 
   /** What submit would do right now, without changing state. */

@@ -165,3 +165,66 @@ describe('removeMargin', () => {
     expect(refused(engine.removeMargin('BTCUSDT', '1', ctx))).toBe('Mark price unavailable; try again when live data is back');
   });
 });
+
+describe('previewMargin', () => {
+  it('reports the margin and liquidation price an add would leave, changing nothing', () => {
+    const { engine, ctx, lev, position } = setup();
+    openLong(engine, ctx);
+    const p = engine.previewMargin('BTCUSDT', 'add', '100', ctx);
+    expect(p.rejectReason).toBeNull();
+    expect(p.marginAfter?.toString()).toBe('496');
+    expect(p.liquidationPriceAfter?.toFixed(8)).toBe('75341.36546185');
+    expect(position()!.margin.toString()).toBe('396');
+    expect(lev().free.toString()).toBe('600');
+  });
+
+  it('checks a removal as removeMargin does: the same refusal, and the maximum at the fresh mark', () => {
+    const { engine, ctx, market, lev, position } = setup();
+    openLong(engine, ctx);
+    market.setMarkPrice('BTCUSDT', D('82000'));
+    const over = engine.previewMargin('BTCUSDT', 'remove', '186.00000001', ctx);
+    expect(over.rejectReason).toBe(refused(engine.removeMargin('BTCUSDT', '186.00000001', ctx)));
+    expect([over.marginAfter, over.liquidationPriceAfter]).toEqual([null, null]);
+    expect(over.maxRemovable?.toString()).toBe('186');
+    const fits = engine.previewMargin('BTCUSDT', 'remove', '186', ctx);
+    expect(fits.rejectReason).toBeNull();
+    expect(fits.marginAfter?.toString()).toBe('210');
+    expect(fits.liquidationPriceAfter?.toFixed(8)).toBe('78212.85140562');
+    expect(position()!.margin.toString()).toBe('396');
+    expect(lev().free.toString()).toBe('600');
+  });
+
+  it('with a stale mark: no maximum and the removal refused, while an add still previews', () => {
+    const { engine, ctx, market } = setup();
+    openLong(engine, ctx);
+    market.setMarkFresh('BTCUSDT', false);
+    const remove = engine.previewMargin('BTCUSDT', 'remove', '1', ctx);
+    expect(remove).toMatchObject({ rejectReason: 'Mark price unavailable; try again when live data is back', maxRemovable: null });
+    expect(engine.previewMargin('BTCUSDT', 'add', '1', ctx).rejectReason).toBeNull();
+  });
+
+  it('gives the refusal without a position, over the free balance, or for a bad amount', () => {
+    const { engine, ctx } = setup();
+    expect(engine.previewMargin('BTCUSDT', 'add', '10', ctx).rejectReason).toBe('No open position on BTCUSDT');
+    openLong(engine, ctx);
+    expect(engine.previewMargin('BTCUSDT', 'add', '600.00000001', ctx).rejectReason).toBe(
+      'Insufficient free USDT in leverage wallet: need 600.00000001, available 600',
+    );
+    expect(engine.previewMargin('BTCUSDT', 'add', 'lots', ctx).rejectReason).toMatch(/^Invalid amount "lots"/);
+  });
+});
+
+describe('maxRemovable', () => {
+  it('is what removeMargin allows now; null without a fresh mark, the tiers or a position', () => {
+    const { engine, ctx, market } = setup();
+    expect(engine.maxRemovable('BTCUSDT', ctx)).toBeNull();
+    openLong(engine, ctx);
+    market.setMarkPrice('BTCUSDT', D('82000'));
+    expect(engine.maxRemovable('BTCUSDT', ctx)?.toString()).toBe('186');
+    market.setMarkFresh('BTCUSDT', false);
+    expect(engine.maxRemovable('BTCUSDT', ctx)).toBeNull();
+    market.setMarkFresh('BTCUSDT', true);
+    market.clearBrackets('BTCUSDT');
+    expect(engine.maxRemovable('BTCUSDT', ctx)).toBeNull();
+  });
+});

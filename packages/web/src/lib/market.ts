@@ -109,6 +109,26 @@ export function pctOf(part: string, whole: string, dp = 2): string {
   return fixed(divRound(scaled(part, s) * 100n * 10n ** BigInt(dp), d), dp);
 }
 
+/** n / d rounded towards minus infinity ('floor') or plus infinity ('ceil'); d must not be 0. */
+function divDir(n: bigint, d: bigint, mode: 'floor' | 'ceil'): bigint {
+  const q = n / d;
+  if (q * d === n) return q;
+  const negative = (n < 0n) !== (d < 0n);
+  if (mode === 'floor') return negative ? q - 1n : q;
+  return negative ? q : q + 1n;
+}
+
+/**
+ * part / whole * 100 with `dp` decimals, rounded towards minus infinity ('floor') or plus infinity
+ * ('ceil'): for figures that must never look better than they are. Throws if whole is 0.
+ */
+export function pctOfDir(part: string, whole: string, dp: number, mode: 'floor' | 'ceil'): string {
+  const s = Math.max(scaleOf(part), scaleOf(whole));
+  const d = scaled(whole, s);
+  if (d === 0n) throw new Error('Division by zero');
+  return fixed(divDir(scaled(part, s) * 100n * 10n ** BigInt(dp), d, mode), dp);
+}
+
 // ---- order book ----
 
 export interface DepthRow {

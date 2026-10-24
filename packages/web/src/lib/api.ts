@@ -93,7 +93,28 @@ export type WirePosition = Wire<Position> & {
   marginRatio: string | null;
   /** Null when the position can no longer be liquidated by a price move. */
   liquidationPrice: string | null;
+  /** The most margin a removal may take now (the engine's figure at the fresh mark); null without a fresh mark. */
+  maxRemovableMargin: string | null;
 };
+
+/** What adding or removing margin would do now, as the server judges it (POST /api/perp/margin/preview). */
+export interface WireMarginPreview {
+  marginAfter: string | null;
+  /** Unrounded; null when refused, or when the position could no longer be liquidated by a price move. */
+  liquidationPriceAfter: string | null;
+  maxRemovable: string | null;
+  rejectReason: string | null;
+}
+
+/** A liquidation's figures as data (exact decimal strings): the position, the mark, the margin lost and the fee in it. */
+export interface LiquidationDetail {
+  symbol: string;
+  side: 'long' | 'short';
+  qty: string;
+  markPrice: string;
+  marginLost: string;
+  liquidationFee: string;
+}
 
 /** Account value plus the raw wallet balances and each held coin's cost basis. */
 export type AccountSnapshot = Wire<AccountValue> & {
@@ -118,6 +139,8 @@ export interface NoticeMessage {
     | 'catch_up';
   level: 'info' | 'warn' | 'error';
   text: string;
+  /** On a liquidation notice: its figures as data. */
+  liquidation?: LiquidationDetail;
 }
 
 export interface Candle {
@@ -286,5 +309,19 @@ export const api = {
       symbol,
       leverage,
     }),
+  /** Margin in or out of the symbol's position: the position after it; a refusal is an ApiError with the reason. */
+  changeMargin: (symbol: string, action: 'add' | 'remove', amount: string) =>
+    request<{ position: WirePosition | null }>('POST', '/api/perp/margin', { symbol, action, amount }).then((r) => r.position),
+  /** Read-only: what the same change would do now; a refusal comes back as its rejectReason. */
+  marginPreview: (req: { symbol: string; action: 'add' | 'remove'; amount: string }) =>
+    request<WireMarginPreview>('POST', '/api/perp/margin/preview', req),
+  /** Close-position stops on the position; refused legs come back rejected, with the reason. */
+  setPositionTpSl: (symbol: string, legs: { stopLoss?: string; takeProfit?: string }) =>
+    request<{ orders: WirePerpOrder[] }>('POST', '/api/perp/tpsl', { symbol, ...legs }).then((r) => r.orders),
+  /** A reduce-only market order against the position: `qty` of it, or all of it without. */
+  closePosition: (symbol: string, qty?: string) =>
+    request<{ order: WirePerpOrder }>('POST', '/api/perp/close', qty === undefined ? { symbol } : { symbol, qty }).then(
+      (r) => r.order,
+    ),
   login: (password: string) => request<{ ok: true }>('POST', '/api/login', { password }),
 };

@@ -33,13 +33,13 @@ import {
   fillMarkers,
   fmtChartTime,
   fmtTick,
-  liqPriceAtTick,
   liquidationMark,
   mergeCandles,
   perpMarkers,
   toBar,
 } from '../lib/market.ts';
 import type { LiquidationMark } from '../lib/market.ts';
+import { chartLines } from '../lib/positions.ts';
 import { Button, Segmented } from './ui.tsx';
 
 /** Load older candles when the left edge of the view comes within this many bars of the oldest one. */
@@ -154,7 +154,8 @@ interface MarkerData {
  * per fill (on a perpetual: entries, increases, reductions, closes and liquidations). With an
  * open perp position, its entry price is a line and its liquidation price a red line labelled
  * 'Liq.' and the price. Colours follow the light/dark theme; times show in local time. While the
- * market's feed is stale the last-price line is dimmed.
+ * market's feed is stale the last-price line is dimmed, and the position's lines while its mark is
+ * stale or our connection is down.
  */
 export function PriceChart({ market, symbol, interval }: { market: Market; symbol: string; interval: Interval }) {
   const box = useRef<HTMLDivElement>(null);
@@ -173,12 +174,12 @@ export function PriceChart({ market, symbol, interval }: { market: Market; symbo
   );
   // The open position's prices only (not the position, which is pushed anew every second).
   const position = (s: LiveState) => (market === 'perp' ? s.positions?.find((p) => p.symbol === symbol) : undefined);
-  const entryPrice = useLive((s) => position(s)?.entryPrice ?? null);
+  const entryPrice = useLive((s) => chartLines(position(s), tick, s.conn !== 'open').entry);
   // At the tick, rounded towards the mark as the notices show it; the axis label shows exactly this.
-  const liqPrice = useLive((s) => {
-    const p = position(s);
-    return p?.liquidationPrice ? liqPriceAtTick(p.liquidationPrice, p.side, tick) : null;
-  });
+  const liqPrice = useLive((s) => chartLines(position(s), tick, s.conn !== 'open').liq);
+  // Dimmed like the last-price line while our connection is down or the position's mark is not
+  // live: the prices themselves hold, but how near the mark is to them cannot be judged.
+  const linesLive = useLive((s) => !chartLines(position(s), tick, s.conn !== 'open').dimmed);
 
   /** Redraw the fill markers for the candles now loaded. */
   const drawMarkers = () => {
@@ -205,8 +206,9 @@ export function PriceChart({ market, symbol, interval }: { market: Market; symbo
     for (const line of positionLines.current) l.series.removePriceLine(line);
     positionLines.current = [];
     // The chart draws each title beside the line's price on the axis: 'Liq.' then the price.
-    const entry = { title: 'Entry', color: l.palette.muted, width: 1 as const, style: LineStyle.Dashed };
-    const liq = { title: 'Liq.', color: l.palette.down, width: 2 as const, style: LineStyle.Solid };
+    const greyed = { color: l.palette.faint, style: LineStyle.Dotted };
+    const entry = { title: 'Entry', width: 1 as const, ...(linesLive ? { color: l.palette.muted, style: LineStyle.Dashed } : greyed) };
+    const liq = { title: 'Liq.', width: 2 as const, ...(linesLive ? { color: l.palette.down, style: LineStyle.Solid } : greyed) };
     const lines = [
       entryPrice !== null && { ...entry, price: entryPrice },
       liqPrice !== null && { ...liq, price: liqPrice },
@@ -327,7 +329,7 @@ export function PriceChart({ market, symbol, interval }: { market: Market; symbo
   useEffect(() => restyle.current(), [fresh]);
 
   // The position's lines follow its entry and liquidation price (and go with the position).
-  useEffect(() => relines.current(), [market, symbol, entryPrice, liqPrice, tick]);
+  useEffect(() => relines.current(), [market, symbol, entryPrice, liqPrice, tick, linesLive]);
 
   // History, live candles and older pages for this symbol and interval.
   useEffect(() => {

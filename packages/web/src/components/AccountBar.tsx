@@ -1,15 +1,18 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
+import type { AccountSnapshot } from '../lib/api.ts';
 import { fmtPct, fmtUsd, fmtUsdFloor } from '../lib/format.ts';
 import { pricesLoading, pricesPausedLabel } from '../lib/holdings.ts';
 import { useLive } from '../lib/live.ts';
+import { leverageWalletLine } from '../lib/positions.ts';
 import { changeClass } from './CoinList.tsx';
 import { DepositDialog } from './DepositDialog.tsx';
 import { TransferDialog } from './TransferDialog.tsx';
 import { Button } from './ui.tsx';
 
 const DASH = '\u2013';
-const LOADING_TITLE = 'A coin you hold has no price yet: total value and net P&L are shown once every held coin has been priced';
+const LOADING_TITLE =
+  'A coin you hold or an open position has no price yet: total value and net P&L are shown once everything has been priced';
 
 function Stat({
   label,
@@ -60,6 +63,46 @@ function WalletStat({ label, free, locked }: { label: string; free?: string; loc
 }
 
 /**
+ * The leverage wallet: free · in orders · in positions, positions valued at the mark (margin plus
+ * unrealised P&L). Positions on a stale mark are dimmed and say so; one never priced shows a dash.
+ */
+function LeverageStat() {
+  const a = useLive((s) => s.account);
+  const line = a ? leverageWalletLine(a) : null;
+  const title = !line
+    ? undefined
+    : line.loading
+      ? 'An open position has no mark price yet: its value is shown once it has one'
+      : line.stale
+        ? `No live mark for ${a!.marksPaused.join(', ')}: positions valued at the last mark received`
+        : 'Leverage wallet = free + in orders + in positions (margin plus unrealised P&L at the mark)';
+  return (
+    <Stat label="Leverage wallet" title={title}>
+      <span className="whitespace-nowrap">{fmtUsdFloor(line?.free)}</span>
+      <span className="text-muted"> free</span>
+      {/* In orders and in positions under it, except on wide desktops (1280 px and up) where all fits on one line. */}
+      <span className="block text-xs text-muted min-[80rem]:inline">
+        <span className="hidden min-[80rem]:inline"> · </span>
+        <span className="whitespace-nowrap">{fmtUsdFloor(line?.inOrders)}</span> in orders ·{' '}
+        <span className={line?.stale ? 'opacity-50' : ''}>
+          <span className="whitespace-nowrap">{line?.loading ? DASH : fmtUsdFloor(line?.inPositions)}</span> in positions
+        </span>
+      </span>
+    </Stat>
+  );
+}
+
+/** Why total value and net P&L are not live: the coins without a live bid, the positions without a live mark. */
+function pausedText(a: AccountSnapshot): string {
+  const parts = [
+    a.pricesPaused.length > 0 && `no live bid for ${a.pricesPaused.join(', ')}`,
+    a.marksPaused.length > 0 && `no live mark for ${a.marksPaused.join(', ')}`,
+  ].filter(Boolean);
+  const text = parts.join('; ');
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}: valued at the last real price received`;
+}
+
+/**
  * What the owner always sees: total value, total deposited, net P&L in $ and %,
  * free and locked dollars per wallet, and the Deposit / Transfer actions.
  */
@@ -68,15 +111,13 @@ export function AccountBar() {
   // Our server connection is down: the numbers are the last ones received, dimmed and labelled.
   const frozen = useLive((s) => s.conn === 'down');
   // Some held coin has no live bid (feed interrupted): total value and net P&L are not live either.
-  // Right after start a held coin may have no bid yet: its value is a placeholder 0, so the headline
-  // would show a loss that is not real. Show a dash until every held coin has been priced once.
+  // Right after start a held coin may have no bid yet (its value is a placeholder 0) or a position no
+  // mark (it counts as its margin only), so the headline would show a figure that is not real. Show a
+  // dash until everything has been priced once.
   const loading = a ? pricesLoading(a) : false;
   const paused = a && !loading ? pricesPausedLabel(a) : null;
-  const pausedTitle = paused
-    ? `No live bid for ${a!.pricesPaused.join(', ')}: valued at the last real bid received (a coin with no price yet counts as $0)`
-    : undefined;
+  const pausedTitle = paused ? pausedText(a!) : undefined;
   const [dialog, setDialog] = useState<'deposit' | 'transfer' | null>(null);
-  const lev = a?.balances.leverage.USDT;
 
   return (
     <div
@@ -126,7 +167,7 @@ export function AccountBar() {
             <span className="whitespace-nowrap">{fmtUsd(a?.totalDeposited)}</span>
           </Stat>
           <WalletStat label="Spot wallet" free={a?.spotUsdtFree} locked={a?.spotUsdtLocked} />
-          <WalletStat label="Leverage wallet" free={lev?.free} locked={lev?.locked} />
+          <LeverageStat />
         </div>
       </div>
 

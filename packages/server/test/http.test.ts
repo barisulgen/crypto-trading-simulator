@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { D, liquidationPrice, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
+import { D, liquidationPrice, maxRemovableMargin, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import { btcBrackets } from '../../engine/test/perpFixtures.ts';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
@@ -583,9 +583,24 @@ describe('perp REST', () => {
       marginRatio: D('3.16').div('29.6').toString(),
       liquidationPrice: liq.toString(),
     });
-    // A stale mark is still shown, flagged; never replaced by a guess.
+    // The most margin a removal may take now, as the engine judges it at the fresh mark.
+    const removable = maxRemovableMargin({
+      brackets: btcBrackets,
+      side: 'long',
+      qty: D('0.01'),
+      entry: D('80000'),
+      margin: D('39.6'),
+      mark: D('79000'),
+      leverage: 20,
+    });
+    expect(p.maxRemovableMargin).toBe(removable.toString());
+    // A stale mark is still shown, flagged; never replaced by a guess. Nothing is removable on it.
     t.perpMarket.setMarkFresh('BTCUSDT', false);
-    expect((await t.call('GET', '/api/positions')).body.positions[0]).toMatchObject({ markPrice: '79000', markFresh: false });
+    expect((await t.call('GET', '/api/positions')).body.positions[0]).toMatchObject({
+      markPrice: '79000',
+      markFresh: false,
+      maxRemovableMargin: null,
+    });
     // Refused without the session.
     expect((await t.call('GET', '/api/positions', undefined, false)).status).toBe(401);
   });
@@ -638,6 +653,35 @@ describe('perp REST', () => {
     // The owner's own mistakes stay 400s.
     t.perpMarket.setBrackets('BTCUSDT', btcBrackets);
     expect((await t.call('POST', '/api/perp/margin', { symbol: 'BTCUSDT', action: 'add', amount: '100000' })).status).toBe(400);
+  });
+
+  it('POST /api/perp/margin/preview: the margin and liquidation price a change would leave, or its refusal; nothing changes', async () => {
+    const t = await perpApp();
+    const preview = (body: object) => t.call('POST', '/api/perp/margin/preview', body);
+    expect((await preview({ symbol: 'BTCUSDT', action: 'add', amount: '10' })).body).toEqual({
+      marginAfter: null,
+      liquidationPriceAfter: null,
+      maxRemovable: null,
+      rejectReason: 'No open position on BTCUSDT',
+    });
+    await openLong(t);
+    const add = await preview({ symbol: 'BTCUSDT', action: 'add', amount: '10' });
+    expect(add.status).toBe(200);
+    expect(add.body).toMatchObject({
+      marginAfter: '49.6',
+      liquidationPriceAfter: liquidationPrice(btcBrackets, 'long', D('0.01'), D('80000'), D('49.6'))!.toString(),
+      rejectReason: null,
+    });
+    expect(add.body.maxRemovable).toMatch(/^[\d.]+$/);
+    const tooMuch = await preview({ symbol: 'BTCUSDT', action: 'remove', amount: '40' });
+    expect(tooMuch.body).toMatchObject({ marginAfter: null, liquidationPriceAfter: null });
+    expect(tooMuch.body.rejectReason).toBe(`At most ${tooMuch.body.maxRemovable} USDT can be removed now`);
+    // Nothing moved.
+    expect((await t.call('GET', '/api/positions')).body.positions[0].margin).toBe('39.6');
+    // Malformed requests are 400s, as for the action itself.
+    expect((await preview({ symbol: 'BTCUSDT', action: 'take', amount: '1' })).body).toEqual({ error: 'Invalid field action' });
+    expect((await preview({ symbol: 'BTCUSDT', action: 'add', amount: 1 })).body).toEqual({ error: 'Invalid field amount' });
+    expect((await preview({ symbol: 'NOPE', action: 'add', amount: '1' })).body).toEqual({ error: 'Unknown symbol NOPE' });
   });
 
   it('POST /api/perp/margin-mode: isolated is accepted, cross is refused for now', async () => {

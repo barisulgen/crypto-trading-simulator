@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AccountBar } from './components/AccountBar.tsx';
 import { FeedIndicator } from './components/FeedIndicator.tsx';
+import { LiquidationAlert } from './components/LiquidationAlert.tsx';
 import { LoginScreen } from './components/LoginScreen.tsx';
 import { Notices } from './components/Notices.tsx';
 import { TestBanner } from './components/TestBanner.tsx';
@@ -91,6 +92,7 @@ export function App() {
         </>
       )}
       <Notices />
+      <LiquidationAlert />
     </div>
   );
 }

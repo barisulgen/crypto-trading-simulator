@@ -7,6 +7,7 @@ import { Panel } from '../components/Panel.tsx';
 import { PerpHeader } from '../components/PerpHeader.tsx';
 import { IntervalPicker, PriceChart } from '../components/PriceChart.tsx';
 import { RecentTrades } from '../components/RecentTrades.tsx';
+import { WarningBanner } from '../components/WarningBanner.tsx';
 import type { Slot } from '../components/Panel.tsx';
 import { fmtPrice } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
@@ -86,8 +87,10 @@ export function TradePage() {
   }, [priceSeq]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col desk:p-1.5">
-      <div className="trade-grid min-h-0 flex-1">
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Full width over the grid while any position nears liquidation; it cannot be dismissed. */}
+      <WarningBanner />
+      <div className="trade-grid min-h-0 flex-1 desk:p-1.5">
         <Panel slot="coins" active={on('coins')} title="Coins">
           <CoinList onPicked={() => setTab('chart')} />
         </Panel>

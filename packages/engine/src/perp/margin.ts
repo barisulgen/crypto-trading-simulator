@@ -7,7 +7,7 @@ import { TIERS_NOT_LOADED } from './rules.ts';
 import { creditUsdt, debitUsdt, freeUsdt } from './state.ts';
 import type { PerpState } from './state.ts';
 import { maxLeverage } from './tiers.ts';
-import type { Bracket, PerpActionResult, PerpCtx, Position } from './types.ts';
+import type { Bracket, MarginPreview, PerpActionResult, PerpCtx, Position } from './types.ts';
 
 /** Leverage, margin mode and the margin of open isolated positions. */
 
@@ -56,17 +56,9 @@ export function setMarginMode(mode: 'isolated' | 'cross'): PerpActionResult {
 }
 
 /** Store the position's new margin and report it with the liquidation price it now has. */
-function changed(
-  s: PerpState,
-  pos: Position,
-  action: 'add' | 'remove',
-  amount: Decimal,
-  margin: Decimal,
-  tiers: Bracket[],
-  ctx: PerpCtx,
-): PerpActionResult {
+function changed(s: PerpState, plan: MarginPlan, ctx: PerpCtx): PerpActionResult {
+  const { pos, action, amount, margin, liquidationPrice: liq } = plan;
   s.positions[pos.symbol] = { ...pos, margin };
-  const liq = liquidationPrice(tiers, pos.side, pos.qty, pos.entryPrice, margin);
   return {
     ok: true,
     events: [
@@ -84,36 +76,22 @@ function changed(
   };
 }
 
-/** Move free leverage USDT into the position's margin. Needs no live data: more margin only adds safety. */
-export function addMargin(s: PerpState, symbol: string, input: string, ctx: PerpCtx): PerpActionResult {
-  const pos = s.positions[symbol];
-  if (!pos) return fail(`No open position on ${symbol}`);
-  const tiers = bracketsOrNull(symbol, ctx);
-  if (!tiers) return fail(TIERS_NOT_LOADED);
-  const read = readMargin(input);
-  if ('reason' in read) return fail(read.reason);
-  const free = freeUsdt(s);
-  if (read.amount.gt(free)) {
-    return fail(`Insufficient free USDT in leverage wallet: need ${read.amount.toString()}, available ${free.toString()}`);
-  }
-  debitUsdt(s, read.amount);
-  return changed(s, pos, 'add', read.amount, pos.margin.plus(read.amount), tiers, ctx);
+/** A margin change that would be accepted: the position, the amount, and the margin and liquidation price after it. */
+interface MarginPlan {
+  pos: Position;
+  action: 'add' | 'remove';
+  amount: Decimal;
+  margin: Decimal;
+  liquidationPrice: Decimal | null;
 }
 
-/**
- * Move margin from the position back to free leverage USDT, up to maxRemovableMargin at the current
- * mark. Never acts on a stale mark.
- */
-export function removeMargin(s: PerpState, symbol: string, input: string, ctx: PerpCtx): PerpActionResult {
-  const pos = s.positions[symbol];
-  if (!pos) return fail(`No open position on ${symbol}`);
-  const tiers = bracketsOrNull(symbol, ctx);
-  if (!tiers) return fail(TIERS_NOT_LOADED);
-  const mark = ctx.market.isMarkFresh(symbol) ? validMark(symbol, ctx) : null;
-  if (!mark) return fail(MARGIN_MARK_UNAVAILABLE);
-  const read = readMargin(input);
-  if ('reason' in read) return fail(read.reason);
-  const max = maxRemovableMargin({
+/** The mark a removal is judged at: a fresh, valid one, else null (never a stale one). */
+function removalMark(symbol: string, ctx: PerpCtx): Decimal | null {
+  return ctx.market.isMarkFresh(symbol) ? validMark(symbol, ctx) : null;
+}
+
+function removable(pos: Position, tiers: Bracket[], mark: Decimal): Decimal {
+  return maxRemovableMargin({
     brackets: tiers,
     side: pos.side,
     qty: pos.qty,
@@ -122,7 +100,84 @@ export function removeMargin(s: PerpState, symbol: string, input: string, ctx: P
     mark,
     leverage: pos.leverage,
   });
-  if (read.amount.gt(max)) return fail(`At most ${max.toString()} USDT can be removed now`);
-  creditUsdt(s, read.amount);
-  return changed(s, pos, 'remove', read.amount, pos.margin.minus(read.amount), tiers, ctx);
+}
+
+/**
+ * Every check of an add or a removal, in the order the actions make them, without changing
+ * anything: the change it would make, or why it is refused. An add needs no live data (more margin
+ * only adds safety); a removal is limited to maxRemovableMargin at a fresh mark.
+ */
+function planMargin(
+  s: PerpState,
+  symbol: string,
+  action: 'add' | 'remove',
+  input: string,
+  ctx: PerpCtx,
+): MarginPlan | { reason: string } {
+  const pos = s.positions[symbol];
+  if (!pos) return { reason: `No open position on ${symbol}` };
+  const tiers = bracketsOrNull(symbol, ctx);
+  if (!tiers) return { reason: TIERS_NOT_LOADED };
+  const mark = action === 'remove' ? removalMark(symbol, ctx) : null;
+  if (action === 'remove' && !mark) return { reason: MARGIN_MARK_UNAVAILABLE };
+  const read = readMargin(input);
+  if ('reason' in read) return read;
+  let margin: Decimal;
+  if (action === 'add') {
+    const free = freeUsdt(s);
+    if (read.amount.gt(free)) {
+      return { reason: `Insufficient free USDT in leverage wallet: need ${read.amount.toString()}, available ${free.toString()}` };
+    }
+    margin = pos.margin.plus(read.amount);
+  } else {
+    const max = removable(pos, tiers, mark!);
+    if (read.amount.gt(max)) return { reason: `At most ${max.toString()} USDT can be removed now` };
+    margin = pos.margin.minus(read.amount);
+  }
+  const liq = liquidationPrice(tiers, pos.side, pos.qty, pos.entryPrice, margin);
+  return { pos, action, amount: read.amount, margin, liquidationPrice: liq };
+}
+
+/** Move free leverage USDT into the position's margin. Needs no live data: more margin only adds safety. */
+export function addMargin(s: PerpState, symbol: string, input: string, ctx: PerpCtx): PerpActionResult {
+  const plan = planMargin(s, symbol, 'add', input, ctx);
+  if ('reason' in plan) return fail(plan.reason);
+  debitUsdt(s, plan.amount);
+  return changed(s, plan, ctx);
+}
+
+/**
+ * Move margin from the position back to free leverage USDT, up to maxRemovableMargin at the current
+ * mark. Never acts on a stale mark.
+ */
+export function removeMargin(s: PerpState, symbol: string, input: string, ctx: PerpCtx): PerpActionResult {
+  const plan = planMargin(s, symbol, 'remove', input, ctx);
+  if ('reason' in plan) return fail(plan.reason);
+  creditUsdt(s, plan.amount);
+  return changed(s, plan, ctx);
+}
+
+/**
+ * The margin that may be removed from the symbol's position now: maxRemovableMargin at a fresh
+ * mark. Null without a position, the leverage tiers or a fresh mark (a removal is then refused).
+ */
+export function maxRemovable(s: PerpState, symbol: string, ctx: PerpCtx): Decimal | null {
+  const pos = s.positions[symbol];
+  const tiers = bracketsOrNull(symbol, ctx);
+  const mark = removalMark(symbol, ctx);
+  return pos && tiers && mark ? removable(pos, tiers, mark) : null;
+}
+
+/** What an add or a removal of margin would do now (see MarginPreview); nothing is changed. */
+export function previewMargin(
+  s: PerpState,
+  symbol: string,
+  action: 'add' | 'remove',
+  input: string,
+  ctx: PerpCtx,
+): MarginPreview {
+  const plan = planMargin(s, symbol, action, input, ctx);
+  const max = maxRemovable(s, symbol, ctx);
+  if ('reason' in plan) return { marginAfter: null, liquidationPriceAfter: null, maxRemovable: max, rejectReason: plan.reason };
+  return { marginAfter: plan.margin, liquidationPriceAfter: plan.liquidationPrice, maxRemovable: max, rejectReason: null };
 }

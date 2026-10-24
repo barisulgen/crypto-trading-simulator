@@ -20,6 +20,7 @@ export { applyBuyToBasis, applySellToBasis, emptyBasis, valueAccount } from './s
 export type { AccountValue, CoinValue, LeverageValue, PositionValue } from './spot/accounting.ts';
 export type {
   Bracket,
+  MarginPreview,
   MarginWarning,
   PerpActionResult,
   PerpCtx,

@@ -6,6 +6,7 @@ import type {
   Candle,
   HealthMap,
   Interval,
+  LiquidationDetail,
   Market,
   MarketHealth,
   Meta,
@@ -45,6 +46,8 @@ export interface Notice {
   at: number;
   /** How many identical copies arrived in quick succession. */
   count: number;
+  /** On a liquidation notice: its figures as data. */
+  liquidation?: LiquidationDetail;
 }
 
 /** The coin and market (spot or its USD-margined perpetual) the trade screen shows. */
@@ -141,10 +144,11 @@ export function initialLiveData(): LiveData {
 
 function addNotice(
   s: Pick<LiveData, 'notices' | 'noticeSeq'>,
-  n: Pick<Notice, 'kind' | 'level' | 'text'>,
+  n: Pick<Notice, 'kind' | 'level' | 'text' | 'liquidation'>,
   now: number,
 ): Pick<LiveData, 'notices' | 'noticeSeq'> {
-  const same = s.notices.findLastIndex((x) => x.text === n.text && x.level === n.level);
+  // A liquidation is never folded into another: each one is shown, and alerted, on its own.
+  const same = n.kind === 'liquidation' ? -1 : s.notices.findLastIndex((x) => x.text === n.text && x.level === n.level);
   const prev = s.notices[same];
   // Errors stay until dismissed, so a repeat of one still on screen is folded into it, however late.
   if (prev && (prev.level === 'error' || now - prev.at < NOTICE_COLLAPSE_MS)) {
@@ -229,7 +233,8 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
       return moved ? { ...next, fillSeq: s.fillSeq + 1 } : next;
     }
     case 'notice': {
-      const notices = addNotice(s, { kind: msg.kind, level: msg.level, text: msg.text }, now);
+      const n = { kind: msg.kind, level: msg.level, text: msg.text, ...(msg.liquidation ? { liquidation: msg.liquidation } : {}) };
+      const notices = addNotice(s, n, now);
       return FILL_NOTICES.has(msg.kind) ? { ...notices, fillSeq: s.fillSeq + 1 } : notices;
     }
     case 'error':

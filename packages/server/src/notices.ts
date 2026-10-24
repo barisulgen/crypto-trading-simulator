@@ -17,6 +17,18 @@ export interface Notice {
     | 'catch_up';
   level: 'info' | 'warn' | 'error';
   text: string;
+  /** A liquidation notice's figures as data (exact decimal strings), for an alert that shows them. */
+  liquidation?: LiquidationDetail;
+}
+
+/** What a liquidation took: the position (symbol, side, quantity), the mark it happened at, the margin lost and the fee in it. */
+export interface LiquidationDetail {
+  symbol: string;
+  side: PositionSide;
+  qty: string;
+  markPrice: string;
+  marginLost: string;
+  liquidationFee: string;
 }
 
 /** What the notices read beyond the events: each market's rules (null before they load) and the positions after the call. */
@@ -95,6 +107,14 @@ export function noticesFor(events: SimEvent[], lookup: NoticeLookup): Notice[] {
           text:
             `LIQUIDATED: ${e.symbol} ${p.side} ${p.qty} at mark ${atTick(e.markPrice, tick)}` +
             ` — margin lost $${usdUp(e.marginLost)} (fee $${usdUp(e.liquidationFee)})`,
+          liquidation: {
+            symbol: e.symbol,
+            side: p.side,
+            qty: p.qty.toString(),
+            markPrice: e.markPrice.toString(),
+            marginLost: e.marginLost.toString(),
+            liquidationFee: e.liquidationFee.toString(),
+          },
         });
         break;
       }
