@@ -801,6 +801,21 @@ describe('perp state', () => {
     expect([...engine.state.orders.keys()].sort()).toEqual(['late', pending.id].sort());
   });
 
+  it('restart: a market order still in flight is rejected and its lock released; any other order is left as it is', () => {
+    const { ctx, engine, lev } = setup();
+    const market = placed(engine.submit(long({ qty: '0.1' }), ctx));
+    const limit = placed(engine.submit(long({ type: 'limit', price: '79000', qty: '0.01' }), ctx));
+    const lockedBefore = lev().locked;
+    expect(engine.rejectRestartedMarket(limit.id, ctx)).toEqual([]);
+    const events = engine.rejectRestartedMarket(market.id, ctx);
+    expect(rejectReason(events)).toBe('Server restarted before execution');
+    expect(engine.state.orders.get(market.id)!.status).toBe('rejected');
+    expect(s(lev().locked)).toBe(s(lockedBefore.minus(market.lockAmount)));
+    expect(s(lev().locked)).toBe(s(limit.lockAmount));
+    expect(engine.rejectRestartedMarket(market.id, ctx)).toEqual([]);
+    expect(engine.rejectRestartedMarket('unknown', ctx)).toEqual([]);
+  });
+
   it('starts with empty positions, settings, cursors and funding', () => {
     const state = emptyPerpState(emptyLedger(['USDT']));
     expect(state.positions).toEqual({});

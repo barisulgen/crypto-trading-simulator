@@ -43,6 +43,7 @@ const account = (over: Partial<AccountSnapshot> = {}): AccountSnapshot =>
     netPnl: '0.849',
     netPnlPct: '0.0849',
     pricesPaused: [],
+    marksPaused: [],
     balances: {
       spot: { USDT: { free: '899.95', locked: '0' }, BTC: { free: '0.499', locked: '0.5' } },
       leverage: { USDT: { free: '0', locked: '0' } },

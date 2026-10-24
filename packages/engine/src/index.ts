@@ -19,6 +19,7 @@ export type { AccountValue, CoinValue, LeverageValue, PositionValue } from './sp
 export type {
   Bracket,
   MarginWarning,
+  PerpActionResult,
   PerpCtx,
   PerpEvent,
   PerpFill,

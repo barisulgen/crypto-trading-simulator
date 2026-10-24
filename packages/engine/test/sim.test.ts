@@ -189,6 +189,9 @@ describe('valueAccount with positions', () => {
     expect([s(p.markPrice), p.markFresh, p.markAt, s(p.unrealizedPnl)]).toEqual(['81000', false, 6000, '100']);
     expect(s(v.total)).toBe('1596');
     expect(v.pricesLoading).toBe(false);
+    // The account-level signal: total value and net P&L are not live while a position's mark is stale.
+    expect(v.marksPaused).toEqual(['BTCUSDT']);
+    expect(valueAccount(sim, () => null, markAt('81000'), ['BTCUSDT']).marksPaused).toEqual([]);
   });
 
   it('never priced: the position counts as its margin only and prices are loading', () => {
@@ -199,6 +202,7 @@ describe('valueAccount with positions', () => {
     expect(s(v.leverage.value)).toBe('996');
     expect(s(v.total)).toBe('1496');
     expect(v.pricesLoading).toBe(true);
+    expect(v.marksPaused).toEqual(['BTCUSDT']);
   });
 
   it('a held coin never priced sets pricesLoading; one priced earlier and now stale does not', () => {

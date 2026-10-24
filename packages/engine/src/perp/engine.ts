@@ -7,6 +7,7 @@ import {
   CANCELLABLE,
   cancelDue,
   ORDER_NOT_OPEN,
+  RESTART_REASON,
   UNKNOWN_ORDER_TYPE,
 } from '../spot/engine.ts';
 import type { ActionResult, AggTrade } from '../types.ts';
@@ -16,7 +17,7 @@ import { checkMark, isolatedModel } from './liquidation.ts';
 import type { LiquidationModel } from './liquidation.ts';
 import { addMargin, removeMargin, setLeverage, setMarginMode } from './margin.ts';
 import { arriveMarket, bracketsOrNull, liveDataReason, previewMarket, submitMarket } from './market.ts';
-import { afterOwnFills, cancelOrder, newPerpOrder, noPerpFields, rejectOrder, remainingQty } from './orders.ts';
+import { afterOwnFills, cancelOrder, newPerpOrder, noPerpFields, rejectOrder, rejectPending, remainingQty } from './orders.ts';
 import { leverageFor, putOrder } from './state.ts';
 import {
   activateAttached,
@@ -273,6 +274,16 @@ export class PerpEngine {
       return [{ type: 'cancel_rejected', market: 'perp', time: ctx.now, order: answered, reason }];
     }
     return cancelOrder(this.s, answered, 'user', remainingQty(order), ctx);
+  }
+
+  /**
+   * On restart: a market order still waiting for its arrival delay never reached the exchange, so
+   * it is rejected and its lock released. A no-op for any other order.
+   */
+  rejectRestartedMarket(orderId: string, ctx: PerpCtx): PerpEvent[] {
+    const order = this.s.orders.get(orderId);
+    if (!order || order.type !== 'market' || order.status !== 'pending') return [];
+    return rejectPending(this.s, order, RESTART_REASON, ctx);
   }
 
   /** Set the symbol's leverage; refused while a position or an opening order is live on it. */

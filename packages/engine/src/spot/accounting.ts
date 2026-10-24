@@ -252,6 +252,11 @@ export interface AccountValue {
   /** Held coins whose bid is stale or missing: total value and net P&L are not live while non-empty. */
   pricesPaused: string[];
   /**
+   * Symbols of open positions whose mark price is stale or missing: like pricesPaused, total value
+   * and net P&L are not live while non-empty.
+   */
+  marksPaused: string[];
+  /**
    * A held coin or an open position has never been priced: it counts as 0 (a coin) or as its margin
    * only (a position), so total value and net P&L would show a loss that is not real.
    */
@@ -325,6 +330,7 @@ export function valueAccount(
     netPnl,
     netPnlPct: totalDeposited.isZero() ? null : netPnl.div(totalDeposited).mul(100),
     pricesPaused: coins.filter((c) => !c.fresh).map((c) => c.asset),
+    marksPaused: positions.filter((p) => !p.markFresh).map((p) => p.symbol),
     pricesLoading: neverPriced,
   };
 }

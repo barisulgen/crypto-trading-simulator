@@ -20,6 +20,7 @@ const account: AccountSnapshot = {
   netPnl: '0',
   netPnlPct: '0',
   pricesPaused: [],
+  marksPaused: [],
   pricesLoading: false,
   balances: {
     spot: { USDT: { free: '1000', locked: '0' } },
