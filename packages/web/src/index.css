@@ -49,9 +49,9 @@
 
 /*
  * Trade screen grid (desk: 900 px and up). Slots by grid area:
- *   coins  - CoinList (T13)          chart  - PriceChart (T14)
- *   book   - OrderBook (T14)         trades - RecentTrades (T14)
- *   form   - OrderForm (T15)         tabs   - BottomTabs (T15)
+ *   coins  - CoinList                chart  - PriceChart
+ *   book   - OrderBook               trades - RecentTrades
+ *   form   - OrderForm               tabs   - BottomTabs
  * Under 900 px every slot is a full-height panel and one is shown at a time (see TradePage).
  * 1280 px and up: book over trades right of the chart; 900-1279 px: side by side under it.
  */

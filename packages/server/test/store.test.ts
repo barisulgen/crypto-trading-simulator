@@ -138,7 +138,7 @@ describe('openDb', () => {
     }
   });
 
-  it('migrations 002 to 005 apply to a Phase 1 database (user_version 1): rows intact, test_data still set', async () => {
+  it('migrations 002 to 005 apply to a spot-only database (user_version 1): rows intact, test_data still set', async () => {
     const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -149,7 +149,7 @@ describe('openDb', () => {
     let db: Db | null = null;
     try {
       const file = join(dir, 'sim.sqlite');
-      // A database as Phase 1 left it: only 001 applied, with data in it.
+      // A spot-only database: only 001 applied, with data in it.
       const v1 = new Database(file);
       v1.exec(readFileSync(new URL('../src/db/migrations/001_init.sql', import.meta.url), 'utf8'));
       v1.pragma('user_version = 1');

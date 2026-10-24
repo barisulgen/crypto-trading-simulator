@@ -939,7 +939,7 @@ export function queryFills(db: Db, seasonId: number, q: { market: Market; symbol
     .all(...(bySymbol ? [seasonId, q.market, q.symbol!, q.limit] : [seasonId, q.market, q.limit])) as FillRow[];
 }
 
-/** Whether the database holds data recorded before catch-up existed (meta.test_data, set only by Phase 1). */
+/** Whether the database holds data recorded before catch-up existed (meta.test_data, set only by the first schema's releases). */
 export function isTestData(db: Db): boolean {
   return db.prepare("SELECT 1 FROM meta WHERE key = 'test_data'").get() !== undefined;
 }

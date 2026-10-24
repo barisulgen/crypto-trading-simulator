@@ -1,4 +1,4 @@
-// History (T16): every recorded event, newest first, with filters (coin, spot or leverage, event
+// History: every recorded event, newest first, with filters (coin, spot or leverage, event
 // type, date range) kept in the hash query, e.g. '#/history?symbol=BTCUSDT&types=fill', so a
 // filtered view survives a reload, can be bookmarked, and Back/Forward step through filter changes.
 import { useEffect, useId, useRef, useState } from 'react';

@@ -86,7 +86,7 @@ const order = (over: Partial<WirePerpOrder>) =>
   ({ symbol: 'BTCUSDT', side: 'buy', reduceOnly: false, status: 'open', ...over }) as WirePerpOrder;
 
 describe('perp quick amounts: the share of free leverage USDT the engine would lock', () => {
-  it("the brief's 600 at 20x case holds for a limit buy at or below the mark (its own price, no open loss)", () => {
+  it('600 USDT free at 20x: a limit buy at or below the mark is sized at its own price, with no open loss', () => {
     // 600 × 20 ÷ 1.01 = 11881.188118811..., less the 3e-8 kept back for the engine's three 8 dp round-ups.
     expect(perpQuickAmount(quick())).toEqual({ amount: '11881.18', belowStep: false, belowCent: false });
     // 0.14851... floored to the 0.001 step.

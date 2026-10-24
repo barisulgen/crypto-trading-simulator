@@ -30,7 +30,7 @@ export function openDb(file: string): Db {
       db.pragma(`user_version = ${m.version}`);
     })();
   }
-  // meta.test_data is never written: only a database created in Phase 1 has it, and keeps it.
+  // meta.test_data is never written: only a database created before catch-up existed has it, and keeps it.
   return db;
 }
 
