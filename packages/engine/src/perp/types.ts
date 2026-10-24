@@ -191,6 +191,8 @@ export type WarnLevel = 0.5 | 0.8 | 0.9;
 export interface MarginWarning {
   symbol: string;
   positionId: string;
+  /** The side of the position warned about. */
+  side: PositionSide;
   level: WarnLevel;
   /** Maintenance margin ÷ margin balance at the mark. */
   ratio: Decimal;

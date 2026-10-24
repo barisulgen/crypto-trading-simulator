@@ -10,6 +10,8 @@ export const FUNDING_POLL_MS = 30_000;
 export const FUNDING_UNSETTLED_LOG_MS = 6 * 3_600_000;
 /** ...and polled this often from then on. It is never estimated. */
 export const FUNDING_SLOW_POLL_MS = 300_000;
+/** Timers are armed in steps of at most this, re-reading the clock each time: a wake from sleep is seen within it. */
+const TIMER_STEP_MS = 60_000;
 /** A fundingRate record within this of the funding time is its settlement. */
 const MATCH_MS = 60_000;
 /** The fundingRate query reaches this far either side of the funding time. */
@@ -63,6 +65,8 @@ export class FundingService {
   private readonly loggedLate = new Set<string>();
   /** Windows whose last poll failed (logged once until a poll answers). */
   private readonly failing = new Set<string>();
+  /** Refusals of the account already logged, by message: each is logged once. */
+  private readonly refusals = new Set<string>();
   private started = false;
   private readonly markListener = (symbol: string, mark: { nextFundingTime: number }) =>
     this.onMark(symbol, mark.nextFundingTime);
@@ -88,11 +92,15 @@ export class FundingService {
     this.d.market.on('mark', this.markListener);
   }
 
+  /** Stops every timer and forgets what was scheduled: a later start() reads the saved windows again. */
   stop(): void {
     this.started = false;
     this.d.market.off('mark', this.markListener);
     for (const cancel of this.timers) cancel();
     this.timers.clear();
+    this.seen.clear();
+    this.loggedLate.clear();
+    this.failing.clear();
   }
 
   /** A mark update naming the symbol's next funding time: its window is scheduled once. */
@@ -105,14 +113,35 @@ export class FundingService {
     if (now >= fundingTime + FUNDING_WINDOW_MS) return; // its window closed before it was seen: catch-up's
     this.seen.set(k, fundingTime);
     this.prune(now);
-    this.at(fundingTime - FUNDING_WINDOW_MS, () => this.safely(ref, () => this.d.sim.openFundingWindow(symbol, fundingTime)));
+    this.at(fundingTime - FUNDING_WINDOW_MS, () => this.open(ref));
     this.at(fundingTime + FUNDING_WINDOW_MS, () => this.close(ref));
   }
 
-  /** The window closes and waits for its settled rate: the first poll is `pollIn` later (30 s on time). */
+  /**
+   * The window opens at T − 15 s. An open that runs at or after T + 15 s (the process slept through
+   * the window) opens nothing: what was held across T is not known live, so that funding time is
+   * left to catch-up, and with no window it is never polled or applied here.
+   */
+  private open(ref: FundingRef): void {
+    if (this.d.now() >= ref.fundingTime + FUNDING_WINDOW_MS) {
+      this.d.logger.warn(
+        `Funding ${ref.symbol} at ${iso(ref.fundingTime)}: the server was paused through its window; left to catch-up`,
+      );
+      return;
+    }
+    this.safely(ref, () => this.d.sim.openFundingWindow(ref.symbol, ref.fundingTime));
+  }
+
+  /**
+   * The window closes and waits for its settled rate: the first poll is `pollIn` later (30 s on
+   * time). Only a window that is waiting is polled: one never opened (the open came too late, or
+   * was refused) or already settled is not. A close that runs late finds the window already closed
+   * by the first engine call after T + 15 s (the runner closes due windows before each one).
+   */
   private close(ref: FundingRef, pollIn = FUNDING_POLL_MS): void {
     if (!this.safely(ref, () => this.d.sim.closeFundingWindow(ref.symbol, ref.fundingTime))) return;
-    this.at(this.d.now() + pollIn, () => void this.poll(ref));
+    const waiting = this.d.sim.fundingWindows().pending.some((w) => refKey(w) === refKey(ref));
+    if (waiting) this.at(this.d.now() + pollIn, () => void this.poll(ref));
   }
 
   /** One fundingRate poll; the settlement found is applied, otherwise the next poll is scheduled. */
@@ -133,10 +162,10 @@ export class FundingService {
     if (!this.started) return;
     if (settlement !== null) {
       const { rate, markPrice } = settlement;
-      if (this.safely(ref, () => this.d.sim.applyFunding(ref.symbol, T, rate, markPrice))) {
-        this.loggedLate.delete(ref.symbol);
-        return;
-      }
+      // Applied, or refused by the account: either way this window is done here. A refused one
+      // stays pending in the saved state and is polled again at the next start.
+      if (this.safely(ref, () => this.d.sim.applyFunding(ref.symbol, T, rate, markPrice))) this.loggedLate.delete(ref.symbol);
+      return;
     }
     const late = this.d.now() - T >= FUNDING_UNSETTLED_LOG_MS;
     if (late && !this.loggedLate.has(ref.symbol)) {
@@ -148,25 +177,38 @@ export class FundingService {
 
   /**
    * Runs one engine call for the window; a refusal (the runner stopped, or its state failed its
-   * integrity check) is logged and reported as false, never thrown into a timer.
+   * integrity check) is reported as false, never thrown into a timer, and logged once per message.
    */
   private safely(ref: FundingRef, fn: () => unknown): boolean {
     try {
       fn();
       return true;
     } catch (e) {
-      this.d.logger.warn(`Funding ${ref.symbol} at ${iso(ref.fundingTime)}: ${(e as Error).message}`);
+      const message = (e as Error).message;
+      if (!this.refusals.has(message)) {
+        this.refusals.add(message);
+        this.d.logger.warn(`Funding ${ref.symbol} at ${iso(ref.fundingTime)}: ${message}; funding waits until a restart`);
+      }
       return false;
     }
   }
 
-  /** Runs `fn` at epoch ms `when` (at once if past), unless stopped first. */
+  /**
+   * Runs `fn` at epoch ms `when` (at once if past), unless stopped first. The timer is armed in
+   * steps of at most 60 s and the clock read again at each, so an early timer is re-armed and one
+   * a sleep held back runs within a minute of the wake; `fn` itself reads the clock to see how late it is.
+   */
   private at(when: number, fn: () => void): void {
-    const cancel = this.d.setTimer(() => {
-      this.timers.delete(cancel);
-      if (this.started) fn();
-    }, Math.max(0, when - this.d.now()));
-    this.timers.add(cancel);
+    const arm = () => {
+      const cancel = this.d.setTimer(() => {
+        this.timers.delete(cancel);
+        if (!this.started) return;
+        if (this.d.now() < when) return arm();
+        fn();
+      }, Math.min(TIMER_STEP_MS, Math.max(0, when - this.d.now())));
+      this.timers.add(cancel);
+    };
+    arm();
   }
 
   private prune(now: number): void {

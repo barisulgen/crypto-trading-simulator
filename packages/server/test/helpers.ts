@@ -187,6 +187,9 @@ export class TestPerpMarket extends FakePerpMarket {
   private readonly emitter = new EventEmitter();
   staleReason = 'Disconnected';
   readonly consumed: { symbol: string; side: Side; levels: PriceLevel[] }[] = [];
+  /** The clock mark receive times are read from (runnerHarness sets it to its fake clock). */
+  now: () => number = () => 0;
+  private readonly markTimes = new Map<string, number>();
   constructor(private readonly symbols: string[] = ['BTCUSDT']) {
     super();
   }
@@ -198,6 +201,9 @@ export class TestPerpMarket extends FakePerpMarket {
     this.emitter.off(event, cb);
     return this;
   }
+  markReceivedAt(symbol: string): number | null {
+    return this.markTimes.get(symbol) ?? null;
+  }
   /** Deliver a live futures trade, as PerpMarketData does. */
   trade(symbol: string, t: AggTrade): void {
     this.setLastPrice(symbol, t.price);
@@ -206,6 +212,7 @@ export class TestPerpMarket extends FakePerpMarket {
   /** Deliver a mark price update (recorded as the market's mark first, as PerpMarketData does). */
   mark(symbol: string, price: string, nextFundingTime = 0, fundingRate = '0.0001'): void {
     this.setMarkPrice(symbol, D(price));
+    this.markTimes.set(symbol, this.now());
     const m: MarkUpdate = { markPrice: D(price), indexPrice: D(price), fundingRate: D(fundingRate), nextFundingTime, eventTime: 0 };
     this.emitter.emit('mark', symbol, m);
   }
@@ -244,6 +251,7 @@ export function runnerHarness(
   const seasonId = currentSeasonId(db, () => clock.now);
   const market = opts.market ?? new TestMarket(symbols);
   const perp = opts.perpMarket ?? new TestPerpMarket(symbols);
+  perp.now = () => clock.now;
   const health = new FakeHealth(() => clock.now);
   const perpHealth = new FakeHealth(() => clock.now);
   const ledger = loadLedger(db, seasonId, ['USDT', ...symbols.map((s) => s.replace(/USDT$/, ''))]);

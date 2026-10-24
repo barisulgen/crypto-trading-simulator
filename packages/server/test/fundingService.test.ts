@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { D } from '@sim/engine';
 import type { Decimal } from '@sim/engine';
 import { FUNDING_POLL_MS, FUNDING_SLOW_POLL_MS, FundingService, FUNDING_UNSETTLED_LOG_MS } from '../src/funding/fundingService.ts';
-import type { FundingSim } from '../src/funding/fundingService.ts';
+import type { FundingRef, FundingSim } from '../src/funding/fundingService.ts';
 import type { FundingRateQuery } from '../src/binance/futuresRest.ts';
 import { FakeClock, runnerHarness, tick, TestPerpMarket } from './helpers.ts';
 
@@ -23,6 +23,8 @@ function fakeRest(clock: FakeClock) {
   };
   return { rest, answers, calls };
 }
+
+const silentLogger = () => ({ info() {}, warn() {}, error() {} });
 
 const settled = (fundingTime = T + 7, fundingRate = '0.0001', markPrice = '80000') => [
   { symbol: 'BTCUSDT', fundingTime, fundingRate, markPrice },
@@ -198,13 +200,114 @@ describe('FundingService', () => {
     expect(t.fundingEvents()).toHaveLength(1);
   });
 
+  it('a suspend past T + 15 s before the open timer fires: no window is opened and the live service applies nothing for T', async () => {
+    const t = await setup({ clock: new FakeClock(T - 4 * 3_600_000) }); // a long held across T
+    t.funding.start();
+    t.perp.mark('BTCUSDT', '80000', T);
+    await t.advance(60_000);
+    t.clock.now = T + 2 * 3_600_000; // the laptop slept through the window: no timer ran meanwhile
+    t.answers.push(settled(), settled(), settled());
+    await t.advance(10 * 60_000);
+    expect(t.windows().windows).toEqual({});
+    expect(t.windows().pending).toEqual([]);
+    expect(t.windows().applied).toEqual({});
+    expect(t.calls).toEqual([]);
+    expect(t.fundingEvents()).toEqual([]);
+    expect(t.logs.filter((l) => l.includes('left to catch-up'))).toHaveLength(1);
+  });
+
+  it('timers are armed in steps of at most 60 s, so a wake from sleep is noticed within a minute', async () => {
+    const clock = new FakeClock(T - 4 * 3_600_000);
+    const delays: number[] = [];
+    const setTimer = (fn: () => void, ms: number) => {
+      delays.push(ms);
+      return clock.setTimer(fn, ms);
+    };
+    const sim: FundingSim = {
+      fundingWindows: () => ({ open: [], pending: [] }),
+      openFundingWindow: () => {},
+      closeFundingWindow: () => {},
+      applyFunding: () => {},
+    };
+    const market = new TestPerpMarket();
+    const service = new FundingService({ rest: fakeRest(clock).rest, sim, market, now: () => clock.now, setTimer, logger: silentLogger() });
+    service.start();
+    market.mark('BTCUSDT', '80000', T);
+    expect(delays.length).toBeGreaterThan(0);
+    expect(Math.max(...delays)).toBeLessThanOrEqual(60_000);
+    service.stop();
+  });
+
+  it('a close that runs late: a position change after T + 15 s is never added to the window', async () => {
+    const t = await setup();
+    t.funding.start();
+    t.perp.mark('BTCUSDT', '80000', T);
+    await t.advance(T - t.clock.now); // the window is open, the long 0.1 in it
+    expect(t.windows().windows.BTCUSDT?.fundingTime).toBe(T);
+    t.clock.now = T + 3_600_000; // slept from T to T + 1 h
+    // An engine call before the service's close timer runs: the runner closes the due window first.
+    t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.1' });
+    expect(t.windows().windows).toEqual({});
+    expect(t.windows().pending.map((w) => [w.fundingTime, w.long.max.toString()])).toEqual([[T, '0.1']]);
+    t.answers.push(settled());
+    await t.advance(FUNDING_POLL_MS + 1000);
+    expect(t.sim.perp.state.positions.BTCUSDT!.qty.toString()).toBe('0.2');
+    expect(t.fundingEvents().map((e) => [e.payload.qty, e.payload.amount])).toEqual([['0.1', '-0.8']]);
+  });
+
+  it('while the account refuses engine calls, a window is given up after one logged refusal: no endless polling', async () => {
+    const clock = new FakeClock(T - 60_000);
+    const sim: FundingSim = {
+      fundingWindows: () => ({ open: [], pending: [{ symbol: 'BTCUSDT', fundingTime: T - 8 * 3_600_000 }] }),
+      openFundingWindow: () => {
+        throw new Error('Account state failed integrity check; see server log');
+      },
+      closeFundingWindow: () => {
+        throw new Error('Account state failed integrity check; see server log');
+      },
+      applyFunding: () => {
+        throw new Error('Account state failed integrity check; see server log');
+      },
+    };
+    const market = new TestPerpMarket();
+    const r = fakeRest(clock);
+    r.answers.push(settled(T - 8 * 3_600_000));
+    const logs: string[] = [];
+    const logger = { info: (m: string) => logs.push(m), warn: (m: string) => logs.push(m), error: (m: string) => logs.push(m) };
+    const service = new FundingService({ rest: r.rest, sim, market, now: () => clock.now, setTimer: clock.setTimer, logger });
+    service.start();
+    market.mark('BTCUSDT', '80000', T);
+    for (let i = 0; i < 24 * 60; i++) {
+      clock.advance(60_000);
+      await tick();
+    }
+    expect(r.calls).toHaveLength(1); // the pending window's one poll; its refused apply ends it
+    expect(logs.filter((l) => l.includes('integrity check'))).toHaveLength(1);
+    service.stop();
+  });
+
+  it('stop() then start() in one process schedules the coming windows again', async () => {
+    const t = await setup();
+    t.funding.start();
+    t.perp.mark('BTCUSDT', '80000', T);
+    t.funding.stop();
+    t.funding.start();
+    t.perp.mark('BTCUSDT', '80000', T);
+    await t.advance(T - t.clock.now);
+    expect(t.windows().windows.BTCUSDT?.fundingTime).toBe(T);
+  });
+
   it('works against any FundingSim: open, close and apply are called with the funding time and the settled values', async () => {
     const clock = new FakeClock(T - 60_000);
     const calls: string[] = [];
+    const pending: FundingRef[] = [];
     const sim: FundingSim = {
-      fundingWindows: () => ({ open: [], pending: [] }),
+      fundingWindows: () => ({ open: [], pending }),
       openFundingWindow: (s, ft) => void calls.push(`open ${s} T${ft - T} at T${clock.now - T}`),
-      closeFundingWindow: (s, ft) => void calls.push(`close ${s} T${ft - T} at T+${clock.now - T}`),
+      closeFundingWindow: (s, ft) => {
+        calls.push(`close ${s} T${ft - T} at T+${clock.now - T}`);
+        pending.push({ symbol: s, fundingTime: ft });
+      },
       applyFunding: (s, ft, rate: Decimal, mark: Decimal) => void calls.push(`apply ${s} T${ft - T} ${rate} ${mark} at T+${clock.now - T}`),
     };
     const market = new TestPerpMarket();

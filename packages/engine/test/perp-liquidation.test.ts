@@ -80,6 +80,7 @@ describe('margin warnings (long 0.1 @80000, margin 396)', () => {
     const half = warningOf(mark(market, engine, '76600', ctx));
     expect(half.symbol).toBe('BTCUSDT');
     expect(half.positionId).toBe(id);
+    expect(half.side).toBe('long');
     expect(half.level).toBe(0.5);
     expect(half.ratio.toFixed(6)).toBe('0.547143');
     expect(s(half.markPrice)).toBe('76600');
@@ -209,6 +210,13 @@ describe('liquidation (long 0.1 @80000, margin 396, free 600)', () => {
     expect(s(liq.marginLost)).toBe('396');
     expect(s(lev().free)).toBe('600');
     expect(s(lev().locked)).toBe('0');
+  });
+
+  it("a warning names the position's side: a short is warned as the mark rises", () => {
+    const { market, ctx, engine } = setup();
+    execute(engine, order({ side: 'sell', qty: '0.1' }), ctx);
+    const w = warningOf(mark(market, engine, '83400', ctx));
+    expect([w.side, w.level]).toEqual(['short', 0.5]);
   });
 
   it('a short is liquidated when the mark rises', () => {

@@ -101,13 +101,13 @@ export function noticesFor(events: SimEvent[], lookup: NoticeLookup): Notice[] {
  * A margin warning: level 0.5 warns, 0.8 and 0.9 are errors. The ratio is shown rounded up and the
  * liquidation price rounded towards the mark (see liqText), so neither looks safer than it is.
  */
-export function marginWarningNotice(w: MarginWarning, side: PositionSide, rules: PerpRules | null): Notice {
+export function marginWarningNotice(w: MarginWarning, rules: PerpRules | null): Notice {
   const ratio = w.ratio.mul(100).toFixed(1, Decimal.ROUND_UP);
-  const liq = w.liquidationPrice === null ? '' : ` — liquidation at ${liqText(w.liquidationPrice, side, tickOf(rules))}`;
+  const liq = w.liquidationPrice === null ? '' : ` — liquidation at ${liqText(w.liquidationPrice, w.side, tickOf(rules))}`;
   return {
     kind: 'margin_warning',
     level: w.level === 0.5 ? 'warn' : 'error',
-    text: `Margin ratio ${ratio}% on ${w.symbol} ${side}${liq}`,
+    text: `Margin ratio ${ratio}% on ${w.symbol} ${w.side}${liq}`,
   };
 }
 

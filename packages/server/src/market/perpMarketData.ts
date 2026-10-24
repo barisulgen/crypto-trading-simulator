@@ -57,6 +57,8 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
   private readonly live: LiveMarket;
   private readonly ruleMap = new Map<string, PerpRules>();
   private readonly mark = new Map<string, MarkUpdate>();
+  /** Per symbol, when its last mark update was received (local clock). */
+  private readonly markAt = new Map<string, number>();
   private tierSet: TierSet | null = null;
   private started = false;
   /** Called once rules and tiers have both loaded (see ready()). */
@@ -82,6 +84,7 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
     });
     d.feed.on('mark', (symbol: string, m: MarkUpdate) => {
       this.mark.set(symbol, m);
+      this.markAt.set(symbol, this.now());
       this.emit('mark', symbol, m);
     });
     d.feed.on('book', (symbol: string, levels?: DepthLevels) => {
@@ -206,6 +209,11 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
     return this.mark.get(symbol)?.markPrice ?? null;
   }
 
+  /** When the last mark update was received (local clock), fresh or not; null before the first. */
+  markReceivedAt(symbol: string): number | null {
+    return this.markAt.get(symbol) ?? null;
+  }
+
   rules(symbol: string): PerpRules {
     const r = this.ruleMap.get(symbol);
     if (!r) throw new Error(`Rules not loaded for ${symbol}`);
@@ -279,14 +287,18 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
     return this.tierSet ? { source: this.tierSet.source, fetchedAt: this.tierSet.fetchedAt } : null;
   }
 
-  /** Why the symbol is not fresh, or null. A halt first: the streams go quiet during one, which would otherwise hide it. */
+  /**
+   * Why the symbol is not fresh, or null. Missing rules or tiers first: the perp feed starts only
+   * once they are loaded, so a disconnected feed would otherwise hide them. Then a halt: the
+   * streams go quiet during one, which would otherwise hide it.
+   */
   private reason(symbol: string, now: number): string | null {
     return (
+      (this.ruleMap.has(symbol) ? null : 'Trading rules not loaded') ??
+      (this.tierSet?.brackets[symbol] ? null : 'Leverage tiers not loaded') ??
       this.halted(symbol) ??
       this.health.depth.reason(symbol, now) ??
-      this.health.market.reason(symbol, now) ??
-      (this.ruleMap.has(symbol) ? null : 'Trading rules not loaded') ??
-      (this.tierSet?.brackets[symbol] ? null : 'Leverage tiers not loaded')
+      this.health.market.reason(symbol, now)
     );
   }
 

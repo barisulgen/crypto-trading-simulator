@@ -220,6 +220,26 @@ describe('PerpMarketData freshness', () => {
     expect(t.md.healthSnapshot().BTCUSDT).toEqual({ fresh: false, reason: 'Trading halted on Binance (SETTLING)' });
   });
 
+  it('with rules or tiers never loaded, the reason says so, even before the feed is connected', async () => {
+    const t = stack();
+    expect(t.md.healthSnapshot().BTCUSDT!.reason).toBe('Trading rules not loaded');
+    await t.md.refreshRules();
+    expect(t.md.healthSnapshot().BTCUSDT!.reason).toBe('Leverage tiers not loaded');
+    await t.md.refreshTiers();
+    expect(t.md.healthSnapshot().BTCUSDT!.reason).toBe('Disconnected');
+  });
+
+  it('markReceivedAt is when the last mark update arrived; null before any', async () => {
+    const t = stack();
+    expect(t.md.markReceivedAt('BTCUSDT')).toBeNull();
+    await t.sync();
+    const at = t.clock.now;
+    await t.advance(700);
+    expect(t.md.markReceivedAt('BTCUSDT')).toBe(at);
+    t.mark();
+    expect(t.md.markReceivedAt('BTCUSDT')).toBe(at + 700);
+  });
+
   it('markStalled makes the book wait for current depth and the mark for a current mark; lastFrameAt is the older socket', async () => {
     const t = stack();
     await t.sync();

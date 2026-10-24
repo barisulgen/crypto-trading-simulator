@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   ctxFor,
+  FUNDING_WINDOW_MS,
   liquidationPrice,
   ORDER_NOT_OPEN,
   RESTART_REASON,
@@ -120,6 +121,8 @@ export interface RunnerMark {
 
 /** What the runner reads from PerpMarketData beyond the perp engine's PerpMarketView. */
 export interface RunnerPerpMarket extends PerpMarketView {
+  /** When the last mark update was received (local clock); null before the first. */
+  markReceivedAt(symbol: string): number | null;
   /** A saved taker fill of a `side` order took `levels`: later walks see them reduced. */
   consume(symbol: string, side: Side, levels: PriceLevel[]): void;
   healthSnapshot(): HealthMap;
@@ -400,7 +403,8 @@ export class EngineRunner implements FundingSim {
     const perp = this.d.perpMarket;
     const mark = (symbol: string) => {
       const price = perp.markPrice(symbol);
-      return price === null ? null : { price, fresh: perp.isMarkFresh(symbol) };
+      if (price === null) return null;
+      return { price, fresh: perp.isMarkFresh(symbol), at: perp.markReceivedAt(symbol) ?? undefined };
     };
     return valueAccount(this.d.sim, (s) => this.d.spotMarket.bestBid(s), { mark }, this.d.symbols);
   }
@@ -473,13 +477,26 @@ export class EngineRunner implements FundingSim {
     this.refuseIfDead();
     let result: T;
     try {
-      result = call(this.ctx());
+      const ctx = this.ctx();
+      this.closeDueFundingWindows(ctx);
+      result = call(ctx);
     } catch (e) {
       this.die('engine call failed', e);
       throw e;
     }
     this.commit(Array.isArray(result) ? result : result.ok ? result.events : [], gaps, extra);
     return result;
+  }
+
+  /**
+   * Before every engine call: a funding window still open at or after fundingTime + 15 s is closed
+   * first (its own close timer may have been held back by a sleep), so no change after the window
+   * ever counts in it. Saved with the call.
+   */
+  private closeDueFundingWindows(ctx: SimCtx): void {
+    for (const w of Object.values(this.d.sim.perp.state.funding.windows)) {
+      if (ctx.now >= w.fundingTime + FUNDING_WINDOW_MS) this.d.sim.closeFundingWindow(w.symbol, w.fundingTime, ctx);
+    }
   }
 
   private commit(events: SimEvent[], gaps: FeedGap[] = [], extra: () => Notice[] = () => []): void {
@@ -629,6 +646,7 @@ export class EngineRunner implements FundingSim {
    */
   private recover(): void {
     const ctx = this.ctx();
+    this.closeDueFundingWindows(ctx);
     const events: SimEvent[] = [];
     for (const market of ['spot', 'perp'] as const) {
       const orders = this.ordersOf(market);
@@ -833,13 +851,8 @@ export class EngineRunner implements FundingSim {
         return r.events;
       },
       [],
-      () => warnings.map((w) => marginWarningNotice(w, this.sideOf(w), this.perpRulesOf(w.symbol))),
+      () => warnings.map((w) => marginWarningNotice(w, this.perpRulesOf(w.symbol))),
     );
-  }
-
-  private sideOf(w: MarginWarning): 'long' | 'short' {
-    const p = this.d.sim.perp.state.positions[w.symbol];
-    return p?.side ?? 'long';
   }
 
   /**

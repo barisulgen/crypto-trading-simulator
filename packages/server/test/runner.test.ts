@@ -1273,6 +1273,22 @@ describe('perps through the runner', () => {
     expect(JSON.parse(row.data).warnLevel).toBe(0.9);
   });
 
+  it("a short's margin warning names it a short; each position carries when its mark was received", () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('leverage', D('1000'));
+    t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.1' });
+    t.clock.advance(100); // short 0.1 at 79990.0
+    t.sent.length = 0;
+    t.clock.advance(400);
+    t.perp.mark('BTCUSDT', '83400');
+    expect(t.sent.filter((m) => m.type === 'notice').map((m) => [m.kind, m.level, m.text.split(' — ')[0]])).toEqual([
+      ['margin_warning', 'warn', 'Margin ratio 60.8% on BTCUSDT short'],
+    ]);
+    const p = t.runner.account().leverage.positions[0]!;
+    expect([p.markPrice?.toString(), p.markAt]).toEqual(['83400', T0 + 500]);
+  });
+
   it('a stale mark is never acted on', () => {
     const t = setup();
     t.runner.start();

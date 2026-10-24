@@ -164,6 +164,7 @@ export function checkMark(
   const warning: MarginWarning = {
     symbol,
     positionId: held.id,
+    side: held.side,
     level: next.level,
     ratio: verdict.ratio,
     markPrice: mark,
