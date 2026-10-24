@@ -127,22 +127,21 @@ class PerpCatchUp {
       const end = start + MINUTE_MS;
       const c = this.candleAt.get(start);
       const gap = inGap(start, from, to);
-      this.deliverCancels((at) => at < start);
       if (gap && !limitsChecked) {
         this.cancelRestingLimits(from);
         limitsChecked = true;
       }
-      // Windows that closed in minutes no candle covered settle at the next walked minute, first.
-      this.settleFunding(start);
+      // Windows that closed in minutes no candle covered settle at the next walked gap minute,
+      // before the cancels that arrived after their close.
+      if (gap) this.settleFunding(start);
+      this.deliverCancels((at) => at < start);
       this.openFundingWindows(end);
       if (gap) this.liquidationStep(start);
       this.triggeredStep(start, c);
       if (gap) {
         if (c) this.stopStep(c);
         if (trades) this.tradeStep(start, trades.filter((t) => t.time >= start && t.time < end));
-      }
-      this.settleFunding(end);
-      if (gap) {
+        this.settleFunding(end);
         this.deliverCancels((at) => at < end);
         // One more pass for what this minute's fills and funding changed, and the stops the fills armed.
         this.liquidationStep(start);
@@ -152,7 +151,8 @@ class PerpCatchUp {
       if (c) this.last = c.close;
     }
     if (!limitsChecked) this.cancelRestingLimits(from);
-    // Settlements whose window closes after the last walked minute settle here, at that close.
+    // Settlements whose window closes after the last walked minute (and before the end of the gap)
+    // settle here, at that close. A window still open at the end of the gap stays open.
     this.openFundingWindows(Infinity);
     this.settleFunding(Infinity);
     this.deliverCancels(() => true);
@@ -251,9 +251,23 @@ class PerpCatchUp {
 
   // ---- steps ----
 
-  /** When a settlement's window closes: 15 s after its funding time, or at the end of the gap if sooner. */
+  /**
+   * Whether this run settles `f`: its window closes (15 s after its funding time) before the end
+   * of the gap. One that closes later is opened (or kept open) and widened by the gap's fills, then
+   * left open for the live path, which takes in the fills after the gap, closes it on time and
+   * settles it once.
+   */
+  private settlesHere(f: Settlement): boolean {
+    return f.time + FUNDING_WINDOW_MS < this.input.to;
+  }
+
+  /**
+   * When a settlement is dated: its window's close, or the start of the gap for one whose window
+   * closed before the gap began (given anyway, it is settled once like any other, never dated
+   * before the gap).
+   */
   private closeOf(f: Settlement): number {
-    return Math.min(f.time + FUNDING_WINDOW_MS, this.input.to);
+    return Math.max(f.time + FUNDING_WINDOW_MS, this.input.from);
   }
 
   /**
@@ -272,14 +286,17 @@ class PerpCatchUp {
   }
 
   /**
-   * Settle every settlement whose window closes before `limit`: the window closes and the funding
-   * is applied at its settled rate and mark, on the sizes held through the window (a payer on the
-   * largest, a receiver on the smallest), exactly once per funding time. Dated at the window's
-   * close, the first moment its sizes are final; the owner's cancels that arrived by then go first.
+   * Settle every settlement this run settles whose window closes before `limit`: the window closes
+   * and the funding is applied at its settled rate and mark, on the sizes held through the window
+   * (a payer on the largest, a receiver on the smallest), exactly once per funding time. Dated at
+   * the window's close, the first moment its sizes are final; the owner's cancels that arrived by
+   * then go first. Called only from the gap's minutes on.
    */
   private settleFunding(limit: number): void {
-    while (this.settled < this.funding.length && this.closeOf(this.funding[this.settled]!) < limit) {
-      const f = this.funding[this.settled]!;
+    for (;;) {
+      const f = this.funding[this.settled];
+      // In time order: once one is not settled here or not yet due, neither is any later one.
+      if (!f || !this.settlesHere(f) || this.closeOf(f) >= limit) return;
       this.settled += 1;
       // A window not opened yet (its minutes were not walked) opens now, on the position as it is.
       if (this.windowsOpened < this.settled) this.openFundingWindows(f.time - FUNDING_WINDOW_MS + 1);

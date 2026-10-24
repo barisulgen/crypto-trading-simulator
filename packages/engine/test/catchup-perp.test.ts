@@ -317,6 +317,69 @@ describe('perp catch-up: funding windows (15 s either side of 08:00, rate 0.0001
   });
 });
 
+describe('perp catch-up: funding windows at the edges of the gap', () => {
+  it('a gap ending inside the window leaves it open for the live path, which settles it on what live fills add', () => {
+    const t = setup();
+    openLong(t);
+    place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' });
+    const to = T(8, 0, 5);
+    const events = run(
+      t,
+      input({
+        to,
+        candles: minutes('79990', '80010', [], FROM, to),
+        markCandles: minutes('79995', '80005', [], FROM, to),
+        funding: [funding0800],
+      }),
+    );
+    expect(ofType(events, 'funding')).toEqual([]);
+    expect(t.sim.perp.state.funding.windows[SYMBOL]?.fundingTime).toBe(T(8, 0));
+
+    // Live again: a fill at 08:00:10 adds to the long inside the window; the live path then closes
+    // the window at 08:00:15 and settles it, once.
+    t.ctx.now = T(8, 0, 10);
+    const live = t.sim.onTrade('perp', SYMBOL, trade(200, '78950', '0.1', true, T(8, 0, 10)), t.ctx);
+    expect(ofType(live, 'fill').map((e) => s(e.fill.qty))).toEqual(['0.1']);
+    t.ctx.now = T(8, 0, 15);
+    t.sim.closeFundingWindow(SYMBOL, T(8, 0), t.ctx);
+    const settled = t.sim.applyFunding(SYMBOL, T(8, 0), D('0.0001'), D('79000'), t.ctx);
+    expect(ofType(settled, 'funding').map((e) => [s(e.qty), s(e.amount)])).toEqual([['0.2', '-1.58']]);
+    expect(t.sim.applyFunding(SYMBOL, T(8, 0), D('0.0001'), D('79000'), t.ctx)).toEqual([]);
+  });
+
+  it('a settlement whose window closed before the gap is dated at the gap start, not before it', () => {
+    const t = setup();
+    openLong(t);
+    const events = run(t, input({ funding: [{ ...funding0800, time: T(5, 0) }] }));
+    expect(ofType(events, 'funding').map((e) => [e.time, e.fundingTime, s(e.amount)])).toEqual([
+      [FROM, T(5, 0), '-0.79'],
+    ]);
+    expectTaggedInOrder(events);
+  });
+
+  it('a window that closed in minutes no candle covered settles before a cancel that arrived after its close', () => {
+    const t = setup();
+    openLong(t);
+    const o = place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' });
+    t.ctx.now = T(8, 0, 29, 900);
+    expect(t.sim.cancel('perp', o.id, t.ctx)).toEqual({ ok: true, events: [] });
+    const uncovered = (c: Candle1m) => c.openTime !== T(7, 59) && c.openTime !== T(8, 0);
+    const events = run(
+      t,
+      input({
+        candles: lastCandles().filter(uncovered),
+        markCandles: markCandles().filter(uncovered),
+        funding: [funding0800],
+      }),
+    );
+    expect(events.filter((e) => e.type !== 'catch_up').map((e) => [e.type, e.time])).toEqual([
+      ['funding', T(8, 0, 15)],
+      ['order_cancelled', T(8, 0, 30)],
+    ]);
+    expectTaggedInOrder(events);
+  });
+});
+
 describe('perp catch-up: close-position stops from last-price candles', () => {
   it('a stop-loss reached while the mark stays clear fills the whole position at the minute’s low, taker fee', () => {
     const t = setup();
@@ -540,6 +603,26 @@ describe('perp catch-up: limit orders', () => {
     ]);
     const cancelled = ofType(events, 'order_cancelled');
     expect(cancelled.map((e) => [e.order.id, e.reason, e.time])).toEqual([[o.id, 'catch_up_unavailable', from]]);
+    expectTaggedInOrder(events);
+  });
+
+  it('a gap older than 47 h cancels its limits at its start before a cancel that arrived later in the gap', () => {
+    const t = setup();
+    const from = TO - 50 * HOUR;
+    const first = place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' }, from - 600_000);
+    const second = place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' }, from - 540_000);
+    // The owner cancels the first one hour into the gap; the first walked minute is an hour later still.
+    t.ctx.now = from + HOUR;
+    expect(t.sim.cancel('perp', first.id, t.ctx)).toEqual({ ok: true, events: [] });
+    const candles = minutes('79990', '80010', [], TO - 60 * 60_000);
+    const events = run(t, input({ from, candles, markCandles: [], trades: 'unavailable' }));
+    const cancelled = ofType(events, 'order_cancelled');
+    expect(cancelled.map((e) => [e.order.id, e.reason, e.time])).toEqual([
+      [first.id, 'catch_up_unavailable', from],
+      [second.id, 'catch_up_unavailable', from],
+    ]);
+    const late = ofType(events, 'cancel_rejected');
+    expect(late.map((e) => [e.order.id, e.time])).toEqual([[first.id, from + HOUR + 100]]);
     expectTaggedInOrder(events);
   });
 
