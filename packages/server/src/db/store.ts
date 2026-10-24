@@ -1,13 +1,32 @@
-import { D, Decimal, emptyLedger, emptySpotState, evictTerminal, takeDirty } from '@sim/engine';
+import {
+  D,
+  Decimal,
+  emptyLedger,
+  emptyPerpState,
+  emptySpotState,
+  evictTerminal,
+  evictTerminalPerp,
+  takeDirty,
+  takePerpDirty,
+} from '@sim/engine';
 import type {
   AccountValue,
   Basis,
   EngineEvent,
   Fill,
+  FundingSide,
+  FundingState,
+  FundingWindow,
   Market,
+  PerpEvent,
+  PerpFill,
+  PerpOrder,
+  PerpState,
+  Position,
   RoundTrip,
   Ledger,
   SimEngine,
+  SimEvent,
   SpotOrder,
   SpotState,
   Wallet,
@@ -73,6 +92,65 @@ function reviveOrder(raw: Record<string, unknown>): SpotOrder {
   return o as unknown as SpotOrder;
 }
 
+const PERP_ORDER_DECIMALS = [...ORDER_DECIMALS, 'realizedPnl'] as const;
+
+/** Revive a PerpOrder parsed from JSON (Decimal fields by name; either attached leg may be absent). */
+function revivePerpOrder(raw: Record<string, unknown>): PerpOrder {
+  const o = { ...raw };
+  for (const k of PERP_ORDER_DECIMALS) o[k] = dec(o[k]);
+  const attach = o.attach as { stopLoss: string | null; takeProfit: string | null } | null | undefined;
+  o.attach = attach ? { stopLoss: dec(attach.stopLoss), takeProfit: dec(attach.takeProfit) } : null;
+  o.cancelArrivesAt = typeof o.cancelArrivesAt === 'number' ? o.cancelArrivesAt : null;
+  return o as unknown as PerpOrder;
+}
+
+const POSITION_DECIMALS = ['qty', 'entryPrice', 'margin', 'realizedPnl', 'fees', 'funding'] as const;
+const WARN_LEVELS: readonly unknown[] = [0.5, 0.8, 0.9];
+
+/** Revive a Position parsed from JSON; a warning level it does not know is none given. */
+function revivePosition(raw: Record<string, unknown>): Position {
+  const p = { ...raw };
+  for (const k of POSITION_DECIMALS) p[k] = D(p[k] as string);
+  p.warnLevel = WARN_LEVELS.includes(p.warnLevel) ? p.warnLevel : 0;
+  return p as unknown as Position;
+}
+
+/**
+ * Revive one side of a funding window. A side saved before ownMax and maxPositionId were kept is
+ * read as held throughout by its last position: ownMax = max, maxPositionId = positionId.
+ */
+function reviveFundingSide(raw: Record<string, unknown>): FundingSide {
+  const max = D(raw.max as string);
+  const positionId = (raw.positionId as string | null | undefined) ?? null;
+  return {
+    max,
+    min: D(raw.min as string),
+    positionId,
+    ownMax: raw.ownMax === undefined || raw.ownMax === null ? max : D(raw.ownMax as string),
+    maxPositionId: raw.maxPositionId === undefined ? positionId : (raw.maxPositionId as string | null),
+  };
+}
+
+function reviveFundingWindow(raw: Record<string, unknown>): FundingWindow {
+  return {
+    symbol: raw.symbol as string,
+    fundingTime: raw.fundingTime as number,
+    long: reviveFundingSide(raw.long as Record<string, unknown>),
+    short: reviveFundingSide(raw.short as Record<string, unknown>),
+  };
+}
+
+function reviveFunding(raw: Partial<Record<keyof FundingState, unknown>>): FundingState {
+  const windows: Record<string, FundingWindow> = {};
+  for (const [symbol, w] of Object.entries((raw.windows ?? {}) as Record<string, Record<string, unknown>>)) {
+    windows[symbol] = reviveFundingWindow(w);
+  }
+  const pending = ((raw.pending ?? []) as Record<string, unknown>[]).map(reviveFundingWindow);
+  const applied: Record<string, number[]> = {};
+  for (const [symbol, times] of Object.entries((raw.applied ?? {}) as Record<string, number[]>)) applied[symbol] = [...times];
+  return { windows, pending, applied };
+}
+
 interface BasisRow {
   asset: string;
   qty: string;
@@ -120,7 +198,8 @@ export function loadSpotState(db: Db, seasonId: number, ledger: Ledger): SpotSta
 
   const orders = db
     .prepare(
-      `SELECT data FROM orders WHERE season_id = ? AND status IN (${NON_TERMINAL.map(() => '?').join(',')}) ORDER BY created_at, rowid`,
+      `SELECT data FROM orders WHERE season_id = ? AND market = 'spot' AND status IN (${NON_TERMINAL.map(() => '?').join(',')})
+       ORDER BY created_at, rowid`,
     )
     .all(seasonId, ...NON_TERMINAL) as { data: string }[];
   for (const r of orders) {
@@ -141,9 +220,71 @@ export function loadSpotState(db: Db, seasonId: number, ledger: Ledger): SpotSta
   return state;
 }
 
+/** The season's perp state: live perp orders, open positions, leverage settings, funding state and cursors. */
+export function loadPerpState(db: Db, seasonId: number, ledger: Ledger): PerpState {
+  const state = emptyPerpState(ledger);
+
+  const orders = db
+    .prepare(
+      `SELECT data FROM orders WHERE season_id = ? AND market = 'perp' AND status IN (${NON_TERMINAL.map(() => '?').join(',')})
+       ORDER BY created_at, rowid`,
+    )
+    .all(seasonId, ...NON_TERMINAL) as { data: string }[];
+  for (const r of orders) {
+    const o = revivePerpOrder(JSON.parse(r.data) as Record<string, unknown>);
+    state.orders.set(o.id, o);
+  }
+
+  const positions = db.prepare('SELECT symbol, data FROM positions WHERE season_id = ?').all(seasonId) as {
+    symbol: string;
+    data: string;
+  }[];
+  for (const p of positions) state.positions[p.symbol] = revivePosition(JSON.parse(p.data) as Record<string, unknown>);
+
+  const settings = db
+    .prepare('SELECT symbol, leverage, margin_mode FROM perp_settings WHERE season_id = ?')
+    .all(seasonId) as { symbol: string; leverage: number; margin_mode: 'isolated' }[];
+  for (const r of settings) state.settings[r.symbol] = { leverage: r.leverage, marginMode: r.margin_mode };
+
+  const perp = db.prepare('SELECT funding FROM perp_state WHERE season_id = ?').get(seasonId) as
+    | { funding: string }
+    | undefined;
+  if (perp) state.funding = reviveFunding(JSON.parse(perp.funding) as Record<string, unknown>);
+
+  const cursors = db
+    .prepare("SELECT symbol, last_trade_id FROM trade_cursor WHERE season_id = ? AND market = 'perp'")
+    .all(seasonId) as { symbol: string; last_trade_id: number }[];
+  for (const c of cursors) state.lastTradeId[c.symbol] = c.last_trade_id;
+
+  savedPerpKeys(db).set(seasonId, perpStateKey(state));
+  return state;
+}
+
 // ---- persist ----
 
-function eventSymbolMarket(e: EngineEvent): { symbol: string | null; market: string | null } {
+function isPerpEvent(e: SimEvent): e is PerpEvent {
+  return 'market' in e && e.market === 'perp';
+}
+
+function perpEventSymbol(e: PerpEvent): string {
+  switch (e.type) {
+    case 'leverage_set':
+    case 'margin_changed':
+    case 'funding':
+    case 'liquidation':
+      return e.symbol;
+    case 'fill':
+      return e.fill.symbol;
+    case 'position_opened':
+    case 'position_closed':
+      return e.position.symbol;
+    default:
+      return e.order.symbol;
+  }
+}
+
+function eventSymbolMarket(e: SimEvent): { symbol: string | null; market: string | null } {
+  if (isPerpEvent(e)) return { symbol: perpEventSymbol(e), market: 'perp' };
   switch (e.type) {
     case 'deposit':
       return { symbol: null, market: e.wallet };
@@ -158,38 +299,84 @@ function eventSymbolMarket(e: EngineEvent): { symbol: string | null; market: str
   }
 }
 
+/** How long applied funding times are kept: a window that old is never opened again. */
+const APPLIED_FUNDING_KEEP_MS = 30 * 86_400_000;
+
+/** Drop the applied funding times more than 30 days before `now`, and symbols left with none. */
+function pruneAppliedFunding(funding: FundingState, now: number): void {
+  for (const [symbol, times] of Object.entries(funding.applied)) {
+    const kept = times.filter((t) => t >= now - APPLIED_FUNDING_KEEP_MS);
+    if (kept.length === 0) delete funding.applied[symbol];
+    else if (kept.length !== times.length) funding.applied[symbol] = kept;
+  }
+}
+
+/**
+ * The perp state persist writes in full on every commit (positions, settings, funding state). They
+ * change without an event at times (a margin warning given, a funding window opened or closed), so
+ * persist compares this key with the last one saved to know whether they changed.
+ */
+function perpStateKey(s: PerpState): string {
+  return toJson({ positions: s.positions, settings: s.settings, funding: s.funding });
+}
+
+const EMPTY_PERP_KEY = perpStateKey(emptyPerpState(emptyLedger([])));
+
+/** Per database, per season: the perp state key last saved or loaded. */
+const perpKeys = new WeakMap<Db, Map<number, string>>();
+
+function savedPerpKeys(db: Db): Map<number, string> {
+  let keys = perpKeys.get(db);
+  if (!keys) {
+    keys = new Map();
+    perpKeys.set(db, keys);
+  }
+  return keys;
+}
+
 /**
  * Write everything one engine call changed, in a single transaction. Call it after every engine
  * call, even with no events: pending -> open has none, but the order's row must still follow.
- * Orders written: those changed since the last call (takeDirty) and each one an event names.
- * Each feed gap becomes a feed_gap event and its open_gaps row is deleted in the same transaction.
- * A call with events, changed orders or gaps also writes the balances, basis, account and trade
- * cursor; one with none writes nothing but the trade cursor, and that only when `cursor` is set.
- * Afterwards finished orders leave memory (evictTerminal). Returns whether the cursor was written.
+ * Orders written, spot and perp: those changed since the last call (takeDirty) and each one an
+ * event names. Each feed gap becomes a feed_gap event and its open_gaps row is deleted in the
+ * same transaction. A call with events, changed orders, gaps, or a perp state (positions, leverage
+ * settings, funding state) that differs from the one last saved or loaded is a commit: it also
+ * writes the balances, basis, account, trade cursors, every open position (deleting the rows of
+ * positions no longer open), every leverage setting and the funding state. A call with none of
+ * these writes nothing but the trade cursors, and that only when `cursor` is set.
+ * Applied funding times more than 30 days before `now` (else the latest event's time) are dropped
+ * first. Afterwards finished orders leave memory (evictTerminal). Returns whether the cursors were written.
  */
 export function persist(
   db: Db,
   seasonId: number,
   sim: SimEngine,
-  events: EngineEvent[],
-  extra: { feedGaps?: FeedGap[]; cursor?: boolean } = {},
+  events: SimEvent[],
+  extra: { feedGaps?: FeedGap[]; cursor?: boolean; now?: number } = {},
 ): boolean {
   const state = sim.spot.state;
+  const perp = sim.perp.state;
   const gaps = extra.feedGaps ?? [];
+  const now = extra.now ?? events.reduce<number | null>((t, e) => (t === null || e.time > t ? e.time : t), null);
+  if (now !== null) pruneAppliedFunding(perp.funding, now);
+  const perpKey = perpStateKey(perp);
+  const perpChanged = perpKey !== (savedPerpKeys(db).get(seasonId) ?? EMPTY_PERP_KEY);
   const dirty = takeDirty(state);
-  const changed = events.length > 0 || dirty.length > 0 || gaps.length > 0;
+  const perpDirty = takePerpDirty(perp);
+  const changed = events.length > 0 || dirty.length > 0 || perpDirty.length > 0 || gaps.length > 0 || perpChanged;
   if (!changed && !extra.cursor) return false;
   const insEvent = db.prepare(
     'INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, ?, ?, ?, ?)',
   );
   const insFill = db.prepare(
     `INSERT INTO fills (id, season_id, order_id, symbol, market, side, qty, price, quote, liquidity, fee_asset, fee,
-       fee_usd, best_at_arrival, best_at_submit, slippage_usd, drift_usd, trigger_price, realized_pnl, round_trip_id, time)
-     VALUES (?, ?, ?, ?, 'spot', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       fee_usd, best_at_arrival, best_at_submit, slippage_usd, drift_usd, trigger_price, realized_pnl, round_trip_id,
+       position_id, uncovered, time)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const upOrder = db.prepare(
     `INSERT INTO orders (id, season_id, symbol, market, status, created_at, updated_at, data)
-     VALUES (?, ?, ?, 'spot', ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data,
        updated_at = max(orders.updated_at, excluded.updated_at)`,
   );
@@ -207,49 +394,77 @@ export function persist(
      ON CONFLICT(season_id) DO UPDATE SET total_deposited = excluded.total_deposited`,
   );
   const upCursor = db.prepare(
-    `INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (?, 'spot', ?, ?)
+    `INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (?, ?, ?, ?)
      ON CONFLICT(season_id, market, symbol) DO UPDATE SET last_trade_id = excluded.last_trade_id`,
   );
   const insTrip = db.prepare(
     'INSERT INTO round_trips (id, season_id, symbol, opened_at, closed_at, pnl) VALUES (?, ?, ?, ?, ?, ?)',
   );
   const delOpenGap = db.prepare('DELETE FROM open_gaps WHERE season_id = ? AND market = ? AND symbol = ?');
+  const upPosition = db.prepare(
+    `INSERT INTO positions (season_id, symbol, data) VALUES (?, ?, ?)
+     ON CONFLICT(season_id, symbol) DO UPDATE SET data = excluded.data`,
+  );
+  const delClosedPositions = db.prepare(
+    'DELETE FROM positions WHERE season_id = ? AND symbol NOT IN (SELECT value FROM json_each(?))',
+  );
+  const upSetting = db.prepare(
+    `INSERT INTO perp_settings (season_id, symbol, leverage, margin_mode) VALUES (?, ?, ?, ?)
+     ON CONFLICT(season_id, symbol) DO UPDATE SET leverage = excluded.leverage, margin_mode = excluded.margin_mode`,
+  );
+  const upPerpState = db.prepare(
+    `INSERT INTO perp_state (season_id, funding) VALUES (?, ?)
+     ON CONFLICT(season_id) DO UPDATE SET funding = excluded.funding`,
+  );
 
-  const writeOrder = (o: SpotOrder, time: number) =>
-    upOrder.run(o.id, seasonId, o.symbol, o.status, o.createdAt, time, toJson(o));
+  const writeOrder = (market: Market, o: SpotOrder | PerpOrder, time: number) =>
+    upOrder.run(o.id, seasonId, o.symbol, market, o.status, o.createdAt, time, toJson(o));
+
+  const writeFill = (f: Fill | PerpFill) => {
+    const p = 'market' in f && f.market === 'perp' ? f : null;
+    insFill.run(
+      f.id, seasonId, f.orderId, f.symbol, p ? 'perp' : 'spot', f.side, str(f.qty), str(f.price), str(f.quote),
+      f.liquidity, f.feeAsset, str(f.fee), str(f.feeUsd), str(f.bestAtArrival), str(f.bestAtSubmit),
+      str(f.slippageUsd), str(f.driftUsd), str(f.triggerPrice), str(f.realizedPnl),
+      p ? null : (f as Fill).roundTripId, p ? p.positionId : null, p ? str(p.uncovered) : null, f.time,
+    );
+  };
 
   const writeCursor = () => {
-    for (const [symbol, id] of Object.entries(state.lastTradeId)) upCursor.run(seasonId, symbol, id);
+    for (const [symbol, id] of Object.entries(state.lastTradeId)) upCursor.run(seasonId, 'spot', symbol, id);
+    for (const [symbol, id] of Object.entries(perp.lastTradeId)) upCursor.run(seasonId, 'perp', symbol, id);
   };
 
   const write = db.transaction(() => {
     if (!changed) return writeCursor();
     const touched = new Map<string, { order: SpotOrder; time: number }>();
+    const perpTouched = new Map<string, { order: PerpOrder; time: number }>();
     for (const e of events) {
       const { symbol, market } = eventSymbolMarket(e);
       insEvent.run(seasonId, e.time, e.type, symbol, market, toJson(e));
-      if (e.type === 'fill') {
-        const f: Fill = e.fill;
-        insFill.run(
-          f.id, seasonId, f.orderId, f.symbol, f.side, str(f.qty), str(f.price), str(f.quote), f.liquidity,
-          f.feeAsset, str(f.fee), str(f.feeUsd), str(f.bestAtArrival), str(f.bestAtSubmit), str(f.slippageUsd),
-          str(f.driftUsd), str(f.triggerPrice), str(f.realizedPnl), f.roundTripId, f.time,
-        );
-      }
+      if (e.type === 'fill') writeFill(e.fill);
       if (e.type === 'round_trip_closed') {
         const t: RoundTrip = e.roundTrip;
         insTrip.run(t.id, seasonId, t.symbol, t.openedAt, t.closedAt, str(t.pnl));
       }
-      if ('order' in e) touched.set(e.order.id, { order: e.order, time: e.time });
+      if ('order' in e) {
+        if (isPerpEvent(e)) perpTouched.set(e.order.id, { order: e.order, time: e.time });
+        else touched.set(e.order.id, { order: e.order, time: e.time });
+      }
     }
 
     // Each changed order, plus the last snapshot of each order an event names (terminal ones
     // included). The state's own copy wins when it has one.
     for (const id of dirty) {
       const o = state.orders.get(id);
-      if (o && !touched.has(id)) writeOrder(o, o.createdAt);
+      if (o && !touched.has(id)) writeOrder('spot', o, o.createdAt);
     }
-    for (const { order, time } of touched.values()) writeOrder(state.orders.get(order.id) ?? order, time);
+    for (const { order, time } of touched.values()) writeOrder('spot', state.orders.get(order.id) ?? order, time);
+    for (const id of perpDirty) {
+      const o = perp.orders.get(id);
+      if (o && !perpTouched.has(id)) writeOrder('perp', o, o.createdAt);
+    }
+    for (const { order, time } of perpTouched.values()) writeOrder('perp', perp.orders.get(order.id) ?? order, time);
 
     for (const wallet of ['spot', 'leverage'] as const) {
       for (const [asset, b] of Object.entries(sim.ledger.balances[wallet])) {
@@ -262,6 +477,11 @@ export function persist(
     upAccount.run(seasonId, str(sim.ledger.totalDeposited));
     writeCursor();
 
+    for (const [symbol, p] of Object.entries(perp.positions)) upPosition.run(seasonId, symbol, toJson(p));
+    delClosedPositions.run(seasonId, JSON.stringify(Object.keys(perp.positions)));
+    for (const [symbol, st] of Object.entries(perp.settings)) upSetting.run(seasonId, symbol, st.leverage, st.marginMode);
+    upPerpState.run(seasonId, toJson(perp.funding));
+
     for (const g of gaps) {
       insEvent.run(
         seasonId, g.endedAt, 'feed_gap', g.symbol, g.market,
@@ -273,11 +493,17 @@ export function persist(
   try {
     write();
   } catch (e) {
-    // Nothing was written: the orders stay marked for the next call.
+    // Nothing was written: the orders stay marked for the next call, and the perp state still
+    // differs from the one last saved.
     for (const id of dirty) state.dirty.add(id);
+    for (const id of perpDirty) perp.dirty.add(id);
     throw e;
   }
-  if (changed) evictTerminal(state);
+  if (changed) {
+    savedPerpKeys(db).set(seasonId, perpKey);
+    evictTerminal(state);
+    evictTerminalPerp(perp);
+  }
   return true;
 }
 
@@ -288,37 +514,45 @@ export function storedOrderExists(db: Db, seasonId: number, id: string): boolean
 
 // ---- late cancels ----
 
-type CancelRejected = Extract<EngineEvent, { type: 'cancel_rejected' }>;
+type CancelRejected =
+  | Extract<EngineEvent, { type: 'cancel_rejected' }>
+  | Extract<PerpEvent, { type: 'cancel_rejected' }>;
 
 /**
- * Startup: an order that finished (filled, rejected, or cancelled with its pair) while the owner's
- * cancel of it was in flight, with the server stopped before that cancel arrived. Finished orders
- * are not loaded, so nothing else answers that cancel: each is recorded now as cancel_rejected and
- * the stored order's cancel in flight is cleared, all in one transaction. Returns the events written.
+ * Startup: an order, spot or perp, that finished (filled, rejected, or cancelled with its pair)
+ * while the owner's cancel of it was in flight, with the server stopped before that cancel arrived.
+ * Finished orders are not loaded, so nothing else answers that cancel: each is recorded now as
+ * cancel_rejected in its market and the stored order's cancel in flight is cleared, all in one
+ * transaction. Returns the events written.
  */
 export function settleLateCancels(db: Db, seasonId: number, now: number): CancelRejected[] {
   const rows = db
     .prepare(
-      `SELECT data FROM orders WHERE season_id = ? AND status NOT IN (${NON_TERMINAL.map(() => '?').join(',')})
+      `SELECT market, data FROM orders WHERE season_id = ? AND status NOT IN (${NON_TERMINAL.map(() => '?').join(',')})
          AND json_extract(data, '$.cancelArrivesAt') IS NOT NULL
        ORDER BY created_at, rowid`,
     )
-    .all(seasonId, ...NON_TERMINAL) as { data: string }[];
+    .all(seasonId, ...NON_TERMINAL) as { market: string; data: string }[];
   if (rows.length === 0) return [];
   const insEvent = db.prepare(
-    "INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, 'cancel_rejected', ?, 'spot', ?)",
+    "INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (?, ?, 'cancel_rejected', ?, ?, ?)",
   );
   const upOrder = db.prepare(
     'UPDATE orders SET data = ?, updated_at = max(updated_at, ?) WHERE id = ? AND season_id = ?',
   );
   const events = rows.map((r): CancelRejected => {
-    const order = { ...reviveOrder(JSON.parse(r.data) as Record<string, unknown>), cancelArrivesAt: null };
-    const reason = `Cancel arrived too late: order already ${order.status}`;
-    return { type: 'cancel_rejected', time: now, order, reason };
+    const raw = JSON.parse(r.data) as Record<string, unknown>;
+    const reason = (status: string) => `Cancel arrived too late: order already ${status}`;
+    if (r.market === 'perp') {
+      const order = { ...revivePerpOrder(raw), cancelArrivesAt: null };
+      return { type: 'cancel_rejected', market: 'perp', time: now, order, reason: reason(order.status) };
+    }
+    const order = { ...reviveOrder(raw), cancelArrivesAt: null };
+    return { type: 'cancel_rejected', time: now, order, reason: reason(order.status) };
   });
   db.transaction(() => {
     for (const e of events) {
-      insEvent.run(seasonId, e.time, e.order.symbol, toJson(e));
+      insEvent.run(seasonId, e.time, e.order.symbol, e.market === 'perp' ? 'perp' : 'spot', toJson(e));
       upOrder.run(toJson(e.order), e.time, e.order.id, seasonId);
     }
   })();
@@ -376,6 +610,25 @@ export function checkInvariants(sim: SimEngine): string[] {
     const qty = state.basis[asset]?.qty ?? D(0);
     if (!qty.eq(holdings)) out.push(`Basis ${asset} qty ${qty} != holdings ${holdings}`);
   }
+
+  const perp = sim.perp.state;
+  let perpLocks = D(0);
+  for (const o of perp.orders.values()) {
+    if (NON_TERMINAL.includes(o.status)) perpLocks = perpLocks.plus(o.lockAmount);
+  }
+  const leverageLocked = sim.ledger.balances.leverage.USDT?.locked ?? D(0);
+  if (!leverageLocked.eq(perpLocks)) {
+    out.push(`Leverage locked USDT ${leverageLocked} != sum of live perp order locks ${perpLocks}`);
+  }
+
+  const perSymbol = new Map<string, number>();
+  for (const [key, p] of Object.entries(perp.positions)) {
+    if (!p.qty.gt(0)) out.push(`Position ${key} qty ${p.qty} is not > 0`);
+    if (p.margin.lt(0)) out.push(`Position ${key} margin ${p.margin} is < 0`);
+    if (p.symbol !== key) out.push(`Position under ${key} is for ${p.symbol}`);
+    perSymbol.set(p.symbol, (perSymbol.get(p.symbol) ?? 0) + 1);
+  }
+  for (const [symbol, n] of perSymbol) if (n > 1) out.push(`More than one position for ${symbol}`);
   return out;
 }
 

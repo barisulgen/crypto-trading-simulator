@@ -1,7 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { D, Decimal, PerpEngine, SimEngine, SpotEngine, deposit, emptyLedger, emptyPerpState, emptySpotState } from '@sim/engine';
-import type { AggTrade, EngineCtx, EngineEvent, Market, SpotOrder, SpotOrderRequest, SpotState } from '@sim/engine';
+import type {
+  AggTrade,
+  EngineCtx,
+  EngineEvent,
+  Market,
+  PerpCtx,
+  PerpEvent,
+  PerpOrder,
+  PerpOrderRequest,
+  PerpState,
+  SimEvent,
+  SpotOrder,
+  SpotOrderRequest,
+  SpotState,
+} from '@sim/engine';
 import { FakeMarket, seedCoins, testCtx } from '../../engine/test/fixtures.ts';
+import { FakePerpMarket, perpCtx } from '../../engine/test/perpFixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
 import {
@@ -9,6 +24,7 @@ import {
   insertEquitySnapshot,
   loadOpenGaps,
   loadLedger,
+  loadPerpState,
   loadSpotState,
   openGap,
   persist,
@@ -86,16 +102,16 @@ function partialFillScenario() {
 }
 
 describe('openDb', () => {
-  it('applies migrations once: user_version 3, reopening a file db raises no error', () => {
+  it('applies migrations once: user_version 4; a fresh database is not marked as test data', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(3);
-    expect(db.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toEqual({ value: '1' });
+    expect(db.pragma('user_version', { simple: true })).toBe(4);
+    expect(db.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toBeUndefined();
     expect(currentSeasonId(db)).toBe(1);
     expect(currentSeasonId(db)).toBe(1);
     expect(db.prepare('SELECT name FROM seasons').all()).toEqual([{ name: 'Season 1' }]);
   });
 
-  it('a second open of the same file keeps version 3 and its data', async () => {
+  it('a second open of the same file keeps version 4 and its data', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -107,7 +123,8 @@ describe('openDb', () => {
       touchAlive(a, 123);
       a.close();
       const b = openDb(file);
-      expect(b.pragma('user_version', { simple: true })).toBe(3);
+      expect(b.pragma('user_version', { simple: true })).toBe(4);
+      expect(b.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toBeUndefined();
       expect(b.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get()).toEqual({ value: '123' });
       touchAlive(b, 456);
       expect(b.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get()).toEqual({ value: '456' });
@@ -117,13 +134,13 @@ describe('openDb', () => {
     }
   });
 
-  it('migrations 002 and 003 apply to a Phase 1 database (user_version 1) without touching existing rows', async () => {
+  it('migrations 002 to 004 apply to a Phase 1 database (user_version 1): rows intact, test_data still set', async () => {
     const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
     const { default: Database } = await import('better-sqlite3');
     const dir = mkdtempSync(join(tmpdir(), 'sim-db-'));
-    const tables = ['meta', 'seasons', 'events', 'orders', 'balances', 'account'];
+    const tables = ['meta', 'seasons', 'events', 'orders', 'balances', 'account', 'basis', 'round_trips'];
     const dump = (db: Db) => tables.map((t) => db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
     let db: Db | null = null;
     try {
@@ -142,13 +159,34 @@ describe('openDb', () => {
         INSERT INTO balances (season_id, wallet, asset, free, locked) VALUES (1, 'spot', 'USDT', '900.5', '99.5');
         INSERT INTO account (season_id, total_deposited) VALUES (1, '1000');
         INSERT INTO trade_cursor (season_id, symbol, last_trade_id) VALUES (1, 'BTCUSDT', 42);
+        INSERT INTO basis (season_id, asset, qty, cost, round_trip_id, opened_at, trip_realized)
+          VALUES (1, 'BTC', '0.5', '40000', 'rt-1', 25, '0');
+        INSERT INTO round_trips (id, season_id, symbol, opened_at, closed_at, pnl) VALUES ('rt-0', 1, 'BTCUSDT', 1, 2, '-3.5');
+        INSERT INTO fills (id, season_id, order_id, symbol, market, side, qty, price, quote, liquidity, fee_asset, fee,
+          fee_usd, best_at_arrival, best_at_submit, slippage_usd, drift_usd, trigger_price, realized_pnl, round_trip_id, time)
+          VALUES ('f-1', 1, 'o-1', 'BTCUSDT', 'spot', 'buy', '0.5', '80000', '40000', 'taker', 'BTC', '0.0005', '40',
+            '79990', '79990', '5', '0', NULL, NULL, 'rt-1', 25);
       `);
       const before = dump(v1 as unknown as Db);
+      const fillsBefore = v1.prepare('SELECT * FROM fills').all() as Record<string, unknown>[];
       v1.close();
 
       db = openDb(file);
-      expect(db.pragma('user_version', { simple: true })).toBe(3);
+      expect(db.pragma('user_version', { simple: true })).toBe(4);
       expect(dump(db)).toEqual(before);
+      expect(db.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toEqual({ value: '1' });
+      // The fill keeps every value; the perp columns are empty on it.
+      expect(db.prepare('SELECT * FROM fills').all()).toEqual(
+        fillsBefore.map((f) => ({ ...f, position_id: null, uncovered: null })),
+      );
+      for (const t of ['positions', 'perp_settings', 'perp_state', 'catchup_jobs']) {
+        expect(db.prepare(`SELECT count(*) c FROM ${t}`).get()).toEqual({ c: 0 });
+      }
+      // The spot state reads as before; there is no perp state yet.
+      const ledger = loadLedger(db, 1, ASSETS);
+      expect([...loadSpotState(db, 1, ledger).orders.keys()]).toEqual(['o-1']);
+      const perp = loadPerpState(db, 1, ledger);
+      expect([perp.orders.size, perp.positions, perp.settings, perp.lastTradeId]).toEqual([0, {}, {}, {}]);
       expect(db.prepare('SELECT * FROM trade_cursor').all()).toEqual([
         { season_id: 1, market: 'spot', symbol: 'BTCUSDT', last_trade_id: 42 },
       ]);
@@ -183,7 +221,7 @@ describe('openDb', () => {
       v2.close();
 
       db = openDb(file);
-      expect(db.pragma('user_version', { simple: true })).toBe(3);
+      expect(db.pragma('user_version', { simple: true })).toBe(4);
       expect(db.prepare('SELECT * FROM trade_cursor ORDER BY season_id, symbol').all()).toEqual([
         { season_id: 1, market: 'spot', symbol: 'BTCUSDT', last_trade_id: 42 },
         { season_id: 1, market: 'spot', symbol: 'ETHUSDT', last_trade_id: 7 },
@@ -807,5 +845,342 @@ describe('persist writes what changed', () => {
     persist(db, seasonId, simOf(engine), []);
     const row = db.prepare('SELECT data FROM orders WHERE id = ?').get(a.id) as { data: string };
     expect(JSON.parse(row.data).cancelArrivesAt).toBe(engine.state.orders.get(a.id)!.cancelArrivesAt);
+  });
+});
+
+
+// ---- perps ----
+
+const DAY = 86_400_000;
+
+function perpSetup() {
+  const market = new FakePerpMarket();
+  const ctx = perpCtx(market, { now: NOW });
+  const ledger = emptyLedger(ASSETS);
+  const sim = new SimEngine(ledger, new SpotEngine(emptySpotState(ledger)), new PerpEngine(emptyPerpState(ledger)));
+  const db = openDb(':memory:');
+  const seasonId = currentSeasonId(db);
+  return { market, ctx, sim, perp: sim.perp, db, seasonId };
+}
+
+const perpMarketOrder = (side: 'buy' | 'sell', qty: string, more: Partial<PerpOrderRequest> = {}) =>
+  ({ symbol: 'BTCUSDT', side, type: 'market', qty, ...more }) as PerpOrderRequest;
+const perpLimit = (side: 'buy' | 'sell', price: string, qty: string, more: Partial<PerpOrderRequest> = {}) =>
+  ({ symbol: 'BTCUSDT', side, type: 'limit', price, qty, ...more }) as PerpOrderRequest;
+
+function perpPlaced(events: PerpEvent[]): PerpOrder[] {
+  return events.flatMap((e) => (e.type === 'order_placed' ? [e.order] : []));
+}
+
+/** Arrive each order at its arrival time; returns everything that happened. */
+function perpArrive(engine: PerpEngine, orders: PerpOrder[], ctx: PerpCtx): PerpEvent[] {
+  const out: PerpEvent[] = [];
+  for (const o of orders) {
+    ctx.now = Math.max(ctx.now, o.arrivesAt!);
+    out.push(...engine.arrive(o.id, ctx));
+  }
+  return out;
+}
+
+function perpTrade(price: string, qty = '1', sellerInitiated = true): AggTrade {
+  tradeId += 1;
+  return { id: 1_000 + tradeId, price: D(price), qty: D(qty), sellerInitiated, time: NOW };
+}
+
+const LIVE = ['pending', 'open', 'partially_filled', 'triggered'];
+
+/** The whole perp state as plain JSON (Decimal.toJSON gives decimal strings), live orders sorted by id. */
+function perpSnapshot(s: PerpState): string {
+  return JSON.stringify({
+    balances: s.ledger.balances,
+    totalDeposited: s.ledger.totalDeposited,
+    orders: [...s.orders.values()].filter((o) => LIVE.includes(o.status)).sort((a, b) => a.id.localeCompare(b.id)),
+    positions: s.positions,
+    settings: s.settings,
+    lastTradeId: s.lastTradeId,
+    funding: s.funding,
+  });
+}
+
+const PERP_ORDER_DECIMALS = [
+  'qty', 'quoteQty', 'price', 'triggerPrice', 'filledQty', 'filledQuote', 'fee', 'lockAmount', 'bestAtSubmit', 'realizedPnl',
+] as const;
+
+/** Every decimal field of the order is a Decimal (or null), never a string. */
+function expectRevivedOrder(o: PerpOrder): void {
+  for (const k of PERP_ORDER_DECIMALS) {
+    const v = o[k];
+    expect(v === null || Decimal.isDecimal(v), `${o.id}.${k}`).toBe(true);
+  }
+  for (const v of [o.attach?.stopLoss ?? null, o.attach?.takeProfit ?? null]) {
+    expect(v === null || Decimal.isDecimal(v)).toBe(true);
+  }
+}
+
+/** What a restart builds from the database. */
+function reloadSim(db: Db, seasonId: number): SimEngine {
+  const ledger = loadLedger(db, seasonId, ASSETS);
+  return new SimEngine(
+    ledger,
+    new SpotEngine(loadSpotState(db, seasonId, ledger)),
+    new PerpEngine(loadPerpState(db, seasonId, ledger)),
+  );
+}
+
+/**
+ * Leverage wallet 5000, leverage 10 on BTCUSDT, a market long 0.1 at 80000 whose attached
+ * stop-loss 78000 / take-profit 82000 pair is armed, a limit buy 0.05 @ 79000 resting, and a
+ * futures trade processed: all persisted.
+ */
+function perpScenario() {
+  const t = perpSetup();
+  const { ctx, sim, perp, db, seasonId } = t;
+  const events: SimEvent[] = [];
+  const dep = sim.deposit('leverage', D('5000'), ctx);
+  if (!dep.ok) throw new Error(dep.reason);
+  events.push(...dep.events);
+  const lev = perp.setLeverage('BTCUSDT', 10, ctx);
+  if (!lev.ok) throw new Error(lev.reason);
+  events.push(...lev.events);
+
+  const open = perp.submit(perpMarketOrder('buy', '0.1', { attach: { stopLoss: '78000', takeProfit: '82000' } }), ctx);
+  const opened = perpArrive(perp, perpPlaced(open), ctx);
+  const legs = perpPlaced(opened);
+  events.push(...open, ...opened, ...perpArrive(perp, legs, ctx));
+  const rest = perp.submit(perpLimit('buy', '79000', '0.05'), ctx);
+  events.push(...rest, ...perpArrive(perp, perpPlaced(rest), ctx));
+  events.push(...perp.onTrade('BTCUSDT', perpTrade('80000', '0.01', false), ctx));
+
+  persist(db, seasonId, sim, events);
+  const limitId = perpPlaced(rest)[0]!.id;
+  const [sl, tp] = legs;
+  return { ...t, events, limitId, slId: sl!.id, tpId: tp!.id };
+}
+
+describe('perps: persist and loadPerpState', () => {
+  it('a long, a resting limit and a stop-loss/take-profit pair round-trip exactly; the invariants hold', () => {
+    const { perp, db, seasonId, limitId, slId, tpId } = perpScenario();
+    const s = perp.state;
+    expect(s.positions.BTCUSDT?.qty.toString()).toBe('0.1');
+    expect(s.orders.get(limitId)?.status).toBe('open');
+    expect([s.orders.get(slId)?.status, s.orders.get(tpId)?.status]).toEqual(['open', 'open']);
+    expect(s.lastTradeId.BTCUSDT).toBeGreaterThan(0);
+    expect(s.ledger.balances.leverage.USDT!.locked.gt(0)).toBe(true);
+
+    const reloaded = reloadSim(db, seasonId);
+    const r = reloaded.perp.state;
+    expect(perpSnapshot(r)).toBe(perpSnapshot(s));
+    expect([...r.orders.keys()].sort()).toEqual([limitId, slId, tpId].sort());
+    for (const o of r.orders.values()) expectRevivedOrder(o);
+    expect(r.orders.get(slId)!.qty).toBeNull();
+    expect(r.orders.get(slId)!.closePosition).toBe(true);
+    const p = r.positions.BTCUSDT!;
+    for (const v of [p.qty, p.entryPrice, p.margin, p.realizedPnl, p.fees, p.funding]) expect(Decimal.isDecimal(v)).toBe(true);
+    expect(r.settings).toEqual({ BTCUSDT: { leverage: 10, marginMode: 'isolated' } });
+    expect(r.ledger.balances.leverage.USDT!.locked.toString()).toBe(r.orders.get(limitId)!.lockAmount.toString());
+    expect(r.dirty.size).toBe(0);
+    expect(checkInvariants(reloaded)).toEqual([]);
+    expect(checkInvariants(new SimEngine(s.ledger, new SpotEngine(emptySpotState(s.ledger)), perp))).toEqual([]);
+
+    // The spot state sees none of it, and the cursors are kept per market.
+    expect(reloaded.spot.state.orders.size).toBe(0);
+    expect(reloaded.spot.state.lastTradeId).toEqual({});
+    expect(db.prepare('SELECT market, symbol, last_trade_id AS id FROM trade_cursor').all()).toEqual([
+      { market: 'perp', symbol: 'BTCUSDT', id: s.lastTradeId.BTCUSDT },
+    ]);
+    expect(db.prepare('SELECT symbol, leverage, margin_mode AS mode FROM perp_settings').all()).toEqual([
+      { symbol: 'BTCUSDT', leverage: 10, mode: 'isolated' },
+    ]);
+    expect(db.prepare("SELECT count(*) c FROM orders WHERE market = 'perp'").get()).toEqual({ c: 4 });
+  });
+
+  it('a resting order with one attached leg round-trips with the other leg null', () => {
+    const { ctx, sim, perp, db, seasonId } = perpSetup();
+    sim.deposit('leverage', D('5000'), ctx);
+    const placed = perp.submit(perpLimit('buy', '79000', '0.05', { attach: { stopLoss: '77000' } }), ctx);
+    const events = [...placed, ...perpArrive(perp, perpPlaced(placed), ctx)];
+    persist(db, seasonId, sim, events);
+    const id = perpPlaced(placed)[0]!.id;
+    const o = reloadSim(db, seasonId).perp.state.orders.get(id)!;
+    expect(o.status).toBe('open');
+    expect(o.attach).toEqual({ stopLoss: D('77000'), takeProfit: null });
+    expect(Decimal.isDecimal(o.attach!.stopLoss)).toBe(true);
+    expectRevivedOrder(o);
+    expect(JSON.stringify(o)).toBe(JSON.stringify(perp.state.orders.get(id)));
+  });
+
+  it('perp events and fills are written as perp rows; a second persist with nothing changed writes nothing', () => {
+    const { sim, perp, db, seasonId } = perpScenario();
+    const rows = db.prepare('SELECT type, symbol, market FROM events ORDER BY id').all() as {
+      type: string;
+      symbol: string | null;
+      market: string | null;
+    }[];
+    expect(rows[0]).toEqual({ type: 'deposit', symbol: null, market: 'leverage' });
+    expect(rows[1]).toEqual({ type: 'leverage_set', symbol: 'BTCUSDT', market: 'perp' });
+    expect(rows.slice(1).every((t) => t.market === 'perp' && t.symbol === 'BTCUSDT')).toBe(true);
+    expect(rows.map((t) => t.type)).toContain('position_opened');
+
+    const pos = perp.state.positions.BTCUSDT!;
+    const fills = db.prepare('SELECT market, fee_asset, position_id, uncovered, realized_pnl, round_trip_id, qty FROM fills');
+    expect(fills.all()).toEqual([
+      { market: 'perp', fee_asset: 'USDT', position_id: pos.id, uncovered: null, realized_pnl: null, round_trip_id: null, qty: '0.1' },
+    ]);
+
+    const count = () => db.prepare('SELECT count(*) c FROM events').get();
+    const before = count();
+    expect(persist(db, seasonId, sim, [])).toBe(false);
+    expect(count()).toEqual(before);
+  });
+
+  it('closing the position deletes its row; the reducing fill carries its realized P&L', () => {
+    const { ctx, sim, perp, db, seasonId } = perpScenario();
+    const positionId = perp.state.positions.BTCUSDT!.id;
+    const close = perp.submit(perpMarketOrder('sell', '0.1', { reduceOnly: true }), ctx);
+    const events = [...close, ...perpArrive(perp, perpPlaced(close), ctx)];
+    expect(events.map((e) => e.type)).toContain('position_closed');
+    expect(perp.state.positions.BTCUSDT).toBeUndefined();
+    persist(db, seasonId, sim, events);
+
+    expect(db.prepare('SELECT count(*) c FROM positions').get()).toEqual({ c: 0 });
+    expect(reloadSim(db, seasonId).perp.state.positions).toEqual({});
+    // Sold 0.1 at the best bid 79990 against an entry of 80000.
+    expect(db.prepare("SELECT position_id, realized_pnl, uncovered FROM fills WHERE side = 'sell'").get()).toEqual({
+      position_id: positionId,
+      realized_pnl: '-1',
+      uncovered: null,
+    });
+    expect(checkInvariants(reloadSim(db, seasonId))).toEqual([]);
+  });
+
+  it('a change with no event (a warning level, a funding window) is still saved, and round-trips', () => {
+    const { ctx, sim, perp, db, seasonId } = perpScenario();
+    const p = perp.state.positions.BTCUSDT!;
+    perp.state.positions.BTCUSDT = { ...p, warnLevel: 0.8 };
+    expect(persist(db, seasonId, sim, [])).toBe(true);
+    expect(reloadSim(db, seasonId).perp.state.positions.BTCUSDT!.warnLevel).toBe(0.8);
+
+    const fundingTime = 8 * 3_600_000;
+    perp.openFundingWindow('BTCUSDT', fundingTime, ctx);
+    expect(persist(db, seasonId, sim, [])).toBe(true);
+    let r = reloadSim(db, seasonId).perp.state;
+    expect(JSON.stringify(r.funding)).toBe(JSON.stringify(perp.state.funding));
+    const w = r.funding.windows.BTCUSDT!;
+    expect([w.fundingTime, w.long.positionId, w.long.maxPositionId, w.long.ownMax.toString()]).toEqual([
+      fundingTime, p.id, p.id, '0.1',
+    ]);
+    expect(Decimal.isDecimal(w.long.max) && Decimal.isDecimal(w.short.min) && Decimal.isDecimal(w.short.ownMax)).toBe(true);
+
+    perp.closeFundingWindow('BTCUSDT', fundingTime, ctx);
+    expect(persist(db, seasonId, sim, [])).toBe(true);
+    r = reloadSim(db, seasonId).perp.state;
+    expect(r.funding.windows).toEqual({});
+    expect(JSON.stringify(r.funding.pending)).toBe(JSON.stringify(perp.state.funding.pending));
+    expect(r.funding.pending[0]!.long.max.toString()).toBe('0.1');
+  });
+
+  it('a reload followed by a persist with nothing changed writes nothing', () => {
+    const { ctx, db, seasonId } = perpScenario();
+    const reloaded = reloadSim(db, seasonId);
+    reloaded.perp.openFundingWindow('BTCUSDT', 8 * 3_600_000, ctx);
+    expect(persist(db, seasonId, reloaded, [])).toBe(true);
+    const again = reloadSim(db, seasonId);
+    expect(persist(db, seasonId, again, [])).toBe(false);
+  });
+
+  it('applied funding times older than 30 days are pruned when the funding state is written', () => {
+    const { perp, sim, db, seasonId } = perpScenario();
+    const now = 100 * DAY;
+    perp.state.funding.applied = { BTCUSDT: [now - 31 * DAY, now - 30 * DAY, now - DAY], ETHUSDT: [now - 40 * DAY] };
+    persist(db, seasonId, sim, [], { now });
+    const expected = { BTCUSDT: [now - 30 * DAY, now - DAY] };
+    expect(perp.state.funding.applied).toEqual(expected);
+    expect(reloadSim(db, seasonId).perp.state.funding.applied).toEqual(expected);
+
+    // Without `now`, the latest event's time is the reference.
+    perp.state.funding.applied.BTCUSDT!.push(now + DAY);
+    persist(db, seasonId, sim, [{ type: 'leverage_set', market: 'perp', time: now + 31 * DAY, symbol: 'ETHUSDT', leverage: 5 }]);
+    expect(reloadSim(db, seasonId).perp.state.funding.applied).toEqual({ BTCUSDT: [now + DAY] });
+  });
+
+  it('a funding side saved without ownMax and maxPositionId loads with its max and position', () => {
+    const { db, seasonId } = perpSetup();
+    const side = (max: string, min: string, positionId: string | null) => ({ max, min, positionId });
+    const funding = {
+      windows: { BTCUSDT: { symbol: 'BTCUSDT', fundingTime: 5, long: side('0.3', '0.1', 'p-1'), short: side('0', '0', null) } },
+      pending: [{ symbol: 'ETHUSDT', fundingTime: 4, long: side('0', '0', null), short: side('2', '2', 'p-2') }],
+      applied: { BTCUSDT: [1, 2] },
+    };
+    db.prepare('INSERT INTO perp_state (season_id, funding) VALUES (?, ?)').run(seasonId, JSON.stringify(funding));
+    const f = loadPerpState(db, seasonId, loadLedger(db, seasonId, ASSETS)).funding;
+    const long = f.windows.BTCUSDT!.long;
+    expect([long.max.toString(), long.min.toString(), long.ownMax.toString(), long.positionId, long.maxPositionId]).toEqual([
+      '0.3', '0.1', '0.3', 'p-1', 'p-1',
+    ]);
+    expect(Decimal.isDecimal(long.ownMax)).toBe(true);
+    const short = f.pending[0]!.short;
+    expect([short.ownMax.toString(), short.maxPositionId]).toEqual(['2', 'p-2']);
+    expect([f.windows.BTCUSDT!.short.ownMax.toString(), f.windows.BTCUSDT!.short.maxPositionId]).toEqual(['0', null]);
+    expect(f.applied).toEqual({ BTCUSDT: [1, 2] });
+  });
+
+  it('a failed write keeps the perp orders marked and the next persist writes them with the position', () => {
+    const { ctx, sim, perp, db, seasonId } = perpSetup();
+    sim.deposit('leverage', D('5000'), ctx);
+    const open = perp.submit(perpMarketOrder('buy', '0.1'), ctx);
+    const events = [...open, ...perpArrive(perp, perpPlaced(open), ctx)];
+    db.exec("CREATE TEMP TRIGGER no_positions BEFORE INSERT ON positions BEGIN SELECT RAISE(ABORT, 'no'); END");
+    expect(() => persist(db, seasonId, sim, events)).toThrow('no');
+    for (const t of ['events', 'orders', 'fills', 'positions']) {
+      expect(db.prepare(`SELECT count(*) c FROM ${t}`).get()).toEqual({ c: 0 });
+    }
+    db.exec('DROP TRIGGER no_positions');
+    expect(persist(db, seasonId, sim, [])).toBe(true);
+    expect(reloadSim(db, seasonId).perp.state.positions.BTCUSDT?.qty.toString()).toBe('0.1');
+    expect(db.prepare("SELECT status FROM orders WHERE market = 'perp'").all()).toEqual([{ status: 'filled' }]);
+  });
+
+  it('settleLateCancels answers a perp order that finished with its cancel in flight, as a perp event', () => {
+    const { ctx, sim, perp, db, seasonId, limitId } = perpScenario();
+    expect(perp.cancel(limitId, ctx).ok).toBe(true);
+    persist(db, seasonId, sim, []);
+    ctx.now += 1;
+    persist(db, seasonId, sim, perp.onTrade('BTCUSDT', perpTrade('78900', '1', true), ctx));
+    expect(perp.state.orders.get(limitId)!.status).toBe('filled');
+
+    // The server stops before the cancel arrives; on restart the finished order is not loaded.
+    expect(reloadSim(db, seasonId).perp.state.orders.has(limitId)).toBe(false);
+    const settled = settleLateCancels(db, seasonId, ctx.now + 60_000);
+    expect(settled.map((e) => [e.type, e.market, e.order.id, e.order.status, e.order.cancelArrivesAt])).toEqual([
+      ['cancel_rejected', 'perp', limitId, 'filled', null],
+    ]);
+    expect(Decimal.isDecimal(settled[0]!.order.filledQty)).toBe(true);
+    expect(db.prepare("SELECT market, symbol FROM events WHERE type = 'cancel_rejected'").all()).toEqual([
+      { market: 'perp', symbol: 'BTCUSDT' },
+    ]);
+    expect(settleLateCancels(db, seasonId, ctx.now + 60_000)).toEqual([]);
+  });
+});
+
+describe('checkInvariants: perps', () => {
+  it('leverage locked USDT must equal the sum of live perp order locks', () => {
+    const { db, seasonId } = perpScenario();
+    const sim = reloadSim(db, seasonId);
+    const lev = sim.ledger.balances.leverage.USDT!;
+    const sum = lev.locked;
+    lev.locked = lev.locked.plus(1);
+    expect(checkInvariants(sim)).toEqual([`Leverage locked USDT ${sum.plus(1)} != sum of live perp order locks ${sum}`]);
+  });
+
+  it('every position has qty > 0 and margin >= 0, and at most one per symbol', () => {
+    const { db, seasonId } = perpScenario();
+    const sim = reloadSim(db, seasonId);
+    const s = sim.perp.state;
+    const p = s.positions.BTCUSDT!;
+    s.positions.BTCUSDT = { ...p, qty: D(0), margin: D('-0.5') };
+    expect(checkInvariants(sim)).toEqual(['Position BTCUSDT qty 0 is not > 0', 'Position BTCUSDT margin -0.5 is < 0']);
+    s.positions.BTCUSDT = p;
+    s.positions.ETHUSDT = { ...p, id: 'p-other' };
+    expect(checkInvariants(sim)).toEqual(['Position under ETHUSDT is for BTCUSDT', 'More than one position for BTCUSDT']);
   });
 });

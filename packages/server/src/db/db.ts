@@ -30,9 +30,7 @@ export function openDb(file: string): Db {
       db.pragma(`user_version = ${m.version}`);
     })();
   }
-  if (current === 0) {
-    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('test_data', '1')").run();
-  }
+  // meta.test_data is never written: only a database created in Phase 1 has it, and keeps it.
   return db;
 }
 

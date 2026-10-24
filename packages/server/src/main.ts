@@ -2,7 +2,7 @@
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
-import { emptyPerpState, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
+import { PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import { buildApp } from './api/http.ts';
 import { ClientHub } from './api/ws.ts';
 import { FuturesRest } from './binance/futuresRest.ts';
@@ -11,7 +11,7 @@ import { PauseController } from './binance/restCore.ts';
 import { fetchUnofficialBrackets, TierLoader } from './binance/tiers.ts';
 import { loadConfig } from './config.ts';
 import { currentSeasonId, openDb } from './db/db.ts';
-import { loadLedger, loadSpotState } from './db/store.ts';
+import { loadLedger, loadPerpState, loadSpotState } from './db/store.ts';
 import { createLogger } from './log.ts';
 import { CandleService } from './market/candles.ts';
 import { FeedHealth } from './market/feedHealth.ts';
@@ -34,7 +34,7 @@ const ledger = loadLedger(db, seasonId, ['USDT', ...config.coins]);
 const sim = new SimEngine(
   ledger,
   new SpotEngine(loadSpotState(db, seasonId, ledger)),
-  new PerpEngine(emptyPerpState(ledger)),
+  new PerpEngine(loadPerpState(db, seasonId, ledger)),
 );
 
 // Binance limits REST calls and WebSocket connection attempts per IP: one pause and one
