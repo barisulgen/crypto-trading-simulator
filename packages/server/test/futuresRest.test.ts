@@ -199,6 +199,28 @@ describe('signed leverageBracket', () => {
     }
   });
 
+  it('a signed call that waits for weight is timestamped when it is sent, so recvWindow 5000 never expires in the queue', async () => {
+    let clockRef: FakeClock | null = null;
+    const { rest, clock, calls } = client((url) => {
+      if (pathOf(url) === '/fapi/v1/time') return res(200, {}, { serverTime: clockRef!.now + 1234 });
+      return res(200, {}, official);
+    });
+    clockRef = clock;
+    for (let i = 0; i < 95; i++) await rest.aggTrades({ symbol: 'BTCUSDT', fromId: i, limit: 1000 }); // 1900 at T0
+    clock.advance(40_000);
+    for (let i = 0; i < 19; i++) await rest.klines('BTCUSDT', '1m', 10); // 1919: room for the time call only
+    const signedCall = rest.leverageBracket('k3y', 's3cret');
+    await tick();
+    await tick();
+    expect(calls.filter((c) => pathOf(c.url) === '/fapi/v1/leverageBracket')).toHaveLength(0);
+    clock.advance(20_000); // the calls made at T0 leave the window: the signed call is sent at T0 + 60 s
+    await signedCall;
+    const signed = calls.find((c) => pathOf(c.url) === '/fapi/v1/leverageBracket')!;
+    const [unsigned, signature] = signed.url.split('?')[1]!.split('&signature=') as [string, string];
+    expect(unsigned).toBe(`timestamp=${T0 + 60_000 + 1234}&recvWindow=5000`);
+    expect(signature).toBe(createHmac('sha256', 's3cret').update(unsigned).digest('hex'));
+  });
+
   it('a failing signed call through the tier loader never logs the key, secret or signature', async () => {
     const { lines, logger } = spyLogger();
     const { rest, calls } = client((url) => {

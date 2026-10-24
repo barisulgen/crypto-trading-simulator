@@ -155,15 +155,20 @@ export class RestCore {
     this.d.weights.dispose();
   }
 
-  async get(path: string, query: string, opts: RequestOptions): Promise<RawJson> {
+  /**
+   * `query` may be a function: it is then called only once the weight is acquired, right before the
+   * request is sent, so a signed query's timestamp is never older than its time in the queue.
+   */
+  async get(path: string, query: string | (() => string), opts: RequestOptions): Promise<RawJson> {
     this.assertUsable();
     const ticket = opts.weight > 0 ? await this.d.weights.acquire(opts.weight, opts.lane) : null;
     this.assertUsable();
+    const q = typeof query === 'function' ? query() : query;
     const sentAt = this.d.now();
     if (ticket !== null) this.d.weights.markSent(ticket);
     const init: RequestInit = { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
     if (opts.headers) init.headers = opts.headers;
-    const res = await this.d.fetchImpl(`${this.d.base}${path}${query ? `?${query}` : ''}`, init);
+    const res = await this.d.fetchImpl(`${this.d.base}${path}${q ? `?${q}` : ''}`, init);
     const used = Number(res.headers?.get?.('x-mbx-used-weight-1m') ?? Number.NaN);
     const header = Number.isFinite(used) && used >= 0 ? used : null;
     if (header !== null && ticket !== null) this.d.weights.recordHeader(header, ticket, sentAt);

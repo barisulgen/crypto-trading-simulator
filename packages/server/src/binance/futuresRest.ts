@@ -217,8 +217,10 @@ export class FuturesRest {
     this.core.dispose();
   }
 
-  private get(path: string, query: string, headers?: Record<string, string>): Promise<RawJson> {
-    return this.core.get(path, query, { weight: futuresRequestWeight(path, query), lane: futuresRequestLane(path), headers });
+  /** `query` as a function is built only when the request is sent (see RestCore.get); `weightQuery` then prices it. */
+  private get(path: string, query: string | (() => string), headers?: Record<string, string>, weightQuery = ''): Promise<RawJson> {
+    const weight = futuresRequestWeight(path, typeof query === 'string' ? query : weightQuery);
+    return this.core.get(path, query, { weight, lane: futuresRequestLane(path), headers });
   }
 
   private async fundingGet(path: string, query: string): Promise<RawJson> {
@@ -276,8 +278,9 @@ export class FuturesRest {
   }
 
   /**
-   * The signed leverage brackets of every symbol. The timestamp is corrected to Binance's clock;
-   * errors are scrubbed of the key, the secret and the signature before they leave here.
+   * The signed leverage brackets of every symbol. The timestamp is corrected to Binance's clock and
+   * taken when the request is sent, after any wait for weight, so the queue never eats into
+   * recvWindow. Errors are scrubbed of the key, the secret and the signature before they leave here.
    */
   async leverageBracket(key: string, secret: string): Promise<RawJson> {
     const before = this.now();
@@ -286,12 +289,17 @@ export class FuturesRest {
     const serverTime = Number(time?.serverTime);
     if (!Number.isSafeInteger(serverTime)) throw new Error('Binance /fapi/v1/time returned no serverTime');
     const offset = serverTime - Math.round((before + after) / 2);
-    const unsigned = `timestamp=${this.now() + offset}&recvWindow=${RECV_WINDOW_MS}`;
-    const signature = createHmac('sha256', secret).update(unsigned).digest('hex');
+    let signature: string | null = null;
+    const signedQuery = () => {
+      const unsigned = `timestamp=${this.now() + offset}&recvWindow=${RECV_WINDOW_MS}`;
+      signature = createHmac('sha256', secret).update(unsigned).digest('hex');
+      return `${unsigned}&signature=${signature}`;
+    };
     try {
-      return await this.get('/fapi/v1/leverageBracket', `${unsigned}&signature=${signature}`, { 'X-MBX-APIKEY': key });
+      return await this.get('/fapi/v1/leverageBracket', signedQuery, { 'X-MBX-APIKEY': key });
     } catch (e) {
-      throw new Error(redact(e instanceof Error ? e.message : String(e), [key, secret, signature]));
+      const secrets = signature === null ? [key, secret] : [key, secret, signature];
+      throw new Error(redact(e instanceof Error ? e.message : String(e), secrets));
     }
   }
 }
