@@ -65,8 +65,8 @@ function place(t: Setup, req: Omit<PerpOrderRequest, 'symbol'>, at = T(5, 50)): 
 }
 
 /** Market long 0.1 at 80000, 20x: margin 400 − fee 4 = 396; free 600. */
-function openLong(t: Setup): void {
-  place(t, { side: 'buy', type: 'market', qty: '0.1' });
+function openLong(t: Setup, at = T(5, 50)): void {
+  place(t, { side: 'buy', type: 'market', qty: '0.1' }, at);
   expect(t.position()).toMatchObject({ side: 'long' });
   expect(s(t.position()!.margin)).toBe('396');
   expect(s(t.lev().free)).toBe('600');
@@ -84,9 +84,9 @@ function openShort(t: Setup): void {
   expect(s(t.position()!.margin)).toBe('396');
 }
 
-/** Set the position's stop-loss and/or take-profit at 05:55 and let them arrive (armed). */
-function armTpSl(t: Setup, input: { stopLoss?: string; takeProfit?: string }): PerpOrder[] {
-  t.ctx.now = T(5, 55);
+/** Set the position's stop-loss and/or take-profit (at 05:55 by default) and let them arrive (armed). */
+function armTpSl(t: Setup, input: { stopLoss?: string; takeProfit?: string }, at = T(5, 55)): PerpOrder[] {
+  t.ctx.now = at;
   const placed = t.sim.setPositionTpSl(SYMBOL, input, t.ctx);
   const legs = placed.map((e) => {
     if (e.type !== 'order_placed') throw new Error(`not placed: ${JSON.stringify(placed)}`);
@@ -168,7 +168,8 @@ describe('perp catch-up: funding and mark-candle liquidation (long 0.1 @80000, m
 
     const [funding] = ofType(events, 'funding');
     expect(ofType(events, 'funding')).toHaveLength(1);
-    expect(funding!.time).toBe(T(8, 0));
+    // Dated when its window closes, 15 s after the funding time: its sizes are final only then.
+    expect(funding!.time).toBe(T(8, 0, 15));
     expect(funding!.fundingTime).toBe(T(8, 0));
     expect(s(funding!.amount)).toBe('-0.79');
     expect(funding!.target).toBe('margin');
@@ -199,13 +200,26 @@ describe('perp catch-up: funding and mark-candle liquidation (long 0.1 @80000, m
     expectTaggedInOrder(events);
   });
 
-  it('funding comes first in its minute: the liquidation price it raises is judged on that minute’s mark', () => {
+  it('the liquidation price a funding raises is judged on its minute’s mark, dated no earlier than the funding', () => {
     const t = setup();
     openLong(t);
     const marks = markCandles([candle(T(8, 0), '76350', '80000')]);
-    const events = run(t, input({ markCandles: marks, funding: [funding0800] }));
-    expect(ofType(events, 'liquidation').map((e) => [e.time, s(e.markPrice)])).toEqual([[T(8, 0), '76353.31325301']]);
+    const settled = { ...funding0800, time: T(8, 0, 0, 1) };
+    const events = run(t, input({ markCandles: marks, funding: [settled] }));
+    expect(ofType(events, 'funding').map((e) => [e.time, e.fundingTime])).toEqual([[T(8, 0, 15, 1), T(8, 0, 0, 1)]]);
+    const liquidations = ofType(events, 'liquidation').map((e) => [e.time, s(e.markPrice)]);
+    expect(liquidations).toEqual([[T(8, 0, 15, 1), '76353.31325301']]);
     expect(events.map((e) => e.type).slice(0, 2)).toEqual(['funding', 'liquidation']);
+    expectTaggedInOrder(events);
+  });
+
+  it('a liquidation in the minute the gap starts in is dated no earlier than the gap', () => {
+    const t = setup();
+    openLong(t);
+    const from = T(6, 0, 30);
+    const events = run(t, input({ from, markCandles: markCandles([candle(T(6, 0), '76340', '80000')]) }));
+    expect(ofType(events, 'liquidation').map((e) => e.time)).toEqual([from]);
+    expectTaggedInOrder(events);
   });
 
   it('a stop-loss reached in the minute the mark reaches the liquidation price is cancelled by the liquidation', () => {
@@ -263,6 +277,43 @@ describe('perp catch-up: funding and mark-candle liquidation (long 0.1 @80000, m
     expect(ofType(second, 'funding')).toEqual([]);
     expect(s(t.position()!.margin)).toBe('395.21');
     expect(summary(second).actions).toEqual([]);
+  });
+});
+
+describe('perp catch-up: funding windows (15 s either side of 08:00, rate 0.0001, mark 79000)', () => {
+  it('a long closed by a replayed fill at 07:59:50 still pays on the size it held in the window', () => {
+    const t = setup();
+    openLong(t);
+    const o = place(t, { side: 'sell', type: 'limit', qty: '0.1', price: '80500', reduceOnly: true });
+    const events = run(t, input({ trades: [trade(101, '80600', '0.1', false, T(7, 59, 50))], funding: [funding0800] }));
+    expect(ofType(events, 'fill').map((e) => [e.order.id, e.time])).toEqual([[o.id, T(7, 59, 50)]]);
+    expect(t.position()).toBeUndefined();
+    const funding = ofType(events, 'funding');
+    expect(funding.map((e) => [e.time, s(e.qty), s(e.amount), e.target])).toEqual([[T(8, 0, 15), '0.1', '-0.79', 'wallet']]);
+    // 600 + 396 margin + 50 − 1.61 maker fee, then − 0.79 funding.
+    expect(s(t.lev().free)).toBe('1043.6');
+    expectTaggedInOrder(events);
+  });
+
+  it('a long added to by a replayed fill at 08:00:05 pays on the larger size', () => {
+    const t = setup();
+    openLong(t);
+    place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' });
+    const events = run(t, input({ trades: [trade(101, '78950', '0.1', true, T(8, 0, 5))], funding: [funding0800] }));
+    const funding = ofType(events, 'funding');
+    expect(funding.map((e) => [e.time, s(e.qty), s(e.amount), e.target])).toEqual([[T(8, 0, 15), '0.2', '-1.58', 'margin']]);
+    // 396 + 395 − 1.58 fee, then − 1.58 funding.
+    expect(s(t.position()!.margin)).toBe('787.84');
+    expectTaggedInOrder(events);
+  });
+
+  it('a short opened by a replayed fill at 08:00:05 receives nothing: it was not held through the window', () => {
+    const t = setup();
+    place(t, { side: 'sell', type: 'limit', qty: '0.1', price: '80500' });
+    const events = run(t, input({ trades: [trade(101, '80600', '0.1', false, T(8, 0, 5))], funding: [funding0800] }));
+    expect(ofType(events, 'position_opened').map((e) => [e.time, e.position.side])).toEqual([[T(8, 0, 5), 'short']]);
+    expect(ofType(events, 'funding')).toEqual([]);
+    expect(t.position()!.funding.isZero()).toBe(true);
   });
 });
 
@@ -467,6 +518,31 @@ describe('perp catch-up: limit orders', () => {
     expectTaggedInOrder(events);
   });
 
+  it('a stop held from before a gap older than 47 h closes before the limits are cancelled at the gap start', () => {
+    const t = setup();
+    const from = TO - 50 * HOUR;
+    openLong(t, from - 600_000);
+    const [sl] = armTpSl(t, { stopLoss: '78000' }, from - 540_000);
+    const o = place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' }, from - 480_000);
+    // Triggered 30 s before the gap by a buyer-initiated trade (which fills no buy limit); its
+    // arrival found the data stale, so it waits.
+    t.ctx.now = from - 30_000;
+    const fired = t.sim.onTrade('perp', SYMBOL, trade(50, '77990', '1', false, from - 30_000), t.ctx);
+    expect(fired.map((e) => e.type)).toEqual(['order_triggered']);
+    t.perpMarket.setFresh(SYMBOL, false);
+    t.ctx.now = t.stored(sl!.id).arrivesAt!;
+    expect(t.sim.arrive('perp', sl!.id, t.ctx)).toEqual([]);
+
+    const candles = [candle(from - 60_000, '77800', '78100'), ...minutes('79990', '80010', [], TO - 60 * 60_000)];
+    const events = run(t, input({ from, candles, markCandles: [], trades: 'unavailable' }));
+    expect(ofType(events, 'fill').map((e) => [e.order.id, s(e.fill.price), e.time])).toEqual([
+      [sl!.id, '77800', from - 30_000],
+    ]);
+    const cancelled = ofType(events, 'order_cancelled');
+    expect(cancelled.map((e) => [e.order.id, e.reason, e.time])).toEqual([[o.id, 'catch_up_unavailable', from]]);
+    expectTaggedInOrder(events);
+  });
+
   it('a limit filled by a replayed trade opens a position whose liquidation is judged from then on', () => {
     const t = setup();
     const o = place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' });
@@ -506,6 +582,22 @@ describe('perp catch-up: limit orders', () => {
     const marks = markCandles([candle(T(10, 30), '75300', '80000')]);
     const events = run(t, input({ candles: crossed(), trades: fillTrades(), markCandles: marks }));
     expect(ofType(events, 'liquidation').map((e) => e.time)).toEqual([T(10, 30, 20)]);
+    expectTaggedInOrder(events);
+  });
+
+  it('each replayed fill is judged on the minute’s mark: a later fill’s margin does not hide a liquidation', () => {
+    const t = setup();
+    const first = place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' });
+    const second = place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '76100' });
+    // After the first fill the liquidation price is 75367.27…; after both it would be 73983.9…
+    const marks = markCandles([candle(T(10, 30), '75000', '80000')]);
+    const trades = [trade(101, '78950', '0.1', true, T(10, 30, 20)), trade(102, '76000', '0.1', true, T(10, 30, 40))];
+    const candles = lastCandles([candle(T(10, 30), '76000', '80000')]);
+    const events = run(t, input({ candles, trades, markCandles: marks }));
+    expect(ofType(events, 'fill').map((e) => [e.order.id, e.time])).toEqual([[first.id, T(10, 30, 20)]]);
+    const liquidations = ofType(events, 'liquidation').map((e) => [e.time, s(e.markPrice)]);
+    expect(liquidations).toEqual([[T(10, 30, 20), '75367.2690763']]);
+    expect(ofType(events, 'order_cancelled').map((e) => [e.order.id, e.reason])).toEqual([[second.id, 'liquidation']]);
     expectTaggedInOrder(events);
   });
 

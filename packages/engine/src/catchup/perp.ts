@@ -1,5 +1,6 @@
 import type { Decimal } from '../decimal.ts';
 import type { PerpEngine } from '../perp/engine.ts';
+import { FUNDING_WINDOW_MS } from '../perp/funding.ts';
 import { liquidateAtLiquidationPrice } from '../perp/liquidation.ts';
 import { bracketsOrNull } from '../perp/market.ts';
 import { liquidationPrice } from '../perp/math.ts';
@@ -28,13 +29,16 @@ import {
 import type { Candle1m, CatchUpBasis, CatchUpEvent, CatchUpInput } from './types.ts';
 
 /**
- * Perp catch-up over one symbol's gap, minute by minute: the funding settled in the minute, then
- * liquidation on the minute's mark candle (at the liquidation price), then stops already
- * triggered, then close-position stop-losses and take-profits on the last-price candle, then limit
- * fills from replayed trades, then one more pass of liquidation and stops for what those fills
- * opened or armed. There is no historical book, so nothing here reads the live book. Every event
- * is dated at the moment it represents and tagged with the gap and its basis; a `catch_up` summary
- * follows when an order, a position or a funding window existed during the gap.
+ * Perp catch-up over one symbol's gap, minute by minute: funding windows open, then liquidation on
+ * the minute's mark candle (at the liquidation price), then stops already triggered, then
+ * close-position stop-losses and take-profits on the last-price candle, then limit fills from
+ * replayed trades (each fill judged at once against the minute's mark), then the funding windows
+ * that close in the minute settle, then one more pass of liquidation and stops for what the fills
+ * and the funding changed or armed. Funding is settled as live: on the sizes held through its
+ * window (15 s either side of the funding time), which the replayed fills widen. There is no
+ * historical book, so nothing here reads the live book. Every event is tagged with the gap and its
+ * basis, dated at the moment it represents and never before an event already emitted; a
+ * `catch_up` summary follows when an order, a position or a funding window existed during the gap.
  */
 export function applyPerpCatchUp(
   engine: PerpEngine,
@@ -81,15 +85,17 @@ class PerpCatchUp {
   private readonly cancelsDelivered = new Set<string>();
   private readonly candleAt = new Map<number, Candle1m>();
   private readonly markAt = new Map<number, Candle1m>();
-  /** The settlements of the gap in time order, and how many of them have been applied. */
+  /** The settlements given, one per funding time, in time order. */
   private readonly funding: Settlement[];
-  private fundingDone = 0;
+  /** How many settlements have had their window opened, and how many have been settled. */
+  private windowsOpened = 0;
+  private settled = 0;
   /** The latest price the run has seen: a replayed trade's, or a walked minute's close. */
   private last: Decimal | null = null;
   /** The highest trade id the run replayed; null when it replayed none. */
   private replayedTo: number | null = null;
-  /** When a fill of the minute being walked last changed the position; null when none did. */
-  private changedAt: number | null = null;
+  /** The time of the latest event emitted: no later event is dated before it. */
+  private clock = -Infinity;
 
   constructor(
     private readonly engine: PerpEngine,
@@ -100,7 +106,9 @@ class PerpCatchUp {
     this.symbol = input.symbol;
     for (const c of walkedCandles(input.candles, input.to)) this.candleAt.set(c.openTime, c);
     for (const c of walkedCandles(input.markCandles ?? [], input.to)) this.markAt.set(c.openTime, c);
-    this.funding = (input.funding ?? []).filter((f) => f.time < input.to).sort((a, b) => a.time - b.time);
+    const byTime = new Map<number, Settlement>();
+    for (const f of input.funding ?? []) if (f.time < input.to && !byTime.has(f.time)) byTime.set(f.time, f);
+    this.funding = [...byTime.values()].sort((a, b) => a.time - b.time);
   }
 
   run(): (PerpEvent | CatchUpEvent)[] {
@@ -110,31 +118,43 @@ class PerpCatchUp {
       this.input.trades === 'unavailable'
         ? null
         : usableTrades(this.input, this.input.trades, this.s.lastTradeId[this.symbol]);
-    if (trades === null) this.cancelRestingLimits(from);
+    // Without the gap's trades the resting limits are cancelled at its start, once what came
+    // before it (stops held from before the gap, cancels due before it) has been walked.
+    let limitsChecked = trades !== null;
     this.armWaitingLegs(from);
 
     for (const start of this.minutes()) {
       const end = start + MINUTE_MS;
       const c = this.candleAt.get(start);
-      this.changedAt = null;
-      this.deliverCancels((at) => at < start);
-      this.fundingStep(end);
       const gap = inGap(start, from, to);
+      this.deliverCancels((at) => at < start);
+      if (gap && !limitsChecked) {
+        this.cancelRestingLimits(from);
+        limitsChecked = true;
+      }
+      // Windows that closed in minutes no candle covered settle at the next walked minute, first.
+      this.settleFunding(start);
+      this.openFundingWindows(end);
       if (gap) this.liquidationStep(start);
       this.triggeredStep(start, c);
       if (gap) {
         if (c) this.stopStep(c);
-        if (trades) this.tradeStep(trades.filter((t) => t.time >= start && t.time < end));
+        if (trades) this.tradeStep(start, trades.filter((t) => t.time >= start && t.time < end));
+      }
+      this.settleFunding(end);
+      if (gap) {
         this.deliverCancels((at) => at < end);
-        // One more pass for the positions this minute's fills opened or changed and the stops they armed.
+        // One more pass for what this minute's fills and funding changed, and the stops the fills armed.
         this.liquidationStep(start);
         this.triggeredStep(start, c);
         if (c) this.stopStep(c);
       }
       if (c) this.last = c.close;
     }
-    // Settlements in minutes no candle covered are still applied, each at its own time.
-    this.fundingStep(Infinity);
+    if (!limitsChecked) this.cancelRestingLimits(from);
+    // Settlements whose window closes after the last walked minute settle here, at that close.
+    this.openFundingWindows(Infinity);
+    this.settleFunding(Infinity);
     this.deliverCancels(() => true);
     // The trade cursor moves past every trade replayed, so neither the live feed nor a later run
     // over an overlapping gap can use one again.
@@ -198,9 +218,10 @@ class PerpCatchUp {
 
   /**
    * Without the gap's trades no limit fill can be replayed, so every resting limit and post-only
-   * order is cancelled at the start of the gap.
+   * order is cancelled at the start of the gap, after the owner's cancels that arrived before it.
    */
   private cancelRestingLimits(from: number): void {
+    this.deliverCancels((at) => at < from);
     const resting = this.ordersOf(restingLimit);
     for (const o of resting) {
       const events = cancelOrder(this.s, o, 'catch_up_unavailable', remainingQty(o), this.at(from, null));
@@ -230,21 +251,57 @@ class PerpCatchUp {
 
   // ---- steps ----
 
-  /** The settlements due before `end` are applied, each at its own time, once per funding time. */
-  private fundingStep(end: number): void {
-    while (this.fundingDone < this.funding.length && this.funding[this.fundingDone]!.time < end) {
-      const f = this.funding[this.fundingDone]!;
-      this.fundingDone += 1;
-      const events = this.engine.applyFunding(this.symbol, f.time, f.rate, f.markPrice, this.at(f.time, this.last));
-      this.emit(events, 'funding_history', floorMinute(f.time));
+  /** When a settlement's window closes: 15 s after its funding time, or at the end of the gap if sooner. */
+  private closeOf(f: Settlement): number {
+    return Math.min(f.time + FUNDING_WINDOW_MS, this.input.to);
+  }
+
+  /**
+   * Open the window of every settlement whose window opens (15 s before its funding time) before
+   * `end`, seeded with the position as the walk has it now: a window opened in a minute takes in
+   * every fill of that minute. A window already open, waiting for its rate or applied (live, or by
+   * an earlier run) is left as it is.
+   */
+  private openFundingWindows(end: number): void {
+    const funding = this.funding;
+    while (this.windowsOpened < funding.length && funding[this.windowsOpened]!.time - FUNDING_WINDOW_MS < end) {
+      const f = funding[this.windowsOpened]!;
+      this.windowsOpened += 1;
+      this.engine.openFundingWindow(this.symbol, f.time, this.at(f.time - FUNDING_WINDOW_MS, this.last));
     }
+  }
+
+  /**
+   * Settle every settlement whose window closes before `limit`: the window closes and the funding
+   * is applied at its settled rate and mark, on the sizes held through the window (a payer on the
+   * largest, a receiver on the smallest), exactly once per funding time. Dated at the window's
+   * close, the first moment its sizes are final; the owner's cancels that arrived by then go first.
+   */
+  private settleFunding(limit: number): void {
+    while (this.settled < this.funding.length && this.closeOf(this.funding[this.settled]!) < limit) {
+      const f = this.funding[this.settled]!;
+      this.settled += 1;
+      // A window not opened yet (its minutes were not walked) opens now, on the position as it is.
+      if (this.windowsOpened < this.settled) this.openFundingWindows(f.time - FUNDING_WINDOW_MS + 1);
+      const close = this.closeOf(f);
+      this.deliverCancels((at) => at <= close);
+      const at = this.at(close, this.last);
+      this.engine.closeFundingWindow(this.symbol, f.time, at);
+      const events = this.engine.applyFunding(this.symbol, f.time, f.rate, f.markPrice, at);
+      this.emit(events, 'funding_history', floorMinute(close));
+    }
+  }
+
+  /** The earliest an event of the gap minute opening at `start` may be dated. */
+  private floor(start: number): number {
+    return Math.max(start, this.input.from, this.clock);
   }
 
   /**
    * The position is liquidated when the minute's mark candle reached its current liquidation price
    * (a long's mark low at or below it, a short's mark high at or above it), with that price as the
-   * mark. Dated at the minute's start, or at the fill of this minute that last changed the position.
-   * Never judged without a mark candle.
+   * mark. Dated at the minute's start, never before the gap or before the fill or funding that
+   * brought it. Never judged without a mark candle.
    */
   private liquidationStep(start: number): void {
     const p = this.s.positions[this.symbol];
@@ -255,7 +312,7 @@ class PerpCatchUp {
     const lp = liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin);
     if (lp === null) return;
     if (p.side === 'long' ? mark.low.gt(lp) : mark.high.lt(lp)) return;
-    const time = Math.max(start, this.changedAt ?? start);
+    const time = this.floor(start);
     const events = liquidateAtLiquidationPrice(this.s, this.symbol, lp, this.at(time, this.last));
     // The summary tells of the liquidation before the orders it cancelled.
     this.emit(events, 'mark_candle', start, 'liquidation');
@@ -272,8 +329,8 @@ class PerpCatchUp {
       const triggeredAt = o.triggeredAt ?? start;
       const minute = this.candleAt.get(floorMinute(triggeredAt)) ?? c;
       if (!minute) continue;
-      // Dated within the minute its price comes from, and never before its trigger.
-      const time = Math.max(triggeredAt, minute.openTime);
+      // Dated within the minute its price comes from, never before its trigger or an earlier event.
+      const time = Math.max(triggeredAt, minute.openTime, this.clock);
       const worst = worstPrice(o.side, minute);
       this.emit(this.engine.closeAt(o, worst, this.at(time, worst)), 'trigger_minute_worst_price', minute.openTime);
     }
@@ -299,7 +356,7 @@ class PerpCatchUp {
       // Re-read: a stop that fired earlier in this loop may have cancelled this order.
       const o = this.s.orders.get(id)!;
       if (o.status !== 'open') continue;
-      const time = Math.max(c.openTime, this.armedAt.get(id) ?? o.arrivesAt ?? c.openTime);
+      const time = Math.max(this.floor(c.openTime), this.armedAt.get(id) ?? o.arrivesAt ?? c.openTime);
       const worst = worstPrice(o.side, c);
       const at = this.at(time, worst);
       const before = this.actions.length;
@@ -314,10 +371,14 @@ class PerpCatchUp {
   /**
    * The minute's replayed trades in time order: each fills, at their own price and the maker fee,
    * the resting limit and post-only orders it went strictly through and that had reached the
-   * exchange before it. Cancels that arrive meanwhile are delivered first, at their own time.
+   * exchange before it. A funding window that closed meanwhile is settled first, and cancels that
+   * arrive meanwhile are delivered first, at their own time. After each fill the position is judged
+   * against the minute's mark candle, so a liquidation the position reached in between is not
+   * hidden by the margin a later fill adds.
    */
-  private tradeStep(trades: AggTrade[]): void {
+  private tradeStep(start: number, trades: AggTrade[]): void {
     for (const trade of trades) {
+      this.settleFunding(trade.time);
       this.deliverCancels((at) => at <= trade.time);
       const resting = this.ordersOf((o) => restingLimit(o) && o.arrivesAt !== null && trade.time > o.arrivesAt);
       for (const { orderId, qty } of allocateTradeThrough(resting, trade)) {
@@ -327,7 +388,7 @@ class PerpCatchUp {
         const events = this.engine.fillAt(o, qty, o.price!, 'maker', this.at(trade.time, trade.price));
         this.emit(events, 'aggtrade_replay', floorMinute(trade.time));
         this.armPlacedLegs(events, trade.time);
-        if (events.some((e) => e.type === 'fill')) this.changedAt = trade.time;
+        if (events.some((e) => e.type === 'fill')) this.liquidationStep(start);
       }
       this.last = trade.price;
       this.replayedTo = Math.max(this.replayedTo ?? -Infinity, trade.id);
@@ -368,6 +429,7 @@ class PerpCatchUp {
     const rest: string[] = [];
     for (const e of events) {
       this.out.push({ ...e, catchUp: { from, to, basis } });
+      this.clock = Math.max(this.clock, e.time);
       const action = this.describe(e, basis, minute);
       if (action !== null) (e.type === lead ? first : rest).push(action);
     }
