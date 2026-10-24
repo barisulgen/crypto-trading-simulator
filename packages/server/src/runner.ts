@@ -1337,10 +1337,12 @@ export class EngineRunner implements FundingSim {
 
   /**
    * Every minute while data is fresh; skipped when any held coin's price or position's mark is stale
-   * or missing, and when it is the first to run after a pause (the books are from before it).
+   * or missing, when it is the first to run after a pause (the books are from before it), and while
+   * any gap is open or any key catches up (its catch-up may still change the account).
    */
   private snapshotEquity(): void {
     if (this.checkStall(this.d.now())) return;
+    if (this.gaps.any() || this.catchUp.keys().length > 0) return;
     const value = this.value();
     if (value.coins.some((c) => !c.fresh) || value.leverage.positions.some((p) => !p.markFresh)) return;
     insertEquitySnapshot(this.d.db, this.d.seasonId, value, this.d.now());

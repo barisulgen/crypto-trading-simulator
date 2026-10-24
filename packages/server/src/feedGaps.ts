@@ -78,6 +78,11 @@ export class FeedGaps {
     return this.open.has(key);
   }
 
+  /** Whether any key has a gap open. */
+  any(): boolean {
+    return this.open.size > 0;
+  }
+
   /** Whether the key's open gap closes only at a health poll (it began with a pause). */
   isPollOnly(key: MarketKey): boolean {
     return this.open.get(key)?.pollOnly === true;

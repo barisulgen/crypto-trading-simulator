@@ -621,6 +621,39 @@ describe('EngineRunner', () => {
     expect(snaps()).toHaveLength(1);
   });
 
+  it('no equity snapshot while any gap is open or any key catches up: the account may still change once it is caught up', async () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000')); // no coin held, no position: nothing priced on stale data
+    const snaps = () => t.db.prepare('SELECT time FROM equity_snapshots').all() as { time: number }[];
+    t.perp.setFresh('BTCUSDT', false); // the perp feed of a coin not traded
+    t.clock.advance(60_000);
+    expect(t.runner.gate(marketKey('perp', 'BTCUSDT'))).toBe('stale');
+    expect(snaps()).toEqual([]);
+    t.perp.setFresh('BTCUSDT', true);
+    t.clock.advance(60_000);
+    expect(snaps()).toEqual([{ time: T0 + 120_000 }]);
+
+    // A stop open across a gap: catching up (its run held) until the history comes.
+    t.runner.submit(marketBuy('1'));
+    t.clock.advance(100);
+    t.runner.submit(stopSell('0.5', '99'));
+    t.clock.advance(200);
+    t.market.setFresh('BTCUSDT', false);
+    t.clock.advance(2000);
+    const release = t.history.hold();
+    t.market.setFresh('BTCUSDT', true);
+    t.clock.advance(1000);
+    expect(t.runner.catchingUp()).toEqual([marketKey('spot', 'BTCUSDT')]);
+    t.clock.advance(60_000);
+    expect(snaps()).toHaveLength(1);
+    release();
+    await settle();
+    expect(t.runner.catchingUp()).toEqual([]);
+    t.clock.advance(60_000);
+    expect(snaps()).toHaveLength(2);
+  });
+
   it('the first equity snapshot after a sleep is skipped: it would price the coins on the book from before the pause', () => {
     const t = setup();
     t.runner.start();
