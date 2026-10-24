@@ -14,6 +14,7 @@ import {
   rejectOrder,
   rejectPending,
   remainingQty,
+  slotsInUse,
 } from './orders.ts';
 import type { PerpFields } from './orders.ts';
 import {
@@ -28,6 +29,7 @@ import type { PerpFillTerms } from './position.ts';
 import { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './rules.ts';
 import { freeUsdt, leverageFor } from './state.ts';
 import type { PerpState } from './state.ts';
+import { attachReason } from './stops.ts';
 import { maxLeverage, maxNotionalAt } from './tiers.ts';
 import type {
   Bracket,
@@ -87,7 +89,7 @@ function bandReason(best: Decimal, mark: Decimal, rules: PerpRules): string {
 }
 
 /** Walk `book` within the band; bandLimited when the band, not the book, stopped it short. */
-function walkInBand(
+export function walkInBand(
   book: BookSnapshot,
   side: Side,
   qty: Decimal,
@@ -174,8 +176,9 @@ export function positionChecks(
 
 /**
  * Freshness, the leverage tiers, amounts, exchange filters, leverage, the one-way rule, reduce-only,
- * the maximum notional at the leverage, the book within the price band, and the funds, in that
- * order. Stops at the first problem; later fields stay null. Reads state, never writes it.
+ * the maximum notional at the leverage, the attached stop-loss/take-profit against the last price,
+ * the book within the price band, and the funds, in that order. Stops at the first problem; later
+ * fields stay null. Reads state, never writes it.
  */
 export function planMarket(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): MarketPlan {
   const symbol = req.symbol;
@@ -203,7 +206,6 @@ export function planMarket(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): M
   const read = readPerpAmount(req);
   plan.fields = read.fields;
   if (read.reason !== null) return fail(read.reason);
-  if (req.attach) return fail('Attached stop-loss and take-profit are not available for perpetuals yet');
   const mark = validMark(symbol, ctx);
   plan.mark = mark;
   if (!mark) return fail(MARK_UNAVAILABLE);
@@ -219,17 +221,22 @@ export function planMarket(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): M
   }
   const qty = plan.fields.qty!;
 
-  const live = liveOrders(s, symbol);
   const invalid = validatePerpOrder(
     { symbol, side: req.side, type: 'market', qty, reduceOnly: plan.reduceOnly },
     rules,
-    { mark, openOrders: live.length },
+    { mark, openOrders: slotsInUse(s, symbol) },
   );
   if (invalid) return fail(invalid);
 
   const checked = positionChecks(s, { symbol, side: req.side, qty, reduceOnly: plan.reduceOnly }, plan, tiers, mark);
   if (checked.reason !== null) return fail(checked.reason);
   plan.position = checked.position;
+  if (plan.fields.attach) {
+    const last = ctx.market.lastPrice(symbol);
+    if (!last) return fail(`Last price unavailable for ${symbol}`);
+    const attach = attachReason(s, { symbol, side: req.side, type: 'market' }, plan.fields.attach, last, rules);
+    if (attach) return fail(attach);
+  }
 
   const book = ctx.market.book(symbol);
   const best = bestPrice(book, req.side);

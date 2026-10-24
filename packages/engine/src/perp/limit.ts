@@ -25,6 +25,7 @@ import {
   rejectOrder,
   rejectPending,
   remainingQty,
+  slotsInUse,
 } from './orders.ts';
 import type { PerpFields } from './orders.ts';
 import { applyOpeningFill, applyReducingFill, positionClosed } from './position.ts';
@@ -32,6 +33,7 @@ import type { PerpFillTerms } from './position.ts';
 import { MARK_UNAVAILABLE, TIERS_NOT_LOADED, validatePerpOrder } from './rules.ts';
 import { freeUsdt, leverageFor, putOrder } from './state.ts';
 import type { PerpState } from './state.ts';
+import { attachReason } from './stops.ts';
 import { maxLeverage } from './tiers.ts';
 import type { Bracket, PerpCtx, PerpEvent, PerpOrder, PerpOrderRequest, PerpPreview, Position } from './types.ts';
 
@@ -57,10 +59,11 @@ interface LimitPlan {
 /**
  * Freshness, the leverage tiers, amounts and price, exchange filters, leverage, the one-way rule,
  * reduce-only (the open reduce-only limits plus this one within the position), the maximum
- * notional at the leverage, and the funds, in that order. A dollar-sized limit becomes
- * qty = floor(quoteQty ÷ price) to the step size. The lock is the order cost at the assumed limit
- * price, with the open loss taken at the limit price; reduce-only orders lock nothing. Stops at
- * the first problem; later fields stay null. Reads state, never writes it.
+ * notional at the leverage, the attached stop-loss/take-profit against the limit price, and the
+ * funds, in that order. A dollar-sized limit becomes qty = floor(quoteQty ÷ price) to the step
+ * size. The lock is the order cost at the assumed limit price, with the open loss taken at the
+ * limit price; reduce-only orders lock nothing. Stops at the first problem; later fields stay
+ * null. Reads state, never writes it.
  */
 function planLimit(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): LimitPlan {
   const symbol = req.symbol;
@@ -85,7 +88,6 @@ function planLimit(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): LimitPlan
   const read = readPerpAmount(req, true);
   plan.fields = read.fields;
   if (read.reason !== null) return fail(read.reason);
-  if (req.attach) return fail('Attached stop-loss and take-profit are not available for perpetuals yet');
   const mark = validMark(symbol, ctx);
   if (!mark) return fail(MARK_UNAVAILABLE);
   const price = plan.fields.price!;
@@ -103,13 +105,17 @@ function planLimit(s: PerpState, req: PerpOrderRequest, ctx: PerpCtx): LimitPlan
   const invalid = validatePerpOrder(
     { symbol, side: req.side, type: req.type, qty, price, reduceOnly: plan.reduceOnly },
     rules,
-    { mark, openOrders: live.length },
+    { mark, openOrders: slotsInUse(s, symbol) },
   );
   if (invalid) return fail(invalid);
 
   const checked = positionChecks(s, { symbol, side: req.side, qty, reduceOnly: plan.reduceOnly }, plan, tiers, mark);
   if (checked.reason !== null) return fail(checked.reason);
   plan.position = checked.position;
+  if (plan.fields.attach) {
+    const attach = attachReason(s, { symbol, side: req.side, type: req.type }, plan.fields.attach, price, rules);
+    if (attach) return fail(attach);
+  }
 
   if (plan.position) {
     // Reduce-only market orders in flight are not counted: each is trimmed to the position when it

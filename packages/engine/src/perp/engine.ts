@@ -15,8 +15,20 @@ import { checkMark, isolatedModel } from './liquidation.ts';
 import type { LiquidationModel } from './liquidation.ts';
 import { addMargin, removeMargin, setLeverage, setMarginMode } from './margin.ts';
 import { arriveMarket, bracketsOrNull, liveDataReason, previewMarket, submitMarket } from './market.ts';
-import { cancelOrder, newPerpOrder, noPerpFields, rejectOrder, remainingQty } from './orders.ts';
+import { afterOwnFills, cancelOrder, newPerpOrder, noPerpFields, rejectOrder, remainingQty } from './orders.ts';
 import { leverageFor, putOrder } from './state.ts';
+import {
+  activateAttached,
+  armWaitingLegs,
+  arriveStop,
+  arriveTriggered,
+  canArmNow,
+  dueTriggered,
+  executeDue,
+  setPositionTpSl,
+  triggerStops,
+  waitingToArm,
+} from './stops.ts';
 import type { PerpState } from './state.ts';
 import type {
   MarginWarning,
@@ -62,12 +74,26 @@ export class PerpEngine {
   }
 
   /**
-   * The order reaches the exchange after its delay. A no-op for unknown or finished orders (e.g.
-   * cancelled while in flight) and before the order's arrivesAt.
+   * The order reaches the exchange after its delay: a submitted order (pending) or a triggered
+   * stop. A no-op for unknown or finished orders (e.g. cancelled while in flight) and before the
+   * order's arrivesAt. An opening order's first fill here places its attached stop-loss and
+   * take-profit.
    */
   arrive(orderId: string, ctx: PerpCtx): PerpEvent[] {
     const order = this.s.orders.get(orderId);
-    if (!order || order.status !== 'pending') return [];
+    if (!order) return [];
+    if (order.status === 'triggered') return arriveTriggered(this.s, order, ctx);
+    return this.finish(this.arrivePending(order, ctx), ctx);
+  }
+
+  /** What follows every action that can fill: the attached legs of orders filled for the first time are placed. */
+  private finish(events: PerpEvent[], ctx: PerpCtx): PerpEvent[] {
+    return activateAttached(this.s, events, ctx);
+  }
+
+  /** A submitted order reaches the exchange, without its finish; a no-op unless pending and due. */
+  private arrivePending(order: PerpOrder, ctx: PerpCtx): PerpEvent[] {
+    if (order.status !== 'pending') return [];
     if (order.arrivesAt !== null && ctx.now < order.arrivesAt) return [];
     switch (order.type) {
       case 'market':
@@ -75,26 +101,44 @@ export class PerpEngine {
       case 'limit':
       case 'post_only':
         return arriveLimit(this.s, order, ctx);
-      default:
-        return [];
+      case 'stop_loss':
+      case 'take_profit':
+        return arriveStop(this.s, order, ctx);
     }
   }
 
   /**
+   * Set a stop-loss and/or take-profit on the symbol's position: close-position stops that close
+   * whatever the position holds when they execute; both given share a group, so one triggering
+   * cancels the other. One stop-loss and one take-profit per position.
+   */
+  setPositionTpSl(symbol: string, input: { stopLoss?: string; takeProfit?: string }, ctx: PerpCtx): PerpEvent[] {
+    return setPositionTpSl(this.s, symbol, input, ctx);
+  }
+
+  /**
    * A real futures trade on `symbol`. While the symbol's data is fresh it first does what onFresh
-   * does (delivers due cancels), so nothing waits on a missed onFresh or a late cancel timer; then
-   * fills the resting limit and post-only orders it went through. A trade id at or below the last
-   * one processed for the symbol is a replay and is ignored, so no trade is ever counted twice. A
-   * trade that arrives while the data is stale is skipped without moving that cursor, so a later
-   * replay of it is processed.
+   * does (delivers due cancels, arms waiting attached legs, executes due triggered stops), so
+   * nothing waits on a missed onFresh or a late cancel timer; then triggers the armed stops its
+   * price reached (the last trade price, never the mark); then fills the resting limit and
+   * post-only orders it went through. A trade id at or below the last one processed for the symbol
+   * is a replay and is ignored, so no trade is ever counted twice. A trade that arrives while the
+   * data is stale is skipped without moving that cursor, so a later replay of it is processed.
+   * Steps after a taker fill see the book less what it took.
    */
   onTrade(symbol: string, trade: AggTrade, ctx: PerpCtx): PerpEvent[] {
     const lastId = this.s.lastTradeId[symbol];
     if (lastId !== undefined && trade.id <= lastId) return [];
     if (liveDataReason(symbol, ctx) !== null) return [];
-    const events = [...this.onFresh(symbol, ctx), ...matchTrade(this.s, symbol, trade, ctx)];
+    const fresh = this.freshWork(symbol, ctx);
+    const after = afterOwnFills(ctx, fresh);
+    const events = [
+      ...fresh,
+      ...triggerStops(this.s, symbol, trade, after),
+      ...matchTrade(this.s, symbol, trade, after),
+    ];
     this.s.lastTradeId[symbol] = trade.id;
-    return events;
+    return this.finish(events, ctx);
   }
 
   /**
@@ -110,30 +154,48 @@ export class PerpEngine {
   }
 
   /**
-   * The symbol's data is fresh again: cancels whose arrival time has passed are delivered. A no-op
-   * while the data is stale.
+   * The symbol's data is fresh again: cancels whose arrival time has passed are delivered, attached
+   * legs that waited for fresh data arm (or are rejected if they would trigger now), and triggered
+   * stops that are due execute against it. A no-op while the data is stale.
    */
   onFresh(symbol: string, ctx: PerpCtx): PerpEvent[] {
-    if (liveDataReason(symbol, ctx) !== null) return [];
-    const due = [...this.s.orders.values()].filter((o) => o.symbol === symbol && cancelDue(o, ctx.now));
-    return due.flatMap((o) => this.deliverCancel(o.id, ctx, true));
+    return this.finish(this.freshWork(symbol, ctx), ctx);
   }
 
   /**
-   * Whether onFresh has work for `symbol` at ctx.now: a cancel whose arrival time has passed. Orders
-   * themselves never wait: each arrives on its own timer and is rejected if the data is stale then,
-   * and trades skipped while stale are replayed. Reads only.
+   * Whether onFresh has work for `symbol` at ctx.now: a cancel whose arrival time has passed, an
+   * attached leg waiting for data that can arm now (fresh data and a last price), or a triggered
+   * stop that is due (deferred by stale data included). Other orders never wait: each arrives on
+   * its own timer and is rejected if the data is stale then, and trades skipped while stale are
+   * replayed. Reads only.
    */
   hasDeferredWork(symbol: string, ctx: PerpCtx): boolean {
+    const canArm = canArmNow(symbol, ctx);
     for (const o of this.s.orders.values()) {
-      if (o.symbol === symbol && cancelDue(o, ctx.now)) return true;
+      if (o.symbol !== symbol) continue;
+      if (cancelDue(o, ctx.now) || dueTriggered(o, ctx.now) || (canArm && waitingToArm(o))) return true;
     }
     return false;
   }
 
   /**
-   * The owner asks to cancel. Pending, open and partially filled limit and post-only orders can be
-   * cancelled; market orders in flight are already executing. Like an order, the request reaches
+   * onFresh without its finish: the caller finishes once for all its events. Each step walks the
+   * book less what the taker fills of the steps before it took.
+   */
+  private freshWork(symbol: string, ctx: PerpCtx): PerpEvent[] {
+    if (liveDataReason(symbol, ctx) !== null) return [];
+    const dueCancels = [...this.s.orders.values()].filter((o) => o.symbol === symbol && cancelDue(o, ctx.now));
+    const events: PerpEvent[] = [];
+    for (const o of dueCancels) events.push(...this.deliverCancel(o.id, afterOwnFills(ctx, events), true));
+    events.push(...armWaitingLegs(this.s, symbol, ctx));
+    events.push(...executeDue(this.s, symbol, afterOwnFills(ctx, events)));
+    return events;
+  }
+
+  /**
+   * The owner asks to cancel. Pending, open and partially filled limit and post-only orders and
+   * untriggered stops can be cancelled (one leg of a stop-loss/take-profit pair alone, leaving the
+   * other in place); market orders in flight and triggered stops are already executing. Like an order, the request reaches
    * the exchange after an arrival delay (cancelArrivesAt) and takes effect then, in arriveCancel:
    * until then the order stays live and can still fill. One cancel per order can be in flight.
    */
@@ -158,7 +220,7 @@ export class PerpEngine {
    * first, here, whichever timer runs first.
    */
   arriveCancel(orderId: string, ctx: PerpCtx): PerpEvent[] {
-    return this.deliverCancel(orderId, ctx, true);
+    return this.finish(this.deliverCancel(orderId, ctx, true), ctx);
   }
 
   /**
@@ -167,16 +229,16 @@ export class PerpEngine {
    * whatever that old arrival time was. The same as arriveCancel for any other order.
    */
   arriveCancelBeforeResend(orderId: string, ctx: PerpCtx): PerpEvent[] {
-    return this.deliverCancel(orderId, ctx, false);
+    return this.finish(this.deliverCancel(orderId, ctx, false), ctx);
   }
 
-  /** `arrivalFirst` runs a due earlier arrival first. */
+  /** arriveCancel without its finish; `arrivalFirst` runs a due earlier arrival first. */
   private deliverCancel(orderId: string, ctx: PerpCtx, arrivalFirst: boolean): PerpEvent[] {
     const order = this.s.orders.get(orderId);
     if (!order || order.cancelArrivesAt === null || ctx.now < order.cancelArrivesAt) return [];
     if (arrivalFirst && arrivesBeforeCancel(order)) {
       // The arrival changes the status, so the cancel is then delivered against what it left.
-      return [...this.arrive(orderId, ctx), ...this.deliverCancel(orderId, ctx, false)];
+      return [...this.arrivePending(order, ctx), ...this.deliverCancel(orderId, ctx, false)];
     }
     const answered: PerpOrder = { ...order, cancelArrivesAt: null };
     if (!CANCELLABLE.has(order.status)) {

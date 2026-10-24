@@ -220,7 +220,10 @@ export function applyReducingFill(
   return { order: after, events: [fillEvent(fill, after, t, ctx)], closed };
 }
 
-/** Statuses an order is cancelled from when its position closes; a triggered order is already executing. */
+/**
+ * Statuses an order is cancelled from when its position closes. A triggered stop is already
+ * executing: it is cancelled (position_closed) when it arrives and finds no position.
+ */
 const CANCELLED_ON_CLOSE: ReadonlySet<OrderStatus> = new Set(['pending', 'open', 'partially_filled']);
 
 /**
