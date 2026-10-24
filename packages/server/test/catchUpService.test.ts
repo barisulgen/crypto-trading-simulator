@@ -390,6 +390,48 @@ describe('catch-up: spot', () => {
     expect(b.jobs()[1]).toMatchObject({ status: 'done', startedAt: T + 601_000, endedAt: T + 15 * MIN });
   });
 
+  it('crash between the catch-up commit and the resume: the restart replays the held trades once and applies the job nowhere twice', async () => {
+    const a = setup();
+    const { stop, orders } = withStop(a, [limit('buy', '99.2', '0.1')]);
+    const order = orders[0]!;
+    spotGap(a, 10 * MIN);
+    a.history.candleList[SPOT] = spotCandles(T + 11 * MIN);
+    const release = a.history.hold();
+    a.market.setFresh(SYMBOL, true);
+    a.clock.advance(1000); // catching up from 12:10:01
+    a.market.trade(SYMBOL, trade(500, '99.15', '1', true, T + 601_500)); // held: it would fill the limit
+    a.clock.advance(15_000); // a heartbeat at 12:10:10, after the job's end
+    // The process dies right after the run's transaction, before the held trade goes through.
+    (a.runner as unknown as { resume: () => void }).resume = () => {};
+    release();
+    await settle();
+    const [first] = a.jobs();
+    expect(first).toMatchObject({ status: 'done', endedAt: T + 601_000, endTradeId: 500 });
+    expect(a.fillsOf(stop.id)).toHaveLength(1);
+    expect(a.fillsOf(order.id)).toEqual([]); // the held trade was lost with the process
+
+    const b = setup({ db: a.db, clock: new FakeClock(T + 15 * MIN) });
+    b.history.candleList[SPOT] = minutes(T - MIN, T + 15 * MIN, '99.5', '100', [
+      candle(T + 4 * MIN, '98.8', '100'),
+      candle(T + 10 * MIN, '99.1', '100'),
+    ]);
+    b.history.tradeList[SPOT] = [trade(500, '99.15', '1', true, T + 601_500)];
+    b.history.latest[SPOT] = 600;
+    b.runner.start();
+    await settle();
+    // The done job is not run again: the stop filled once. The startup job starts at its end and
+    // replays the trade the dead process held: the limit fills once, at its time.
+    expect(b.fillsOf(stop.id)).toHaveLength(1);
+    expect(b.fillsOf(order.id).map((f) => [f.qty, f.price, f.time])).toEqual([['0.1', '99.2', T + 601_500]]);
+    expect(b.jobs()).toEqual([
+      expect.objectContaining({ id: first!.id, status: 'done', endedAt: T + 601_000 }),
+      expect.objectContaining({ status: 'done', startedAt: T + 601_000, endedAt: T + 15 * MIN }),
+    ]);
+    expect(b.engine.state.lastTradeId.BTCUSDT).toBe(500);
+    expect(b.eventsOf('catch_up')).toHaveLength(2);
+    expect(b.fatal).toEqual([]);
+  });
+
   it('fresh trades held before a poll-only gap closes: past 10 minutes they are dropped and the next trade bounds the replay', async () => {
     const t = setup();
     withStop(t, [limit('buy', '99.2', '0.1')]);
