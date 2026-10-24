@@ -16,6 +16,10 @@ export interface FundingSide {
   min: Decimal;
   /** The last position held on this side during the window; null if none was. */
   positionId: string | null;
+  /** The largest size `positionId` itself held during the window (≤ max); 0 when none was held. */
+  ownMax: Decimal;
+  /** The position that held `max` (the first to reach it); null if none was held. */
+  maxPositionId: string | null;
 }
 
 /** The sizes held around one funding time, from 15 s before it to 15 s after. */

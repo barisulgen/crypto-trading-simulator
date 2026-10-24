@@ -232,7 +232,9 @@ export type PerpEvent =
    * mark price at settlement. `amount` is negative when paid. A payment comes from the position's
    * margin while the position exists (target 'margin'), then from free leverage USDT; a receipt
    * goes to free leverage USDT (target 'wallet'). `uncollected` is the part of a payment neither
-   * could cover; null when none.
+   * could cover; null when none. A payment whose window size was reached by an earlier position
+   * than the last one held (closed or liquidated inside the window) is two events: the last
+   * position on the size it held itself, then the earlier one on the rest, from the wallet.
    */
   | {
       type: 'funding';

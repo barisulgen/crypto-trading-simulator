@@ -16,8 +16,8 @@ export const FUNDING_WINDOW_MS = 15_000;
 /** What the symbol's position holds on `side` right now: max = min = its size, or 0 if none. */
 function heldNow(s: PerpState, symbol: string, side: PositionSide): FundingSide {
   const p = s.positions[symbol];
-  if (p && p.side === side) return { max: p.qty, min: p.qty, positionId: p.id };
-  return { max: D(0), min: D(0), positionId: null };
+  if (p && p.side === side) return { max: p.qty, min: p.qty, positionId: p.id, ownMax: p.qty, maxPositionId: p.id };
+  return { max: D(0), min: D(0), positionId: null, ownMax: D(0), maxPositionId: null };
 }
 
 function snapshot(s: PerpState, symbol: string, fundingTime: number): FundingWindow {
@@ -60,11 +60,17 @@ export function closeFundingWindow(s: PerpState, symbol: string, fundingTime: nu
 export function trackFundingWindow(s: PerpState, symbol: string): void {
   const w = s.funding.windows[symbol];
   if (!w) return;
-  const widen = (seen: FundingSide, now: FundingSide): FundingSide => ({
-    max: Decimal.max(seen.max, now.max),
-    min: Decimal.min(seen.min, now.min),
-    positionId: now.positionId ?? seen.positionId,
-  });
+  const widen = (seen: FundingSide, now: FundingSide): FundingSide => {
+    // A position held now that is not the one seen last is a new one: its own size starts over.
+    const same = now.positionId === null || now.positionId === seen.positionId;
+    return {
+      max: Decimal.max(seen.max, now.max),
+      min: Decimal.min(seen.min, now.min),
+      positionId: now.positionId ?? seen.positionId,
+      ownMax: same ? Decimal.max(seen.ownMax, now.ownMax) : now.ownMax,
+      maxPositionId: now.max.gt(seen.max) ? now.positionId : seen.maxPositionId,
+    };
+  };
   s.funding.windows[symbol] = {
     ...w,
     long: widen(w.long, heldNow(s, symbol, 'long')),
@@ -120,15 +126,40 @@ function fundingEvent(
 }
 
 /**
- * The payer's side pays on the largest size it held, rounded up: from the position's margin while
- * that position is still open, then from free leverage USDT (never below zero); whatever is left
- * is uncollected. It never liquidates: a margin taken to 0 is liquidated by the next mark.
+ * The payer's side pays on the largest size it held, rounded up. The last position held on the
+ * side pays its share, on the largest size it held itself: from its margin while it is still open,
+ * then from free leverage USDT. When an earlier position in the window held more (closed or
+ * liquidated inside it), that position pays the rest of the total, from free leverage USDT. Free
+ * never goes below zero; whatever neither covers is uncollected. One funding event per position
+ * charged, the last position's first: each with the size and amount charged to it, so the events
+ * sum to the total. It never liquidates: a margin taken to 0 is liquidated by the next mark.
  */
 function pay(s: PerpState, st: Settlement, side: PositionSide, seen: FundingSide, ctx: PerpCtx): PerpEvent[] {
   if (!seen.max.gt(0) || seen.positionId === null) return [];
-  const amount = fundingAmount(seen.max, st.markPrice, st.rate, true);
+  const total = fundingAmount(seen.max, st.markPrice, st.rate, true);
+  const earlier = seen.maxPositionId !== null && seen.maxPositionId !== seen.positionId && seen.ownMax.lt(seen.max);
+  const own = earlier ? fundingAmount(seen.ownMax, st.markPrice, st.rate, true) : total;
+  const events = [charge(s, st, side, seen.positionId, earlier ? seen.ownMax : seen.max, own, ctx)];
+  const rest = total.minus(own);
+  if (earlier && rest.gt(0)) events.push(charge(s, st, side, seen.maxPositionId!, seen.max.minus(seen.ownMax), rest, ctx));
+  return events;
+}
+
+/**
+ * Charge `amount` of funding on `qty` to position `positionId`: from its margin while it is the
+ * symbol's open position, then from free leverage USDT (never below zero); the rest is uncollected.
+ */
+function charge(
+  s: PerpState,
+  st: Settlement,
+  side: PositionSide,
+  positionId: string,
+  qty: Decimal,
+  amount: Decimal,
+  ctx: PerpCtx,
+): PerpEvent {
   const held = s.positions[st.symbol];
-  const position = held?.id === seen.positionId ? held : null;
+  const position = held?.id === positionId ? held : null;
   const fromMargin = position ? Decimal.min(amount, Decimal.max(0, position.margin)) : D(0);
   const rest = amount.minus(fromMargin);
   const fromFree = Decimal.min(rest, Decimal.max(0, freeUsdt(s)));
@@ -143,7 +174,7 @@ function pay(s: PerpState, st: Settlement, side: PositionSide, seen: FundingSide
   }
   const target = position ? 'margin' : 'wallet';
   const left = uncollected.gt(0) ? uncollected : null;
-  return [fundingEvent(st, side, seen.positionId, seen.max, amount.neg(), target, left, ctx)];
+  return fundingEvent(st, side, positionId, qty, amount.neg(), target, left, ctx);
 }
 
 /** The receiver's side receives on the smallest size it held throughout, rounded down, into free leverage USDT. */
@@ -172,6 +203,7 @@ export function applyFunding(
   markPrice: Decimal,
   ctx: PerpCtx,
 ): PerpEvent[] {
+  if (!Number.isSafeInteger(fundingTime)) throw new Error(`Funding ${symbol}: bad funding time ${fundingTime}`);
   if (!rate.isFinite() || !markPrice.isFinite() || !markPrice.gt(0)) {
     throw new Error(`Funding ${symbol}@${fundingTime}: bad rate ${rate.toString()} or mark ${markPrice.toString()}`);
   }

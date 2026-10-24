@@ -170,7 +170,9 @@ export class PerpEngine {
   /**
    * Apply the funding Binance settled at `fundingTime`, at its settled rate and the mark price at
    * settlement; never an estimate. Payers pay on the largest size held in the window, from the
-   * position's margin first; receivers receive on the smallest, into free leverage USDT. Applied
+   * position's margin first (on the size that position held itself; the rest of the window's size,
+   * held by an earlier position, from the wallet); receivers receive on the smallest, into free
+   * leverage USDT. `fundingTime` is epoch ms and must be a safe integer. Applied
    * once per (symbol, fundingTime); a repeat returns []. It never liquidates: the next mark does.
    */
   applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal, ctx: PerpCtx): PerpEvent[] {

@@ -354,4 +354,115 @@ describe('applyFunding', () => {
     expect(s(position()!.margin)).toBe(margin);
     expect(s(position()!.funding)).toBe('0');
   });
+  it('fundingTime must be a safe integer (epoch ms)', () => {
+    const { ctx, engine, lev } = setup();
+    execute(engine, marketOrder('buy', '0.1'), ctx);
+    for (const bad of [T + 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => engine.applyFunding('BTCUSDT', bad, D('0.0001'), D('80000'), ctx)).toThrow(/funding time/);
+    }
+    expect(engine.state.funding.applied).toEqual({});
+    expect(s(lev().free)).toBe('600');
+  });
+});
+
+/** The funding events of a settlement, in order; every event must be one. */
+function fundingEvents(events: PerpEvent[]): Extract<PerpEvent, { type: 'funding' }>[] {
+  return events.map((e) => {
+    if (e.type !== 'funding') throw new Error(`expected funding, got ${e.type}`);
+    return e;
+  });
+}
+
+describe('funding when the window max came from an earlier position', () => {
+  /** Long A 0.1 held at the window's open and closed inside it; long B `qtyB` opened inside it. */
+  function closedThenReopened(qtyB: string) {
+    const t = setup();
+    execute(t.engine, marketOrder('buy', '0.1'), t.ctx);
+    const a = t.position()!.id;
+    openWindow(t.engine, t.ctx);
+    at(t.ctx, T - 5_000, () => execute(t.engine, marketOrder('sell', '0.1', { reduceOnly: true }), t.ctx));
+    at(t.ctx, T + 5_000, () => execute(t.engine, marketOrder('buy', qtyB), t.ctx));
+    const b = t.position()!.id;
+    closeWindow(t.engine, t.ctx);
+    return { ...t, a, b };
+  }
+
+  it('the open position pays from its margin on its own size only; the rest is charged to the wallet for the earlier one', () => {
+    const { ctx, engine, lev, position, a, b } = closedThenReopened('0.05');
+    expect(s(position()!.margin)).toBe('198');
+    const free = lev().free;
+
+    const [own, earlier, ...more] = fundingEvents(settle(engine, ctx, '0.0001'));
+    expect(more).toEqual([]);
+    expect([own!.positionId, s(own!.qty), s(own!.amount), own!.target, own!.uncollected]).toEqual([
+      b,
+      '0.05',
+      '-0.4',
+      'margin',
+      null,
+    ]);
+    expect([earlier!.positionId, s(earlier!.qty), s(earlier!.amount), earlier!.target, earlier!.uncollected]).toEqual([
+      a,
+      '0.05',
+      '-0.4',
+      'wallet',
+      null,
+    ]);
+    // The total is what the window's largest size (0.1) pays: 0.1 × 80000 × 0.0001 = 0.8.
+    expect(s(own!.amount.plus(earlier!.amount))).toBe('-0.8');
+    expect(s(position()!.margin)).toBe('197.6');
+    expect(s(position()!.funding)).toBe('-0.4');
+    expect(s(lev().free)).toBe(s(free.minus('0.4')));
+  });
+
+  it('each charge is capped by what can pay it; the total paid and uncollected is unchanged', () => {
+    const { ctx, engine, lev, position, a, b } = closedThenReopened('0.05');
+    engine.state.positions.BTCUSDT = { ...position()!, margin: D('0.1') };
+    lev().free = D('0.5');
+
+    const [own, earlier] = fundingEvents(settle(engine, ctx, '0.0001'));
+    // B's 0.4: 0.1 from its margin, 0.3 from free. A's 0.4: the 0.2 left in free, 0.2 uncollected.
+    expect([own!.positionId, s(own!.amount), own!.target, own!.uncollected]).toEqual([b, '-0.4', 'margin', null]);
+    expect([earlier!.positionId, s(earlier!.amount), earlier!.target, s(earlier!.uncollected)]).toEqual([
+      a,
+      '-0.4',
+      'wallet',
+      '0.2',
+    ]);
+    expect(s(position()!.margin)).toBe('0');
+    expect(s(lev().free)).toBe('0');
+  });
+
+  it('the split keeps the rounded-up total: the earlier position takes the total less the open one’s share', () => {
+    const { ctx, engine, lev } = closedThenReopened('0.05');
+    lev().free = D('100');
+    ctx.now = T + 60_000;
+    // Total 0.1 × 80000.1 × 0.000012345 = 0.09876012345 → 0.09876013; B 0.049380061725 → 0.04938007.
+    const [own, earlier] = fundingEvents(engine.applyFunding('BTCUSDT', T, D('0.000012345'), D('80000.1'), ctx));
+    expect(s(own!.amount)).toBe('-0.04938007');
+    expect(s(earlier!.amount)).toBe('-0.04938006');
+  });
+
+  it('when the open position itself reached the window max, it pays all of it from its margin', () => {
+    const t = setup();
+    execute(t.engine, marketOrder('buy', '0.05'), t.ctx);
+    openWindow(t.engine, t.ctx);
+    at(t.ctx, T - 5_000, () => execute(t.engine, marketOrder('sell', '0.05', { reduceOnly: true }), t.ctx));
+    at(t.ctx, T + 5_000, () => execute(t.engine, marketOrder('buy', '0.1'), t.ctx));
+    closeWindow(t.engine, t.ctx);
+
+    const f = fundingOf(settle(t.engine, t.ctx, '0.0001'));
+    expect([f.positionId, s(f.qty), s(f.amount), f.target]).toEqual([t.position()!.id, '0.1', '-0.8', 'margin']);
+  });
+
+  it('both positions gone: each pays from the wallet on its own part', () => {
+    const { ctx, engine, lev, position, a, b } = closedThenReopened('0.05');
+    at(ctx, T + 20_000, () => execute(engine, marketOrder('sell', '0.05', { reduceOnly: true }), ctx));
+    expect(position()).toBeUndefined();
+    const free = lev().free;
+    const [own, earlier] = fundingEvents(settle(engine, ctx, '0.0001'));
+    expect([own!.positionId, s(own!.qty), own!.target]).toEqual([b, '0.05', 'wallet']);
+    expect([earlier!.positionId, s(earlier!.qty), earlier!.target]).toEqual([a, '0.05', 'wallet']);
+    expect(s(lev().free)).toBe(s(free.minus('0.8')));
+  });
 });
