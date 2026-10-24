@@ -154,7 +154,9 @@ export function fundingAmount(qty: Decimal, markPrice: Decimal, rate: Decimal, p
 
 /**
  * The margin that may be taken out of an isolated position, rounded down:
- * max(0, min(margin − maintenance, margin + unrealised P&L − mark × qty ÷ leverage)).
+ * max(0, min(margin − maintenance, margin + min(unrealised P&L, 0) − mark × qty ÷ leverage)).
+ * An unrealised loss reduces it; an unrealised profit does not add to it, since it is not yet
+ * realised and could vanish before the position closes.
  */
 export function maxRemovableMargin(p: {
   brackets: Bracket[];
@@ -166,6 +168,7 @@ export function maxRemovableMargin(p: {
   leverage: number;
 }): Decimal {
   const aboveMaintenance = p.margin.minus(maintenanceMargin(p.brackets, p.qty, p.mark));
-  const aboveInitial = marginBalance(p.margin, p.side, p.qty, p.entry, p.mark).minus(p.mark.mul(p.qty).div(p.leverage));
+  const loss = Decimal.min(0, unrealizedPnl(p.side, p.qty, p.entry, p.mark));
+  const aboveInitial = p.margin.plus(loss).minus(p.mark.mul(p.qty).div(p.leverage));
   return roundDown8(Decimal.max(0, Decimal.min(aboveMaintenance, aboveInitial)));
 }

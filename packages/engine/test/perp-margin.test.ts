@@ -140,20 +140,23 @@ describe('addMargin', () => {
 });
 
 describe('removeMargin', () => {
-  it('takes out at most the removable margin, rounded down', () => {
+  it('takes out at most the removable margin, rounded down; an unrealised profit is not removable', () => {
     const { engine, ctx, market, lev, position } = setup();
     openLong(engine, ctx);
     market.setMarkPrice('BTCUSDT', D('82000'));
-    expect(refused(engine.removeMargin('BTCUSDT', '186.00000001', ctx))).toBe('At most 186 USDT can be removed now');
-    const events = ok(engine.removeMargin('BTCUSDT', '186', ctx));
+    // 200 USDT in profit, but the position holds only its initial margin: nothing may come out.
+    expect(refused(engine.removeMargin('BTCUSDT', '1', ctx))).toBe('At most 0 USDT can be removed now');
+    ok(engine.addMargin('BTCUSDT', '100', ctx));
+    expect(refused(engine.removeMargin('BTCUSDT', '86.00000001', ctx))).toBe('At most 86 USDT can be removed now');
+    const events = ok(engine.removeMargin('BTCUSDT', '86', ctx));
     const e = events[0]!;
     if (e.type !== 'margin_changed') throw new Error(e.type);
     expect(e).toMatchObject({ market: 'perp', symbol: 'BTCUSDT', side: 'long', action: 'remove' });
-    expect(e.amount.toString()).toBe('186');
-    expect(e.marginAfter.toString()).toBe('210');
-    expect(e.liquidationPriceAfter?.toFixed(8)).toBe('78212.85140562');
-    expect(position()!.margin.toString()).toBe('210');
-    expect(lev().free.toString()).toBe('786');
+    expect(e.amount.toString()).toBe('86');
+    expect(e.marginAfter.toString()).toBe('410');
+    expect(e.liquidationPriceAfter?.toFixed(8)).toBe('76204.81927711');
+    expect(position()!.margin.toString()).toBe('410');
+    expect(lev().free.toString()).toBe('586');
   });
 
   it('is refused when the mark or the market data is stale, as an add is', () => {
@@ -194,16 +197,17 @@ describe('previewMargin', () => {
     const { engine, ctx, market, lev, position } = setup();
     openLong(engine, ctx);
     market.setMarkPrice('BTCUSDT', D('82000'));
-    const over = engine.previewMargin('BTCUSDT', 'remove', '186.00000001', ctx);
-    expect(over.rejectReason).toBe(refused(engine.removeMargin('BTCUSDT', '186.00000001', ctx)));
+    ok(engine.addMargin('BTCUSDT', '100', ctx));
+    const over = engine.previewMargin('BTCUSDT', 'remove', '86.00000001', ctx);
+    expect(over.rejectReason).toBe(refused(engine.removeMargin('BTCUSDT', '86.00000001', ctx)));
     expect([over.marginAfter, over.liquidationPriceAfter]).toEqual([null, null]);
-    expect(over.maxRemovable?.toString()).toBe('186');
-    const fits = engine.previewMargin('BTCUSDT', 'remove', '186', ctx);
+    expect(over.maxRemovable?.toString()).toBe('86');
+    const fits = engine.previewMargin('BTCUSDT', 'remove', '86', ctx);
     expect(fits.rejectReason).toBeNull();
-    expect(fits.marginAfter?.toString()).toBe('210');
-    expect(fits.liquidationPriceAfter?.toFixed(8)).toBe('78212.85140562');
-    expect(position()!.margin.toString()).toBe('396');
-    expect(lev().free.toString()).toBe('600');
+    expect(fits.marginAfter?.toString()).toBe('410');
+    expect(fits.liquidationPriceAfter?.toFixed(8)).toBe('76204.81927711');
+    expect(position()!.margin.toString()).toBe('496');
+    expect(lev().free.toString()).toBe('500');
   });
 
   it('with a stale mark or stale market data: no maximum, and both a removal and an add refused', () => {
@@ -236,7 +240,9 @@ describe('maxRemovable', () => {
     expect(engine.maxRemovable('BTCUSDT', ctx)).toBeNull();
     openLong(engine, ctx);
     market.setMarkPrice('BTCUSDT', D('82000'));
-    expect(engine.maxRemovable('BTCUSDT', ctx)?.toString()).toBe('186');
+    expect(engine.maxRemovable('BTCUSDT', ctx)?.toString()).toBe('0');
+    ok(engine.addMargin('BTCUSDT', '100', ctx));
+    expect(engine.maxRemovable('BTCUSDT', ctx)?.toString()).toBe('86');
     market.setMarkFresh('BTCUSDT', false);
     expect(engine.maxRemovable('BTCUSDT', ctx)).toBeNull();
     market.setMarkFresh('BTCUSDT', true);

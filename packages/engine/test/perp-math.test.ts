@@ -187,13 +187,20 @@ describe('funding', () => {
 
 describe('max removable margin', () => {
   const pos = { brackets: btcBrackets, side: 'long' as const, qty: D('0.1'), entry: D('80000'), margin: D('396'), leverage: 20 };
-  it('in profit, limited by the initial margin at the mark', () => {
-    expect(maxRemovableMargin({ ...pos, mark: D('82000') }).toString()).toBe('186');
+  it('an unrealised profit does not count: in profit, a position holding only its initial margin has nothing removable', () => {
+    expect(maxRemovableMargin({ ...pos, mark: D('82000') }).toString()).toBe('0');
   });
-  it('in loss, nothing', () => {
+  it('margin above the initial margin at the mark is removable, the profit still left out', () => {
+    expect(maxRemovableMargin({ ...pos, margin: D('496'), mark: D('82000') }).toString()).toBe('86');
+    expect(maxRemovableMargin({ ...pos, side: 'short', margin: D('496'), mark: D('78000') }).toString()).toBe('106');
+  });
+  it('an unrealised loss reduces it', () => {
+    expect(maxRemovableMargin({ ...pos, margin: D('496'), mark: D('79000') }).toString()).toBe('1');
+  });
+  it('in loss with only the initial margin, nothing', () => {
     expect(maxRemovableMargin({ ...pos, mark: D('79000') }).toString()).toBe('0');
   });
   it('rounds down to 8 decimals', () => {
-    expect(maxRemovableMargin({ ...pos, leverage: 30, mark: D('82000.01') }).toString()).toBe('322.66763333');
+    expect(maxRemovableMargin({ ...pos, leverage: 30, mark: D('82000.01') }).toString()).toBe('122.66663333');
   });
 });

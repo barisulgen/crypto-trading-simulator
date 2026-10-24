@@ -693,10 +693,19 @@ describe('perp REST', () => {
       }).toString(),
     );
     expect(add.body.maxRemovable).toBe('0');
+    // 10 USDT in profit at 81000: the profit is not removable.
     t.perpMarket.mark('BTCUSDT', '81000');
     expect((await preview({ symbol: 'BTCUSDT', action: 'remove', amount: '1' })).body).toEqual({
-      marginAfter: '38.6',
-      liquidationPriceAfter: liquidationPrice(btcBrackets, 'long', D('0.01'), D('80000'), D('38.6'))!.toString(),
+      marginAfter: null,
+      liquidationPriceAfter: null,
+      maxRemovable: '0',
+      rejectReason: 'At most 0 USDT can be removed now',
+    });
+    // Margin added above the initial margin at the mark is: 49.6 - 0.01 x 81000 / 20.
+    expect((await t.call('POST', '/api/perp/margin', { symbol: 'BTCUSDT', action: 'add', amount: '10' })).status).toBe(200);
+    expect((await preview({ symbol: 'BTCUSDT', action: 'remove', amount: '1' })).body).toEqual({
+      marginAfter: '48.6',
+      liquidationPriceAfter: liquidationPrice(btcBrackets, 'long', D('0.01'), D('80000'), D('48.6'))!.toString(),
       maxRemovable: '9.1',
       rejectReason: null,
     });
@@ -707,7 +716,7 @@ describe('perp REST', () => {
     expect(tooMuch.body).toMatchObject({ marginAfter: null, liquidationPriceAfter: null });
     expect(tooMuch.body.rejectReason).toBe(`At most ${tooMuch.body.maxRemovable} USDT can be removed now`);
     // Nothing moved.
-    expect((await t.call('GET', '/api/positions')).body.positions[0].margin).toBe('39.6');
+    expect((await t.call('GET', '/api/positions')).body.positions[0].margin).toBe('49.6');
     // Malformed requests are 400s, as for the action itself.
     expect((await preview({ symbol: 'BTCUSDT', action: 'take', amount: '1' })).body).toEqual({ error: 'Invalid field action' });
     expect((await preview({ symbol: 'BTCUSDT', action: 'add', amount: 1 })).body).toEqual({ error: 'Invalid field amount' });
