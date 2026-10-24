@@ -14,11 +14,13 @@ const account: AccountSnapshot = {
   spotUsdtLocked: '0',
   leverageUsdt: '0',
   coins: [],
+  leverage: { free: '0', locked: '0', positions: [], value: '0' },
   total: '1000',
   totalDeposited: '1000',
   netPnl: '0',
   netPnlPct: '0',
   pricesPaused: [],
+  pricesLoading: false,
   balances: {
     spot: { USDT: { free: '1000', locked: '0' } },
     leverage: { USDT: { free: '0', locked: '0' } },

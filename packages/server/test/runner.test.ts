@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { D, SimEngine, SpotEngine } from '@sim/engine';
+import { D, emptyPerpState, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import type { AggTrade, SpotOrderRequest } from '@sim/engine';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
@@ -58,7 +58,7 @@ function setup(opts: { db?: Db; market?: TestMarket; clock?: FakeClock } = {}) {
   const health = new FakeHealth(() => clock.now);
   const ledger = loadLedger(db, seasonId, ASSETS);
   const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
-  const sim = new SimEngine(ledger, engine);
+  const sim = new SimEngine(ledger, engine, new PerpEngine(emptyPerpState(ledger)));
   const sent: Msg[] = [];
   const fatal: unknown[] = [];
   const logs: string[] = [];

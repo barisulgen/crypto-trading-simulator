@@ -4,7 +4,11 @@ import type { Decimal } from '../src/decimal.ts';
 import { applyBuyToBasis, applySellToBasis, emptyBasis, valueAccount } from '../src/spot/accounting.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
 import { emptyLedger, deposit, transfer } from '../src/account/ledger.ts';
+import { PerpEngine } from '../src/perp/engine.ts';
+import { emptyPerpState } from '../src/perp/state.ts';
+import { SimEngine } from '../src/sim.ts';
 import { emptySpotState } from '../src/spot/state.ts';
+import type { SpotState } from '../src/spot/state.ts';
 import type { AggTrade, Basis, EngineCtx, EngineEvent, Fill, MarketView, SpotOrder } from '../src/types.ts';
 import { btcRules, FakeMarket, seedCoins, testCtx } from './fixtures.ts';
 
@@ -395,11 +399,16 @@ describe('round trips wait for live sells', () => {
   });
 });
 
+/** The account over a spot state, with no perp positions. */
+const simOf = (state: SpotState) =>
+  new SimEngine(state.ledger, new SpotEngine(state), new PerpEngine(emptyPerpState(state.ledger)));
+const NO_MARKS = { mark: () => null };
+
 describe('valueAccount', () => {
   it('USDT 879.93, BTC 1.1988 at bid 99.90 → total 999.69012, net P&L −0.30988 on 1000 deposited', () => {
     const { market, ctx, engine } = setup();
     marketBuy12(engine, ctx);
-    const v = valueAccount(engine.state, bestBidOf(market), ['BTCUSDT']);
+    const v = valueAccount(simOf(engine.state), bestBidOf(market), NO_MARKS, ['BTCUSDT']);
     expect(s(v.spotUsdtFree)).toBe('879.93');
     expect(s(v.spotUsdtLocked)).toBe('0');
     expect(s(v.leverageUsdt)).toBe('0');
@@ -411,6 +420,8 @@ describe('valueAccount', () => {
     expect(s(v.netPnl)).toBe('-0.30988');
     expect(s(v.netPnlPct)).toBe('-0.030988');
     expect(v.pricesPaused).toEqual([]);
+    expect(v.pricesLoading).toBe(false);
+    expect(s(v.leverage.value)).toBe('0');
   });
 
   it('locked funds and the leverage wallet count; a transfer is not P&L', () => {
@@ -420,7 +431,7 @@ describe('valueAccount', () => {
     // A resting sell locks 0.5 BTC; a resting buy locks 90 USDT.
     engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: '105', qty: '0.5' }, ctx);
     engine.submit({ symbol: 'BTCUSDT', side: 'buy', type: 'limit', price: '90', qty: '1' }, ctx);
-    const v = valueAccount(engine.state, bestBidOf(market), ['BTCUSDT']);
+    const v = valueAccount(simOf(engine.state), bestBidOf(market), NO_MARKS, ['BTCUSDT']);
     expect(s(v.spotUsdtFree)).toBe('689.93');
     expect(s(v.spotUsdtLocked)).toBe('90');
     expect(s(v.leverageUsdt)).toBe('100');
@@ -433,15 +444,17 @@ describe('valueAccount', () => {
     const { market, ctx, engine } = setup();
     marketBuy12(engine, ctx);
     market.setFresh('BTCUSDT', false);
-    const stale = valueAccount(engine.state, bestBidOf(market), ['BTCUSDT']);
+    const stale = valueAccount(simOf(engine.state), bestBidOf(market), NO_MARKS, ['BTCUSDT']);
     expect([s(stale.coins[0]!.value), stale.coins[0]!.fresh]).toEqual(['119.76012', false]);
     expect(stale.pricesPaused).toEqual(['BTC']);
 
-    const none = valueAccount(engine.state, () => null, ['BTCUSDT']);
+    const none = valueAccount(simOf(engine.state), () => null, NO_MARKS, ['BTCUSDT']);
     expect([s(none.coins[0]!.bid), s(none.coins[0]!.value), none.coins[0]!.fresh]).toEqual(['0', '0', false]);
     expect(none.coins[0]!.bidAt).toBeNull();
     expect(s(none.total)).toBe('879.93');
     expect(none.pricesPaused).toEqual(['BTC']);
+    expect(none.pricesLoading).toBe(true);
+    expect(stale.pricesLoading).toBe(false);
   });
 
   it('each coin carries when its bid was received; pricesPaused lists every coin whose bid is stale or missing', () => {
@@ -454,7 +467,7 @@ describe('valueAccount', () => {
       ETHUSDT: { price: D('10'), fresh: false, at: 4000 }, // the last real bid, kept through an outage
       SOLUSDT: null, // never priced since start
     };
-    const v = valueAccount(state, (sym) => bids[sym] ?? null, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+    const v = valueAccount(simOf(state), (sym) => bids[sym] ?? null, NO_MARKS, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
     expect(v.coins.map((c) => [c.asset, s(c.value), c.fresh, c.bidAt])).toEqual([
       ['BTC', '100', true, 5000],
       ['ETH', '10', false, 4000],
@@ -468,7 +481,7 @@ describe('valueAccount', () => {
     state.ledger.balances.spot.SOL!.free = D('2');
     state.ledger.balances.spot.BTC!.locked = D('0.1');
     const bid = (symbol: string) => ({ price: D(symbol === 'BTCUSDT' ? '100' : '10'), fresh: true });
-    const v = valueAccount(state, bid, ['SOLUSDT', 'BTCUSDT', 'ETHUSDT']);
+    const v = valueAccount(simOf(state), bid, NO_MARKS, ['SOLUSDT', 'BTCUSDT', 'ETHUSDT']);
     expect(v.coins.map((c) => [c.asset, s(c.value)])).toEqual([
       ['SOL', '20'],
       ['BTC', '10'],
@@ -476,7 +489,7 @@ describe('valueAccount', () => {
   });
 
   it('nothing deposited → net P&L % is null', () => {
-    const v = valueAccount(emptySpotState(emptyLedger(['USDT', 'BTC'])), () => null, ['BTCUSDT']);
+    const v = valueAccount(simOf(emptySpotState(emptyLedger(['USDT', 'BTC']))), () => null, NO_MARKS, ['BTCUSDT']);
     expect(s(v.total)).toBe('0');
     expect(s(v.netPnl)).toBe('0');
     expect(v.netPnlPct).toBeNull();

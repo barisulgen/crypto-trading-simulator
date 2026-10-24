@@ -251,10 +251,18 @@ export class EngineRunner {
       if (b.qty.gt(0)) basis[asset] = { qty: b.qty, cost: b.cost };
     }
     return {
-      ...valueAccount(state, (s) => this.d.market.bestBid(s), this.d.symbols),
+      ...this.value(),
       balances: state.ledger.balances,
       basis,
     };
+  }
+
+  /**
+   * The account value at the spot best bids. The runner opens no perp positions, so no mark price
+   * is read: a position, were there one, would count as its margin only, with prices loading.
+   */
+  private value(): AccountValue {
+    return valueAccount(this.d.sim, (s) => this.d.market.bestBid(s), { mark: () => null }, this.d.symbols);
   }
 
   /** Live (non-terminal) orders, newest first. */
@@ -637,13 +645,13 @@ export class EngineRunner {
   }
 
   /**
-   * Every minute while data is fresh; skipped when any held coin's price is stale or missing, and
-   * when it is the first to run after a pause (the books are from before it).
+   * Every minute while data is fresh; skipped when any held coin's price or position's mark is stale
+   * or missing, and when it is the first to run after a pause (the books are from before it).
    */
   private snapshotEquity(): void {
     if (this.checkStall(this.d.now())) return;
-    const value = valueAccount(this.d.sim.spot.state, (s) => this.d.market.bestBid(s), this.d.symbols);
-    if (value.coins.some((c) => !c.fresh)) return;
+    const value = this.value();
+    if (value.coins.some((c) => !c.fresh) || value.leverage.positions.some((p) => !p.markFresh)) return;
     insertEquitySnapshot(this.d.db, this.d.seasonId, value, this.d.now());
   }
 

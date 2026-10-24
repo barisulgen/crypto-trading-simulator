@@ -485,10 +485,11 @@ export function queryFills(db: Db, seasonId: number, q: { symbol?: string; limit
 // ---- equity, heartbeat ----
 
 export function insertEquitySnapshot(db: Db, seasonId: number, v: AccountValue, now: number): void {
-  const spotValue = v.total.minus(v.leverageUsdt);
+  const leverageValue = v.leverage.value;
+  const spotValue = v.total.minus(leverageValue);
   db.prepare(
     'INSERT INTO equity_snapshots (season_id, time, total, deposited, spot_value, leverage_value) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(seasonId, now, v.total.toString(), v.totalDeposited.toString(), spotValue.toString(), v.leverageUsdt.toString());
+  ).run(seasonId, now, v.total.toString(), v.totalDeposited.toString(), spotValue.toString(), leverageValue.toString());
 }
 
 export function touchAlive(db: Db, now: number): void {

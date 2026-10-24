@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { D, SimEngine, SpotEngine } from '@sim/engine';
+import { D, emptyPerpState, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import type { AggTrade, BookSnapshot, Decimal, PriceLevel, Side } from '@sim/engine';
 import { FakeMarket } from '../../engine/test/fixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
@@ -218,7 +218,7 @@ export async function liveStack(t0: number) {
   const seasonId = currentSeasonId(db, () => clock.now);
   const ledger = loadLedger(db, seasonId, ['USDT', 'BTC']);
   const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
-  const sim = new SimEngine(ledger, engine);
+  const sim = new SimEngine(ledger, engine, new PerpEngine(emptyPerpState(ledger)));
   const sent: RunnerMessage[] = [];
   const runner = new EngineRunner({
     ...common,

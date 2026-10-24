@@ -6,7 +6,8 @@ export * from './book.ts';
 export * from './fees.ts';
 export { deposit, emptyLedger, transfer } from './account/ledger.ts';
 export type { Ledger } from './account/ledger.ts';
-export { SimEngine } from './sim.ts';
+export { ctxFor, SimEngine } from './sim.ts';
+export type { SimCtx, SimEvent } from './sim.ts';
 export * from './spot/state.ts';
 export * from './spot/engine.ts';
 export * from './spot/matching.ts';
@@ -14,7 +15,7 @@ export * from './spot/triggers.ts';
 export type { OcoRequest } from './spot/stops.ts';
 export { arrivalDelay } from './spot/orders.ts';
 export { applyBuyToBasis, applySellToBasis, emptyBasis, valueAccount } from './spot/accounting.ts';
-export type { AccountValue, CoinValue } from './spot/accounting.ts';
+export type { AccountValue, CoinValue, LeverageValue, PositionValue } from './spot/accounting.ts';
 export type {
   Bracket,
   MarginWarning,

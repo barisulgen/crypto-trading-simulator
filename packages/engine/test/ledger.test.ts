@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { D } from '../src/decimal.ts';
 import { deposit, emptyLedger, transfer } from '../src/account/ledger.ts';
+import { PerpEngine } from '../src/perp/engine.ts';
+import { emptyPerpState } from '../src/perp/state.ts';
 import { SimEngine } from '../src/sim.ts';
 import { SpotEngine } from '../src/spot/engine.ts';
 import { emptySpotState } from '../src/spot/state.ts';
@@ -129,12 +131,13 @@ describe('transfer', () => {
 });
 
 describe('SimEngine', () => {
-  it('shares the ledger with the spot engine', () => {
+  it('shares the ledger with the spot and perp engines', () => {
     const ledger = emptyLedger(['USDT', 'BTC']);
-    const sim = new SimEngine(ledger, new SpotEngine(emptySpotState(ledger)));
+    const sim = new SimEngine(ledger, new SpotEngine(emptySpotState(ledger)), new PerpEngine(emptyPerpState(ledger)));
     const ctx = testCtx(new FakeMarket(), { now: 5000 });
     expect(sim.deposit('spot', D('1000'), ctx).ok).toBe(true);
     expect(sim.spot.state.ledger).toBe(sim.ledger);
+    expect(sim.perp.state.ledger).toBe(sim.ledger);
     expect(sim.spot.state.ledger.balances.spot.USDT!.free.toString()).toBe('1000');
     expect(sim.transfer('spot', 'leverage', D('300'), ctx).ok).toBe(true);
     expect(sim.spot.state.ledger.balances.leverage.USDT!.free.toString()).toBe('300');

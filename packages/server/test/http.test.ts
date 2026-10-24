@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { D, SimEngine, SpotEngine } from '@sim/engine';
+import { D, emptyPerpState, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/api/http.ts';
 import { ClientHub } from '../src/api/ws.ts';
@@ -46,7 +46,7 @@ async function makeApp(opts: { password?: boolean; webDist?: string } = {}) {
   const logger = createLogger(config.secrets, (_s, line) => logs.push(line));
   const ledger = loadLedger(db, seasonId, ['USDT', ...COINS]);
   const engine = new SpotEngine(loadSpotState(db, seasonId, ledger));
-  const sim = new SimEngine(ledger, engine);
+  const sim = new SimEngine(ledger, engine, new PerpEngine(emptyPerpState(ledger)));
   let hub: ClientHub | null = null;
   const runner = new EngineRunner({
     db,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { D, Decimal, SimEngine, SpotEngine, deposit, emptyLedger, emptySpotState } from '@sim/engine';
+import { D, Decimal, PerpEngine, SimEngine, SpotEngine, deposit, emptyLedger, emptyPerpState, emptySpotState } from '@sim/engine';
 import type { AggTrade, EngineCtx, EngineEvent, Market, SpotOrder, SpotOrderRequest, SpotState } from '@sim/engine';
 import { FakeMarket, seedCoins, testCtx } from '../../engine/test/fixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
@@ -20,7 +20,8 @@ import {
 const NOW = 1_000_000;
 const ASSETS = ['USDT', 'BTC'];
 
-const simOf = (engine: SpotEngine) => new SimEngine(engine.state.ledger, engine);
+const simOf = (engine: SpotEngine) =>
+  new SimEngine(engine.state.ledger, engine, new PerpEngine(emptyPerpState(engine.state.ledger)));
 
 let tradeId = 0;
 function trade(price: string, qty = '1', sellerInitiated = true): AggTrade {
@@ -577,7 +578,7 @@ describe('equity snapshot and heartbeat', () => {
     insertEquitySnapshot(
       db,
       seasonId,
-      { total: D('1010.5'), totalDeposited: D('1000'), leverageUsdt: D('10') } as Parameters<typeof insertEquitySnapshot>[2],
+      { total: D('1010.5'), totalDeposited: D('1000'), leverage: { value: D('10') } } as Parameters<typeof insertEquitySnapshot>[2],
       555,
     );
     expect(db.prepare('SELECT time, total, deposited, spot_value, leverage_value FROM equity_snapshots').get()).toEqual({

@@ -11,6 +11,9 @@ import type {
   SpotOrder,
   SpotRules,
 } from '../types.ts';
+import { unrealizedPnl } from '../perp/math.ts';
+import type { PositionSide } from '../perp/types.ts';
+import type { SimEngine } from '../sim.ts';
 import { LIVE_STATUSES } from './state.ts';
 import type { SpotState } from './state.ts';
 
@@ -207,12 +210,40 @@ export interface CoinValue {
   bidAt: number | null;
 }
 
+/** An open perp position as valued: its margin plus its unrealised P&L at the mark price. */
+export interface PositionValue {
+  symbol: string;
+  side: PositionSide;
+  qty: Decimal;
+  margin: Decimal;
+  /** The mark price (while stale, the last one received); null when there has been none (never invented). */
+  markPrice: Decimal | null;
+  /** False when the mark is stale or missing. */
+  markFresh: boolean;
+  /** When the mark was received (ms); null when there has been none or the source does not say. */
+  markAt: number | null;
+  /** At markPrice; null when there has been no mark, and the position then counts as its margin only. */
+  unrealizedPnl: Decimal | null;
+}
+
+export interface LeverageValue {
+  /** Leverage wallet USDT. */
+  free: Decimal;
+  /** Leverage wallet USDT locked by open orders. */
+  locked: Decimal;
+  positions: PositionValue[];
+  /** free + locked + Σ(margin + unrealised P&L at the mark). */
+  value: Decimal;
+}
+
 export interface AccountValue {
   spotUsdtFree: Decimal;
   spotUsdtLocked: Decimal;
-  /** Leverage wallet USDT, free + locked (Phase 2 adds margin and unrealised P&L). */
+  /** Leverage wallet USDT, free + locked; positions are in `leverage`. */
   leverageUsdt: Decimal;
   coins: CoinValue[];
+  leverage: LeverageValue;
+  /** Spot value plus leverage value. */
   total: Decimal;
   totalDeposited: Decimal;
   netPnl: Decimal;
@@ -220,48 +251,80 @@ export interface AccountValue {
   netPnlPct: Decimal | null;
   /** Held coins whose bid is stale or missing: total value and net P&L are not live while non-empty. */
   pricesPaused: string[];
+  /**
+   * A held coin or an open position has never been priced: it counts as 0 (a coin) or as its margin
+   * only (a position), so total value and net P&L would show a loss that is not real.
+   */
+  pricesLoading: boolean;
 }
 
+type Quote = { price: Decimal; fresh: boolean; at?: number } | null;
+
 /**
- * Account value: spot USDT (free + locked), plus each coin held at its best bid,
- * the price it could actually be sold at, plus the leverage wallet. Coins follow the order of
- * `symbols` (`<COIN>USDT`); a held coin missing from it is still valued, after the listed ones.
+ * Account value: spot USDT (free + locked), plus each coin held at its best bid, the price it could
+ * actually be sold at, plus the leverage wallet (free + locked) and each open position at its
+ * margin plus its unrealised P&L at the mark price. A stale bid or mark is used as the last one
+ * received and flagged; one never received is never invented. Coins and positions follow the order
+ * of `symbols` (`<COIN>USDT`); one missing from it is still valued, after the listed ones.
  */
 export function valueAccount(
-  state: SpotState,
-  bestBid: (symbol: string) => { price: Decimal; fresh: boolean; at?: number } | null,
+  sim: SimEngine,
+  bestBid: (symbol: string) => Quote,
+  perp: { mark(symbol: string): Quote },
   symbols: string[],
 ): AccountValue {
-  const spot = state.ledger.balances.spot;
-  const usdt = spot.USDT ?? { free: D(0), locked: D(0) };
-  const lev = state.ledger.balances.leverage.USDT ?? { free: D(0), locked: D(0) };
+  const { spot: spotWallet, leverage: leverageWallet } = sim.ledger.balances;
+  const usdt = spotWallet.USDT ?? { free: D(0), locked: D(0) };
+  const lev = leverageWallet.USDT ?? { free: D(0), locked: D(0) };
   const leverageUsdt = lev.free.plus(lev.locked);
 
-  const rank = (asset: string) => {
-    const i = symbols.indexOf(`${asset}USDT`);
+  const rankSymbol = (symbol: string) => {
+    const i = symbols.indexOf(symbol);
     return i === -1 ? symbols.length : i;
   };
-  const coins = Object.entries(spot)
+  let neverPriced = false;
+  const coins = Object.entries(spotWallet)
     .filter(([asset, b]) => asset !== 'USDT' && b.free.plus(b.locked).gt(0))
-    .sort(([a], [b]) => rank(a) - rank(b))
+    .sort(([a], [b]) => rankSymbol(`${a}USDT`) - rankSymbol(`${b}USDT`))
     .map(([asset, b]): CoinValue => {
       const qty = b.free.plus(b.locked);
       const bid = bestBid(`${asset}USDT`);
-      if (!bid) return { asset, qty, bid: D(0), value: D(0), fresh: false, bidAt: null };
+      if (!bid) {
+        neverPriced = true;
+        return { asset, qty, bid: D(0), value: D(0), fresh: false, bidAt: null };
+      }
       return { asset, qty, bid: bid.price, value: qty.mul(bid.price), fresh: bid.fresh, bidAt: bid.at ?? null };
     });
 
-  const total = coins.reduce((sum, c) => sum.plus(c.value), usdt.free.plus(usdt.locked).plus(leverageUsdt));
-  const netPnl = total.minus(state.ledger.totalDeposited);
+  const positions = Object.values(sim.perp.state.positions)
+    .sort((a, b) => rankSymbol(a.symbol) - rankSymbol(b.symbol))
+    .map((p): PositionValue => {
+      const base = { symbol: p.symbol, side: p.side, qty: p.qty, margin: p.margin };
+      const mark = perp.mark(p.symbol);
+      if (!mark) {
+        neverPriced = true;
+        return { ...base, markPrice: null, markFresh: false, markAt: null, unrealizedPnl: null };
+      }
+      const pnl = unrealizedPnl(p.side, p.qty, p.entryPrice, mark.price);
+      return { ...base, markPrice: mark.price, markFresh: mark.fresh, markAt: mark.at ?? null, unrealizedPnl: pnl };
+    });
+  const leverageValue = positions.reduce((sum, p) => sum.plus(p.margin).plus(p.unrealizedPnl ?? 0), leverageUsdt);
+
+  const spotValue = coins.reduce((sum, c) => sum.plus(c.value), usdt.free.plus(usdt.locked));
+  const total = spotValue.plus(leverageValue);
+  const totalDeposited = sim.ledger.totalDeposited;
+  const netPnl = total.minus(totalDeposited);
   return {
     spotUsdtFree: usdt.free,
     spotUsdtLocked: usdt.locked,
     leverageUsdt,
     coins,
+    leverage: { free: lev.free, locked: lev.locked, positions, value: leverageValue },
     total,
-    totalDeposited: state.ledger.totalDeposited,
+    totalDeposited,
     netPnl,
-    netPnlPct: state.ledger.totalDeposited.isZero() ? null : netPnl.div(state.ledger.totalDeposited).mul(100),
+    netPnlPct: totalDeposited.isZero() ? null : netPnl.div(totalDeposited).mul(100),
     pricesPaused: coins.filter((c) => !c.fresh).map((c) => c.asset),
+    pricesLoading: neverPriced,
   };
 }
