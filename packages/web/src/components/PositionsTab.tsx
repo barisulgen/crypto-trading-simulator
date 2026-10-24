@@ -57,10 +57,11 @@ function StateBadge({ label, why }: { label: string; why: string }) {
     <span
       role="status"
       title={why}
-      // Beside the coin on a card; under it in the table's narrow first column.
-      className="ml-1.5 inline-flex items-center gap-1 rounded-ctl border border-accent/60 px-1 text-2xs font-semibold whitespace-nowrap text-fg @min-[54rem]:ml-0"
+      // Beside the coin on a card; under it in the table's narrow first column, where a two-word
+      // label wraps rather than spill into the next column.
+      className="ml-1.5 inline-flex items-center gap-1 rounded-ctl border border-accent/60 px-1 text-2xs font-semibold whitespace-nowrap text-fg [overflow-wrap:normal] [word-break:normal] @min-[54rem]:ml-0 @min-[54rem]:w-min @min-[54rem]:px-0.5 @min-[54rem]:whitespace-normal @min-[54rem]:leading-tight"
     >
-      <span aria-hidden="true" className="size-1.5 flex-none rounded-full border-2 border-accent" />
+      <span aria-hidden="true" className="size-1.5 flex-none rounded-full border-2 border-accent @min-[54rem]:hidden" />
       {label}
       <span className="sr-only">: {why}</span>
     </span>
