@@ -5,7 +5,16 @@ import { CatchUpIndicatorView } from '../src/components/CatchUpIndicator.tsx';
 import { FeedStatusList, feedLabel } from '../src/components/FeedIndicator.tsx';
 import { TestBannerView } from '../src/components/TestBanner.tsx';
 import type { MarketHealth } from '../src/lib/api.ts';
-import { catchingUpBlock, catchingUpFeeds, feedStatus, feedSummary, initialLiveData, leverageTransferBlock } from '../src/lib/live.ts';
+import {
+  catchingUpBlock,
+  catchingUpFeeds,
+  feedStatus,
+  feedSummary,
+  initialLiveData,
+  leverageTransferBlock,
+  valuesCatchingUp,
+} from '../src/lib/live.ts';
+import type { AccountSnapshot } from '../src/lib/api.ts';
 import type { LiveData } from '../src/lib/live.ts';
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
@@ -96,6 +105,26 @@ describe('actions off while a market catches up', () => {
     const s = { ...initialLiveData(), health: { BTCUSDT: { fresh: true, reason: null, catchingUp: true } } };
     expect(catchingUpBlock(s, 'spot', 'BTCUSDT')).toBe(reason);
     expect(catchingUpBlock(state(), 'spot', 'BTCUSDT')).toBeNull();
+  });
+});
+
+describe('account values that may still change', () => {
+  const account = {
+    coins: [
+      { asset: 'BTC', qty: '0.5' },
+      { asset: 'ETH', qty: '0' },
+    ],
+    leverage: { positions: [{ symbol: 'ETHUSDT' }] },
+  } as unknown as AccountSnapshot;
+
+  it('names each held coin and open position whose market catches up', () => {
+    expect(valuesCatchingUp({ ...state(), account })).toEqual([]);
+    expect(valuesCatchingUp({ ...state({ catchingUp: ['spot:BTCUSDT', 'perp:ETHUSDT'] }), account })).toEqual(['BTC', 'ETH perp']);
+  });
+
+  it('ignores markets catching up with nothing held on them, and an account not received yet', () => {
+    expect(valuesCatchingUp({ ...state({ catchingUp: ['spot:ETHUSDT', 'perp:BTCUSDT'] }), account })).toEqual([]);
+    expect(valuesCatchingUp({ ...state({ catchingUp: ['spot:BTCUSDT'] }), account: null })).toEqual([]);
   });
 });
 

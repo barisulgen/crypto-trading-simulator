@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { AccountSnapshot } from '../lib/api.ts';
 import { fmtPct, fmtUsd, fmtUsdFloor } from '../lib/format.ts';
 import { pricesLoading, pricesPausedLabel } from '../lib/holdings.ts';
-import { useLive } from '../lib/live.ts';
+import { useLive, valuesCatchingUp } from '../lib/live.ts';
 import { leverageWalletLine } from '../lib/positions.ts';
 import { changeClass } from './CoinList.tsx';
 import { DepositDialog } from './DepositDialog.tsx';
@@ -40,9 +40,11 @@ function Stat({
   );
 }
 
-function Badge({ title, children }: { title: string; children: ReactNode }) {
+/** A short flag beside a figure: red when it is not live, amber when it may still change. */
+function Badge({ title, children, tone = 'down' }: { title: string; children: ReactNode; tone?: 'down' | 'accent' }) {
+  const colour = tone === 'down' ? 'border-down text-down' : 'border-accent text-fg';
   return (
-    <span title={title} className="rounded-ctl border border-down px-1 text-2xs font-semibold whitespace-nowrap text-down">
+    <span title={title} className={`rounded-ctl border px-1 text-2xs font-semibold whitespace-nowrap ${colour}`}>
       {children}
     </span>
   );
@@ -104,7 +106,9 @@ function pausedText(a: AccountSnapshot): string {
 
 /**
  * What the owner always sees: total value, total deposited, net P&L in $ and %,
- * free and locked dollars per wallet, and the Deposit / Transfer actions.
+ * free and locked dollars per wallet, and the Deposit / Transfer actions. Total value and net P&L
+ * are dimmed and flagged while they are not live (prices paused) or may still change (a held coin
+ * or position whose market catches up after a data gap).
  */
 export function AccountBar() {
   const a = useLive((s) => s.account);
@@ -117,6 +121,13 @@ export function AccountBar() {
   const loading = a ? pricesLoading(a) : false;
   const paused = a && !loading ? pricesPausedLabel(a) : null;
   const pausedTitle = paused ? pausedText(a!) : undefined;
+  // A held coin or position whose market catches up: what its catch-up applies may still change them.
+  const catching = useLive((s) => valuesCatchingUp(s).join(', '));
+  const changing = !loading && catching !== '';
+  const changingTitle = changing
+    ? `Catching up after a data gap on ${catching}: total value and net P&L may still change once it is applied`
+    : undefined;
+  const title = loading ? LOADING_TITLE : [pausedTitle, changingTitle].filter(Boolean).join('. ') || undefined;
   const [dialog, setDialog] = useState<'deposit' | 'transfer' | null>(null);
 
   return (
@@ -128,8 +139,8 @@ export function AccountBar() {
         {/* Phones: Net P&L wraps under the total when the buttons leave too little room. */}
         <div className="flex min-w-0 flex-wrap items-end gap-x-4 gap-y-1 desk:contents">
           <Stat
-            dim={paused !== null}
-            title={loading ? LOADING_TITLE : pausedTitle}
+            dim={paused !== null || changing}
+            title={title}
             label={
               <span className="flex flex-wrap items-center gap-x-1.5">
                 Total value
@@ -138,14 +149,21 @@ export function AccountBar() {
                 ) : loading ? (
                   <Badge title={LOADING_TITLE}>Prices loading</Badge>
                 ) : (
-                  paused && <Badge title={pausedTitle!}>{paused}</Badge>
+                  <>
+                    {paused && <Badge title={pausedTitle!}>{paused}</Badge>}
+                    {changing && (
+                      <Badge tone="accent" title={changingTitle!}>
+                        May still change
+                      </Badge>
+                    )}
+                  </>
                 )}
               </span>
             }
           >
             <span className="text-lg font-semibold whitespace-nowrap [font-stretch:108%] min-[80rem]:text-xl">{loading ? DASH : fmtUsd(a?.total)}</span>
           </Stat>
-          <Stat label="Net P&L" dim={paused !== null} title={loading ? LOADING_TITLE : pausedTitle}>
+          <Stat label="Net P&L" dim={paused !== null || changing} title={title}>
             <span className={`text-base font-semibold whitespace-nowrap ${changeClass(loading ? null : a?.netPnl)}`}>{loading ? DASH : fmtUsd(a?.netPnl, { sign: true })}</span>
             <span className={`ml-1.5 text-xs whitespace-nowrap ${changeClass(loading ? null : a?.netPnlPct)}`}>
               {a && !loading ? (a.netPnlPct === null ? 'no deposits yet' : fmtPct(a.netPnlPct)) : ''}

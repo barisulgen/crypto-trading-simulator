@@ -307,6 +307,22 @@ export function catchingUpBlock(s: Pick<LiveData, 'health' | 'markets' | 'catchi
 }
 
 /**
+ * The held coins ('BTC') and open positions ('ETH perp') whose market catches up after a data gap
+ * now: the account's total value and net P&L may still change once it is applied. Empty when none.
+ */
+export function valuesCatchingUp(s: Pick<LiveData, 'account' | 'health' | 'markets' | 'catchingUp'>): string[] {
+  if (!s.account) return [];
+  const out: string[] = [];
+  for (const c of s.account.coins) {
+    if (Number(c.qty) > 0 && isCatchingUp(s, 'spot', `${c.asset}USDT`)) out.push(c.asset);
+  }
+  for (const p of s.account.leverage?.positions ?? []) {
+    if (isCatchingUp(s, 'perp', p.symbol)) out.push(`${p.symbol.replace(/USDT$/, '')} perp`);
+  }
+  return out;
+}
+
+/**
  * Why a transfer out of the leverage wallet is off now, or null: while any perpetual catches up, or
  * while one with a position or open orders has stale data (its feed interrupted or its mark stale),
  * the server refuses it (409), since that catch-up may still charge funding or margin to the wallet.
