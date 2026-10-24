@@ -6,6 +6,7 @@ import { PerpEngine } from '../src/perp/engine.ts';
 import { liquidationPrice } from '../src/perp/math.ts';
 import { emptyPerpState } from '../src/perp/state.ts';
 import type { PerpCtx, PerpEvent, PerpOrderRequest } from '../src/perp/types.ts';
+import type { AggTrade } from '../src/types.ts';
 import { btcBrackets, FakePerpMarket, perpCtx } from './perpFixtures.ts';
 
 const NOW = 1_000_000;
@@ -464,5 +465,102 @@ describe('funding when the window max came from an earlier position', () => {
     expect([own!.positionId, s(own!.qty), own!.target]).toEqual([b, '0.05', 'wallet']);
     expect([earlier!.positionId, s(earlier!.qty), earlier!.target]).toEqual([a, '0.05', 'wallet']);
     expect(s(lev().free)).toBe(s(free.minus('0.8')));
+  });
+});
+
+describe('fills inside the window made by a trade or a trigger (rate 0.0001, mark 80000)', () => {
+  let tradeId = 0;
+  const trade = (price: string, sellerInitiated: boolean, qty = '1'): AggTrade => ({
+    id: ++tradeId,
+    price: D(price),
+    qty: D(qty),
+    sellerInitiated,
+    time: 0,
+  });
+
+  /** A live trade at `price` at time `t`, as the market reports it. */
+  function tradeAt(market: FakePerpMarket, engine: PerpEngine, ctx: PerpCtx, t: number, price: string, sellerInitiated: boolean): PerpEvent[] {
+    let events: PerpEvent[] = [];
+    at(ctx, t, () => {
+      market.setLastPrice('BTCUSDT', D(price));
+      events = engine.onTrade('BTCUSDT', trade(price, sellerInitiated), ctx);
+    });
+    return events;
+  }
+
+  /** Place a limit and let it arrive (resting). */
+  function rest(engine: PerpEngine, ctx: PerpCtx, r: Omit<PerpOrderRequest, 'symbol' | 'type'> & { price: string }): void {
+    const [placed] = engine.submit({ symbol: 'BTCUSDT', type: 'limit', ...r }, ctx);
+    if (placed?.type !== 'order_placed') throw new Error('expected order_placed');
+    ctx.now = placed.order.arrivesAt!;
+    expect(engine.arrive(placed.order.id, ctx)).toEqual([]);
+  }
+
+  /** Set the position's stop-loss and let it arrive (armed). */
+  function armStop(engine: PerpEngine, ctx: PerpCtx, stopLoss: string): string {
+    const [placed] = engine.setPositionTpSl('BTCUSDT', { stopLoss }, ctx);
+    if (placed?.type !== 'order_placed') throw new Error('expected order_placed');
+    ctx.now = placed.order.arrivesAt!;
+    engine.arrive(placed.order.id, ctx);
+    expect(engine.state.orders.get(placed.order.id)!.status).toBe('open');
+    return placed.order.id;
+  }
+
+  it('a resting buy limit a trade fills inside the window: the long pays on the largest size it reached', () => {
+    const { market, ctx, engine, position } = setup();
+    execute(engine, marketOrder('buy', '0.1'), ctx);
+    rest(engine, ctx, { side: 'buy', price: '79000', qty: '0.1' });
+    openWindow(engine, ctx);
+    expect(tradeAt(market, engine, ctx, T + 5_000, '78950', true).map((e) => e.type)).toEqual(['fill']);
+    expect(s(position()!.qty)).toBe('0.2');
+    closeWindow(engine, ctx);
+
+    const f = fundingOf(settle(engine, ctx, '0.0001'));
+    expect([s(f.qty), s(f.amount), f.target]).toEqual(['0.2', '-1.6', 'margin']);
+  });
+
+  it('a reduce-only buy limit a trade fills inside the window: the short receives on the smallest size it held throughout', () => {
+    const { market, ctx, engine, position } = setup();
+    execute(engine, marketOrder('sell', '0.1'), ctx);
+    rest(engine, ctx, { side: 'buy', price: '79000', qty: '0.05', reduceOnly: true });
+    openWindow(engine, ctx);
+    expect(tradeAt(market, engine, ctx, T - 5_000, '78950', true).map((e) => e.type)).toEqual(['fill']);
+    expect(s(position()!.qty)).toBe('0.05');
+    closeWindow(engine, ctx);
+
+    const f = fundingOf(settle(engine, ctx, '0.0001'));
+    expect([f.side, s(f.qty), s(f.amount), f.target]).toEqual(['short', '0.05', '0.4', 'wallet']);
+  });
+
+  it('a stop-loss that triggers and fills inside the window: the long still pays on the size it held, from free USDT', () => {
+    const { market, ctx, engine, lev, position } = setup();
+    execute(engine, marketOrder('buy', '0.1'), ctx);
+    const id = position()!.id;
+    const stop = armStop(engine, ctx, '79500');
+    openWindow(engine, ctx);
+    expect(tradeAt(market, engine, ctx, T - 5_000, '79400', true).map((e) => e.type)).toEqual(['order_triggered']);
+    at(ctx, engine.state.orders.get(stop)!.arrivesAt!, () => engine.arrive(stop, ctx));
+    expect(position()).toBeUndefined();
+    closeWindow(engine, ctx);
+    const free = lev().free;
+
+    const f = fundingOf(settle(engine, ctx, '0.0001'));
+    expect([f.positionId, s(f.qty), s(f.amount), f.target]).toEqual([id, '0.1', '-0.8', 'wallet']);
+    expect(s(lev().free)).toBe(s(free.minus('0.8')));
+  });
+
+  it('a short closed by its stop-loss inside the window receives nothing: it did not hold through the window', () => {
+    const { market, ctx, engine, lev, position } = setup();
+    execute(engine, marketOrder('sell', '0.1'), ctx);
+    const stop = armStop(engine, ctx, '80500');
+    openWindow(engine, ctx);
+    expect(tradeAt(market, engine, ctx, T + 5_000, '80600', false).map((e) => e.type)).toEqual(['order_triggered']);
+    at(ctx, engine.state.orders.get(stop)!.arrivesAt!, () => engine.arrive(stop, ctx));
+    expect(position()).toBeUndefined();
+    closeWindow(engine, ctx);
+    const free = s(lev().free);
+
+    expect(settle(engine, ctx, '0.0001')).toEqual([]);
+    expect(s(lev().free)).toBe(free);
   });
 });
