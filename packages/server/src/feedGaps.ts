@@ -102,15 +102,16 @@ export class FeedGaps {
   /**
    * Opens the key's gap, saved at once with the current trade cursor: from the last fresh moment,
    * or `pausedSince` (the poll before a pause) if that is earlier, or the last frame received if
-   * that is earlier still (after a silent stretch nothing after that frame is known), and never
+   * that is earlier still (after a silent stretch nothing after that frame is known), or
+   * `notAfter` if that is earlier still (the end of what the account has seen applied), and never
    * after now (the wall clock can step back). A gap opened by a pause closes only at a poll. An
    * open gap is kept. A key not fresh since startup has none to open: the time before is its
    * startup gap. Returns whether it opened.
    */
-  start(key: MarketKey, reason: string, pausedSince: number | null = null): boolean {
+  start(key: MarketKey, reason: string, pausedSince: number | null = null, notAfter: number | null = null): boolean {
     const lastFresh = this.lastFreshAt.get(key);
     if (this.open.has(key) || lastFresh === undefined) return false;
-    const at = Math.min(pausedSince ?? Infinity, lastFresh, this.d.lastFrameAt(key), this.d.now());
+    const at = Math.min(pausedSince ?? Infinity, notAfter ?? Infinity, lastFresh, this.d.lastFrameAt(key), this.d.now());
     const gap = { at, reason, pollOnly: pausedSince !== null, lastTradeIdBefore: this.d.cursorOf(key) };
     this.save(key, gap);
     this.open.set(key, gap);

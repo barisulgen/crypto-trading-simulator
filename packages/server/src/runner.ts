@@ -1080,9 +1080,10 @@ export class EngineRunner implements FundingSim {
    * A key's catch-up has been applied (or a done job left it nothing to run): perp funding windows
    * due now open first; the trades held back go through the live path, in receive order; a perp
    * position whose liquidation price the held-back marks reached is liquidated at that price; then
-   * onFresh. If the key is stale again by now, a gap opens instead and the next catch-up covers
-   * what was held. Last, the arrivals and cancels held back run and the orders held since startup
-   * are sent again.
+   * onFresh. If the key is stale again by now, a gap opens instead, starting no later than `since`
+   * (the end of what the run applied): the next catch-up then covers what was held, and every
+   * funding time from `since` on, none of which was opened live. Last, the arrivals and cancels
+   * held back run and the orders held since startup are sent again.
    */
   private resume(
     key: MarketKey,
@@ -1092,7 +1093,7 @@ export class EngineRunner implements FundingSim {
   ): void {
     const { market, symbol } = splitKey(key);
     if (!this.isFresh(key)) {
-      this.startGap(key, this.staleReason(key));
+      this.startGap(key, this.staleReason(key), null, since);
     } else {
       if (market === 'perp') this.d.funding?.caughtUp(symbol, since);
       for (const t of trades) this.onTrade(market, symbol, t);
@@ -1318,8 +1319,8 @@ export class EngineRunner implements FundingSim {
    * Opens the key's gap (FeedGaps.start: from its last fresh moment, saved at once with the trade
    * cursor) and tells the owner. Returns whether it opened.
    */
-  private startGap(key: MarketKey, reason: string, pausedSince: number | null = null): boolean {
-    if (!this.gaps.start(key, reason, pausedSince)) return false;
+  private startGap(key: MarketKey, reason: string, pausedSince: number | null = null, notAfter: number | null = null): boolean {
+    if (!this.gaps.start(key, reason, pausedSince, notAfter)) return false;
     this.catchUp.gapOpened(key);
     this.notice({ kind: 'feed_gap', level: 'warn', text: `Live data interrupted for ${label(key)}: ${reason}` });
     return true;

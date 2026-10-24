@@ -628,6 +628,40 @@ describe('catch-up and funding windows', () => {
     expect(t.fatal).toEqual([]);
   });
 
+  it('stale again just as a run finishes: the next gap starts at the run’s end, so a funding time after it is still modelled, and settled once', async () => {
+    const t = withFunding({ clock: new FakeClock(T) });
+    withLong(t);
+    t.funding.start();
+    t.perp.mark(SYMBOL, '80000', FT);
+    await t.run(FT - 3 * MIN - t.clock.now);
+    t.perp.setFresh(SYMBOL, false); // a gap from 12:07 to 12:08:01
+    t.history.markList.BTCUSDT = minutes(FT - 4 * MIN, FT + 5 * MIN, '79995', '80005');
+    t.history.settlements.BTCUSDT = [{ time: FT, rate: D('0.0001'), markPrice: D('80000') }];
+    await t.run(MIN);
+    const release = t.history.hold();
+    t.perp.setFresh(SYMBOL, true);
+    await t.run(1000);
+    expect(t.runner.gate(PERP)).toBe('catching_up');
+    const runEnd = t.jobs()[0]!.endedAt;
+    expect(runEnd).toBeLessThan(FT - 15_000);
+    await t.run(FT + MIN - t.clock.now); // the whole window passes while the run is held
+    expect(t.sim.perp.state.funding.windows.BTCUSDT).toBeUndefined();
+    t.perp.setFresh(SYMBOL, false); // stale again; no poll has seen it when the run finishes
+    release();
+    await settle();
+    expect(t.runner.gate(PERP)).toBe('stale');
+    t.perp.setFresh(SYMBOL, true);
+    await t.run(1000);
+    await settle();
+    expect(t.runner.gate(PERP)).toBe('live');
+    // The second gap is recorded from the first run's end: what the account saw stopped there.
+    expect(t.eventsOf('feed_gap').map((e) => e.payload.startedAt)).toEqual([FT - 3 * MIN, runEnd]);
+    expect(t.eventsOf('funding').map((e) => [e.payload.fundingTime, e.payload.qty, e.payload.amount])).toEqual([[FT, '0.1', '-0.8']]);
+    await t.run(FUNDING_POLL_MS * 3);
+    expect(t.eventsOf('funding')).toHaveLength(1);
+    expect(t.fatal).toEqual([]);
+  });
+
   it('a run held past a whole funding window by REST failures: the window is opened after it on the (unchanged) size, closed and settled once', async () => {
     const t = withFunding({ clock: new FakeClock(T) });
     withLong(t);
