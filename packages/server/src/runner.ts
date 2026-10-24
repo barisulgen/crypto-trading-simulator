@@ -90,6 +90,11 @@ export const LEVERAGE_TRANSFER_REFUSAL = 'Catching up after a data gap; transfer
 export const LEVERAGE_TRANSFER_STALE_REFUSAL =
   'Live data interrupted on a perpetual with a position or open orders; transfers from the leverage wallet resume once it is back and caught up';
 export const MARGIN_STALE_REFUSAL = 'Live data interrupted; margin changes resume once it is back and caught up';
+/**
+ * The data is back but its gap has not been closed by a health poll yet, so what happened in it is
+ * not applied: a new order now would be judged on the account as it was before the gap.
+ */
+export const GAP_NOT_APPLIED_REFUSAL = 'Live data just came back; trading resumes once the data gap is applied';
 const STOPPED_REFUSAL = 'Server stopped after an internal error; see server log';
 
 const HEALTH_POLL_MS = 1000;
@@ -391,12 +396,14 @@ export class EngineRunner implements FundingSim {
   submit(req: SpotOrderRequest): EngineEvent[] {
     this.refuseTrading(spotKey(req.symbol));
     this.noteStale(spotKey(req.symbol));
+    this.refuseUnappliedGap(spotKey(req.symbol));
     return this.apply((ctx) => this.d.sim.submit('spot', req, ctx));
   }
 
   submitPerp(req: PerpOrderRequest): PerpEvent[] {
     this.refuseTrading(perpKey(req.symbol));
     this.noteStale(perpKey(req.symbol));
+    this.refuseUnappliedGap(perpKey(req.symbol));
     return this.apply((ctx) => this.d.sim.submit('perp', req, ctx));
   }
 
@@ -422,6 +429,7 @@ export class EngineRunner implements FundingSim {
   attachOco(req: OcoRequest): EngineEvent[] {
     this.refuseTrading(spotKey(req.symbol));
     this.noteStale(spotKey(req.symbol));
+    this.refuseUnappliedGap(spotKey(req.symbol));
     return this.apply((ctx) => this.d.sim.spot.attachOco(req, ctxFor(ctx, 'spot')));
   }
 
@@ -474,6 +482,7 @@ export class EngineRunner implements FundingSim {
   setPositionTpSl(symbol: string, input: { stopLoss?: string; takeProfit?: string }): PerpEvent[] {
     this.refuseTrading(perpKey(symbol));
     this.noteStale(perpKey(symbol));
+    this.refuseUnappliedGap(perpKey(symbol));
     return this.apply((ctx) => this.d.sim.setPositionTpSl(symbol, input, ctx));
   }
 
@@ -693,6 +702,15 @@ export class EngineRunner implements FundingSim {
 
   private refuseIfDead(): void {
     if (this.dead) throw new RefusedError(STOPPED_REFUSAL);
+  }
+
+  /**
+   * Refuses a new order on the key while its data is back but its gap is still open: the gap
+   * closes, and is applied or caught up, at the next health poll (within a second). Stale data
+   * itself is left to the engine, which records the order as rejected or defers it.
+   */
+  private refuseUnappliedGap(key: MarketKey): void {
+    if (this.gaps.has(key) && this.isFresh(key)) throw new RefusedError(GAP_NOT_APPLIED_REFUSAL);
   }
 
   /** Refuses when nothing may trade; with a key, also while that key catches up after a gap. */

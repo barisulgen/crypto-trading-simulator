@@ -14,7 +14,7 @@ import { loadJobs } from '../src/db/store.ts';
 import { FUNDING_POLL_MS, FundingService } from '../src/funding/fundingService.ts';
 import type { FundingRateQuery } from '../src/binance/futuresRest.ts';
 import { marketKey } from '../src/market/marketKey.ts';
-import { submittedOrder } from '../src/runner.ts';
+import { GAP_NOT_APPLIED_REFUSAL, submittedOrder } from '../src/runner.ts';
 import { FakeClock, FakeHistory, runnerHarness, settle } from './helpers.ts';
 
 /** 2026-10-24 12:00:00 UTC, a minute boundary. */
@@ -98,6 +98,35 @@ function spotGap(t: Setup, ms: number) {
 const spotCandles = (to: number) => minutes(T - MIN, to, '99.5', '100', [candle(T + 4 * MIN, '98.8', '100')]);
 
 describe('catch-up: spot', () => {
+  it('data back but its gap not yet closed by a poll: new orders are refused, nothing is recorded; once caught up they are accepted', async () => {
+    const t = setup();
+    const { orders } = withStop(t, [limit('sell', '100.25', '0.1')]);
+    t.runner.deposit('leverage', D('1000'));
+    spotGap(t, 10 * MIN);
+    t.perp.setFresh(SYMBOL, false);
+    t.clock.advance(1000); // the poll sees the perp data stale too
+    t.history.candleList[SPOT] = spotCandles(T + 11 * MIN);
+    t.market.setFresh(SYMBOL, true);
+    t.perp.setFresh(SYMBOL, true);
+    // No poll has seen the data fresh: each gap is still open, not yet applied.
+    expect(t.runner.gate(SPOT)).toBe('stale');
+    expect(t.runner.gate(PERP)).toBe('stale');
+    const placed = t.eventsOf('order_placed').length;
+    expect(() => t.runner.submit(limit('buy', '90', '0.1'))).toThrow(GAP_NOT_APPLIED_REFUSAL);
+    expect(() => t.runner.submitPerp(perpLimit('buy', '70000', '0.01'))).toThrow(GAP_NOT_APPLIED_REFUSAL);
+    expect(() => t.runner.attachOco({ symbol: SYMBOL, qty: '0.1', stopLoss: '90', takeProfit: '110' })).toThrow(GAP_NOT_APPLIED_REFUSAL);
+    expect(t.eventsOf('order_placed')).toHaveLength(placed);
+    expect(t.eventsOf('order_rejected')).toEqual([]);
+    expect(t.engine.state.orders.get(orders[0]!.id)!.status).toBe('open');
+
+    t.clock.advance(1000); // the poll finds both fresh: the gaps close and are applied
+    await settle();
+    expect(t.runner.gate(SPOT)).toBe('live');
+    expect(t.runner.gate(PERP)).toBe('live');
+    expect(submittedOrder(t.runner.submit(limit('buy', '90', '0.1'))).status).toBe('pending');
+    expect(t.fatal).toEqual([]);
+  });
+
   it('a stop-loss across a 10-min gap is filled by the job; live trades held during the run go through afterwards, in order', async () => {
     const t = setup();
     const { stop, orders } = withStop(t, [limit('sell', '100.25', '0.1'), limit('sell', '100.35', '0.1')]);
