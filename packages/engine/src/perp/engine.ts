@@ -13,7 +13,7 @@ import {
 import type { ActionResult, AggTrade } from '../types.ts';
 import { applyFunding, closeFundingWindow, openFundingWindow } from './funding.ts';
 import { arriveLimit, fillAt, matchTrade, previewLimit, submitLimit } from './limit.ts';
-import { checkMark, isolatedModel } from './liquidation.ts';
+import { checkMark, isolatedModel, liquidateOnMarkRange } from './liquidation.ts';
 import type { LiquidationModel } from './liquidation.ts';
 import { addMargin, removeMargin, setLeverage, setMarginMode } from './margin.ts';
 import { arriveMarket, bracketsOrNull, liveDataReason, previewMarket, submitMarket } from './market.ts';
@@ -174,6 +174,18 @@ export class PerpEngine {
   onMark(symbol: string, mark: Decimal, ctx: PerpCtx): { events: PerpEvent[]; warnings: MarginWarning[] } {
     if (!ctx.market.isMarkFresh(symbol)) return { events: [], warnings: [] };
     return checkMark(this.s, symbol, mark, this.model, ctx);
+  }
+
+  /**
+   * Live marks the symbol saw while they could not be applied (its data was catching up after a
+   * gap), as their lowest and highest: the position is liquidated if either reached its current
+   * liquidation price, with that price as the mark, exactly as catch-up does with a mark candle. A
+   * no-op without a position or without the leverage tiers (the next live mark judges it then).
+   */
+  liquidateOnMarkRange(symbol: string, low: Decimal, high: Decimal, ctx: PerpCtx): PerpEvent[] {
+    const brackets = bracketsOrNull(symbol, ctx);
+    if (!brackets) return [];
+    return liquidateOnMarkRange(this.s, symbol, low, high, brackets, ctx);
   }
 
   /**

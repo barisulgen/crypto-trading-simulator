@@ -1,9 +1,8 @@
 import type { Decimal } from '../decimal.ts';
 import type { PerpEngine } from '../perp/engine.ts';
 import { FUNDING_WINDOW_MS } from '../perp/funding.ts';
-import { liquidateAtLiquidationPrice } from '../perp/liquidation.ts';
+import { liquidateOnMarkRange } from '../perp/liquidation.ts';
 import { bracketsOrNull } from '../perp/market.ts';
-import { liquidationPrice } from '../perp/math.ts';
 import { cancelOrder, remainingQty } from '../perp/orders.ts';
 import { putOrder } from '../perp/state.ts';
 import type { PerpState } from '../perp/state.ts';
@@ -70,6 +69,12 @@ function historical(live: PerpMarketView, last: Decimal | null): PerpMarketView 
 
 type Settlement = NonNullable<CatchUpInput['funding']>[number];
 
+/** A funding time the run models: its settlement, or null when only its window is modelled. */
+interface FundingEntry {
+  time: number;
+  settlement: Settlement | null;
+}
+
 function isStop(o: PerpOrder): boolean {
   return o.type === 'stop_loss' || o.type === 'take_profit';
 }
@@ -85,9 +90,9 @@ class PerpCatchUp {
   private readonly cancelsDelivered = new Set<string>();
   private readonly candleAt = new Map<number, Candle1m>();
   private readonly markAt = new Map<number, Candle1m>();
-  /** The settlements given, one per funding time, in time order. */
-  private readonly funding: Settlement[];
-  /** How many settlements have had their window opened, and how many have been settled. */
+  /** The funding times modelled, one entry per time, in time order. */
+  private readonly funding: FundingEntry[];
+  /** How many entries have had their window opened, and how many have been closed (and settled). */
   private windowsOpened = 0;
   private settled = 0;
   /** The latest price the run has seen: a replayed trade's, or a walked minute's close. */
@@ -106,8 +111,16 @@ class PerpCatchUp {
     this.symbol = input.symbol;
     for (const c of walkedCandles(input.candles, input.to)) this.candleAt.set(c.openTime, c);
     for (const c of walkedCandles(input.markCandles ?? [], input.to)) this.markAt.set(c.openTime, c);
-    const byTime = new Map<number, Settlement>();
-    for (const f of input.funding ?? []) if (f.time < input.to && !byTime.has(f.time)) byTime.set(f.time, f);
+    const byTime = new Map<number, FundingEntry>();
+    for (const f of input.funding ?? []) {
+      if (f.time < input.to && !byTime.has(f.time)) byTime.set(f.time, { time: f.time, settlement: f });
+    }
+    // A time with no settlement is modelled only when its window overlaps the gap: one that closed
+    // before the gap began was the live path's.
+    for (const time of input.fundingTimes ?? []) {
+      const overlaps = time - FUNDING_WINDOW_MS < input.to && time + FUNDING_WINDOW_MS > input.from;
+      if (Number.isSafeInteger(time) && overlaps && !byTime.has(time)) byTime.set(time, { time, settlement: null });
+    }
     this.funding = [...byTime.values()].sort((a, b) => a.time - b.time);
   }
 
@@ -252,12 +265,12 @@ class PerpCatchUp {
   // ---- steps ----
 
   /**
-   * Whether this run settles `f`: its window closes (15 s after its funding time) before the end
-   * of the gap. One that closes later is opened (or kept open) and widened by the gap's fills, then
-   * left open for the live path, which takes in the fills after the gap, closes it on time and
-   * settles it once.
+   * Whether this run closes the window of `f` (and settles it, when its settlement is given): its
+   * window closes (15 s after its funding time) before the end of the gap. One that closes later is
+   * opened (or kept open) and widened by the gap's fills, then left open for the live path, which
+   * takes in the fills after the gap, closes it on time and settles it once.
    */
-  private settlesHere(f: Settlement): boolean {
+  private settlesHere(f: FundingEntry): boolean {
     return f.time + FUNDING_WINDOW_MS < this.input.to;
   }
 
@@ -266,12 +279,12 @@ class PerpCatchUp {
    * closed before the gap began (given anyway, it is settled once like any other, never dated
    * before the gap).
    */
-  private closeOf(f: Settlement): number {
+  private closeOf(f: FundingEntry): number {
     return Math.max(f.time + FUNDING_WINDOW_MS, this.input.from);
   }
 
   /**
-   * Open the window of every settlement whose window opens (15 s before its funding time) before
+   * Open the window of every funding time modelled whose window opens (15 s before it) before
    * `end`, seeded with the position as the walk has it now: a window opened in a minute takes in
    * every fill of that minute. A window already open, waiting for its rate or applied (live, or by
    * an earlier run) is left as it is.
@@ -290,7 +303,8 @@ class PerpCatchUp {
    * and the funding is applied at its settled rate and mark, on the sizes held through the window
    * (a payer on the largest, a receiver on the smallest), exactly once per funding time. Dated at
    * the window's close, the first moment its sizes are final; the owner's cancels that arrived by
-   * then go first. Called only from the gap's minutes on.
+   * then go first. A funding time with no settlement given only closes then: it waits for its rate,
+   * which the live path applies. Called only from the gap's minutes on.
    */
   private settleFunding(limit: number): void {
     for (;;) {
@@ -304,7 +318,9 @@ class PerpCatchUp {
       this.deliverCancels((at) => at <= close);
       const at = this.at(close, this.last);
       this.engine.closeFundingWindow(this.symbol, f.time, at);
-      const events = this.engine.applyFunding(this.symbol, f.time, f.rate, f.markPrice, at);
+      if (f.settlement === null) continue;
+      const { rate, markPrice } = f.settlement;
+      const events = this.engine.applyFunding(this.symbol, f.time, rate, markPrice, at);
       this.emit(events, 'funding_history', floorMinute(close));
     }
   }
@@ -326,11 +342,9 @@ class PerpCatchUp {
     if (!p || !mark) return;
     const brackets = bracketsOrNull(this.symbol, this.ctx);
     if (!brackets) throw new Error(`Perp catch-up for ${this.symbol} needs the leverage tiers`);
-    const lp = liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin);
-    if (lp === null) return;
-    if (p.side === 'long' ? mark.low.gt(lp) : mark.high.lt(lp)) return;
     const time = this.floor(start);
-    const events = liquidateAtLiquidationPrice(this.s, this.symbol, lp, this.at(time, this.last));
+    const events = liquidateOnMarkRange(this.s, this.symbol, mark.low, mark.high, brackets, this.at(time, this.last));
+    if (events.length === 0) return;
     // The summary tells of the liquidation before the orders it cancelled.
     this.emit(events, 'mark_candle', start, 'liquidation');
   }

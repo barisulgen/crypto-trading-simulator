@@ -163,6 +163,11 @@ export class SimEngine {
     return this.perp.setPositionTpSl(symbol, input, ctxFor(ctx, 'perp'));
   }
 
+  /** Live marks held back while the symbol caught up, as their lowest and highest (PerpEngine.liquidateOnMarkRange). */
+  liquidateOnMarkRange(symbol: string, low: Decimal, high: Decimal, ctx: SimCtx): PerpEvent[] {
+    return this.perp.liquidateOnMarkRange(symbol, low, high, ctxFor(ctx, 'perp'));
+  }
+
   openFundingWindow(symbol: string, fundingTime: number, ctx: SimCtx): void {
     this.perp.openFundingWindow(symbol, fundingTime, ctxFor(ctx, 'perp'));
   }

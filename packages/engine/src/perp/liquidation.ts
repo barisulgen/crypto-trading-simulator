@@ -149,6 +149,28 @@ export function liquidateAtLiquidationPrice(
 }
 
 /**
+ * Liquidate the symbol's position if a span's mark prices reached its liquidation price: a long's
+ * lowest mark at or below it, a short's highest at or above it. Only the range is known, not where
+ * the mark was at any moment, so the liquidation price is used as the mark
+ * (liquidateAtLiquidationPrice). [] without a position, or for one that can never be liquidated.
+ */
+export function liquidateOnMarkRange(
+  s: PerpState,
+  symbol: string,
+  low: Decimal,
+  high: Decimal,
+  brackets: Bracket[],
+  ctx: PerpCtx,
+): PerpEvent[] {
+  const p = s.positions[symbol];
+  if (!p) return [];
+  const lp = liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin);
+  if (lp === null) return [];
+  if (p.side === 'long' ? low.gt(lp) : high.lt(lp)) return [];
+  return liquidateAtLiquidationPrice(s, symbol, lp, ctx);
+}
+
+/**
  * A mark price for the symbol: liquidate the position if the model says so, otherwise update its
  * warning level and return the warning it gives, if any. A due liquidation never waits for the
  * rules: without them the fee rate is unknown, which changes only how the lost margin is split.

@@ -744,3 +744,117 @@ describe('perp catch-up: nothing open', () => {
     expect(summary(events).actions).toEqual([]);
   });
 });
+
+describe('perp catch-up: funding times with no settlement given (fundingTimes)', () => {
+  it('a gap ending inside [T − 15 s, T) opens T’s window at T − 15 s on the size then, widened by the gap’s fills, left open', () => {
+    const t = setup();
+    openLong(t);
+    place(t, { side: 'buy', type: 'limit', qty: '0.1', price: '79000' });
+    const to = T(7, 59, 50);
+    const events = run(
+      t,
+      input({
+        to,
+        candles: minutes('79990', '80010', [candle(T(7, 59), '78900', '80010')], FROM, to),
+        markCandles: minutes('79995', '80005', [], FROM, to),
+        trades: [trade(101, '78950', '0.1', true, T(7, 59, 47))],
+        fundingTimes: [T(8, 0)],
+      }),
+    );
+    expect(ofType(events, 'fill').map((e) => e.time)).toEqual([T(7, 59, 47)]);
+    expect(ofType(events, 'funding')).toEqual([]);
+    const w = t.sim.perp.state.funding.windows[SYMBOL]!;
+    expect(w.fundingTime).toBe(T(8, 0));
+    expect([s(w.long.max), s(w.long.min)]).toEqual(['0.2', '0.1']);
+
+    // Live again: the live path closes it at 08:00:15 and settles it once, on the larger size.
+    t.ctx.now = T(8, 0, 15);
+    t.sim.closeFundingWindow(SYMBOL, T(8, 0), t.ctx);
+    const settled = t.sim.applyFunding(SYMBOL, T(8, 0), D('0.0001'), D('79000'), t.ctx);
+    expect(ofType(settled, 'funding').map((e) => [s(e.qty), s(e.amount)])).toEqual([['0.2', '-1.58']]);
+  });
+
+  it('a window inside the gap with no settlement yet is opened and closed in the walk and left waiting for its rate', () => {
+    const t = setup();
+    openLong(t);
+    const events = run(t, input({ fundingTimes: [T(8, 0)] }));
+    expect(ofType(events, 'funding')).toEqual([]);
+    expect(t.sim.perp.state.funding.windows[SYMBOL]).toBeUndefined();
+    const pending = t.sim.perp.state.funding.pending.map((w) => [w.symbol, w.fundingTime, s(w.long.max)]);
+    expect(pending).toEqual([[SYMBOL, T(8, 0), '0.1']]);
+    t.ctx.now = T(12, 5);
+    const settled = t.sim.applyFunding(SYMBOL, T(8, 0), D('0.0001'), D('79000'), t.ctx);
+    expect(ofType(settled, 'funding').map((e) => [s(e.qty), s(e.amount)])).toEqual([['0.1', '-0.79']]);
+  });
+
+  it('a funding time also given with its settlement is settled once, from the settlement', () => {
+    const t = setup();
+    openLong(t);
+    const events = run(t, input({ funding: [funding0800], fundingTimes: [T(8, 0)] }));
+    expect(ofType(events, 'funding').map((e) => [e.time, s(e.amount)])).toEqual([[T(8, 0, 15), '-0.79']]);
+    expect(t.sim.perp.state.funding.pending).toEqual([]);
+    expect(t.sim.perp.state.funding.windows[SYMBOL]).toBeUndefined();
+  });
+
+  it('a funding time whose window opens at or after the end of the gap is left to the live path', () => {
+    const t = setup();
+    openLong(t);
+    const to = T(7, 59, 45);
+    run(
+      t,
+      input({
+        to,
+        candles: minutes('79990', '80010', [], FROM, to),
+        markCandles: minutes('79995', '80005', [], FROM, to),
+        fundingTimes: [T(8, 0)],
+      }),
+    );
+    expect(t.sim.perp.state.funding.windows[SYMBOL]).toBeUndefined();
+    expect(t.sim.perp.state.funding.pending).toEqual([]);
+  });
+});
+
+describe('liquidateOnMarkRange: live marks held back while catching up (long 0.1 @80000, margin 396)', () => {
+  it('a lowest mark at or below the liquidation price liquidates at that price as the mark, as catch-up does', () => {
+    // The same position liquidated by catch-up from a mark candle, for comparison.
+    const ref = setup();
+    openLong(ref);
+    const fromCandle = ofType(run(ref, input({ markCandles: markCandles([candle(T(9, 13), '76000', '80000')]) })), 'liquidation');
+
+    const t = setup();
+    openLong(t);
+    t.ctx.now = T(12, 0, 30);
+    const events = t.sim.liquidateOnMarkRange(SYMBOL, D('70000'), D('80100'), t.ctx);
+    const [liq] = ofType(events, 'liquidation');
+    expect(liq).toBeDefined();
+    expect(liq!.time).toBe(T(12, 0, 30));
+    expect(liq!.catchUp).toBeUndefined();
+    const split = (e: Perp<'liquidation'>) => [s(e.markPrice), s(e.tradingLoss), s(e.liquidationFee), s(e.remainder), s(e.marginLost)];
+    expect(split(liq!)).toEqual(split(fromCandle[0]!));
+    expect(split(liq!)).toEqual(['76345.3815261', '365.46184739', '30.53815261', '0', '396']);
+    expect(t.position()).toBeUndefined();
+    expect(s(t.lev().free)).toBe('600');
+  });
+
+  it('marks that stayed above the liquidation price liquidate nothing', () => {
+    const t = setup();
+    openLong(t);
+    t.ctx.now = T(12, 0, 30);
+    expect(t.sim.liquidateOnMarkRange(SYMBOL, D('76346'), D('90000'), t.ctx)).toEqual([]);
+    expect(t.position()).toBeDefined();
+  });
+
+  it('a short is liquidated when the highest mark reached its liquidation price', () => {
+    const t = setup();
+    openShort(t);
+    t.ctx.now = T(12, 0, 30);
+    const [liq] = ofType(t.sim.liquidateOnMarkRange(SYMBOL, D('70000'), D('83625.5'), t.ctx), 'liquidation');
+    expect(s(liq!.markPrice)).toBe('83625.49800797');
+    expect(t.position()).toBeUndefined();
+  });
+
+  it('does nothing without a position', () => {
+    const t = setup();
+    expect(t.sim.liquidateOnMarkRange(SYMBOL, D('1'), D('1000000'), t.ctx)).toEqual([]);
+  });
+});

@@ -50,6 +50,15 @@ export interface CatchUpInput {
   trades: AggTrade[] | 'unavailable';
   markCandles?: Candle1m[];
   funding?: { time: number; rate: Decimal; markPrice: Decimal }[];
+  /**
+   * Perps: funding times whose window the run models though no settlement is given for them (not
+   * published yet, or one whose window reaches past the end of the gap). Each window whose opening
+   * (15 s before its funding time) falls before `to` opens then, seeded with the position the walk
+   * has, and is widened by the gap's fills; one whose close (15 s after) also falls before `to`
+   * closes then and waits for its rate. Either is left to the live path to settle. A time also
+   * given in `funding` is settled from there.
+   */
+  fundingTimes?: number[];
 }
 
 /** The data a catch-up run needs beyond the last-price candles. */
