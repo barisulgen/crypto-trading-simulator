@@ -52,8 +52,9 @@ function reachingPrice(o: SpotOrder, c: Candle1m): Decimal {
   return upward ? c.high : c.low;
 }
 
-const hhmm = (t: number) => new Date(t).toISOString().slice(11, 16);
-const hhmmss = (t: number) => new Date(t).toISOString().slice(11, 19);
+/** Times in summary lines, in UTC and saying so: "12:04 UTC", "12:04:50 UTC". */
+const hhmm = (t: number) => `${new Date(t).toISOString().slice(11, 16)} UTC`;
+const hhmmss = (t: number) => `${new Date(t).toISOString().slice(11, 19)} UTC`;
 
 class SpotCatchUp {
   private readonly s: SpotState;
@@ -67,6 +68,8 @@ class SpotCatchUp {
   private readonly candleAt = new Map<number, Candle1m>();
   /** The latest price the run has seen: a replayed trade's, or a walked minute's close. */
   private last: Decimal | null = null;
+  /** The highest trade id the run replayed; null when it replayed none. */
+  private replayedTo: number | null = null;
 
   constructor(
     private readonly engine: SpotEngine,
@@ -75,7 +78,7 @@ class SpotCatchUp {
   ) {
     this.s = engine.state;
     this.symbol = input.symbol;
-    for (const c of input.candles) this.candleAt.set(c.openTime, c);
+    for (const c of walkedCandles(input.candles, input.to)) this.candleAt.set(c.openTime, c);
   }
 
   run(): (EngineEvent | CatchUpEvent)[] {
@@ -84,7 +87,7 @@ class SpotCatchUp {
     if (this.input.trades === 'unavailable') {
       throw new Error(`Spot catch-up for ${this.symbol} needs the trades of the gap`);
     }
-    const trades = usableTrades(this.input, this.input.trades);
+    const trades = usableTrades(this.input, this.input.trades, this.s.lastTradeId[this.symbol]);
     this.armWaitingPairs(from);
 
     for (const c of walkedCandles(this.input.candles, to)) {
@@ -104,6 +107,11 @@ class SpotCatchUp {
       this.last = c.close;
     }
     this.deliverCancels(() => true);
+    // The trade cursor moves past every trade replayed, so neither the live feed nor a later run
+    // over an overlapping gap can use one again.
+    if (this.replayedTo !== null) {
+      this.s.lastTradeId[this.symbol] = Math.max(this.s.lastTradeId[this.symbol] ?? -Infinity, this.replayedTo);
+    }
 
     const time = this.out.reduce((latest, e) => Math.max(latest, e.time), to);
     const summary: CatchUpEvent = {
@@ -176,19 +184,24 @@ class SpotCatchUp {
     for (const o of due) {
       const triggeredAt = o.triggeredAt ?? c.openTime;
       const minute = this.candleAt.get(floorMinute(triggeredAt)) ?? c;
-      this.execute(o, worstPrice(o.side, minute), triggeredAt, minute.openTime, 'trigger_minute_worst_price');
+      // Dated within the minute its price comes from, and never before its trigger.
+      const time = Math.max(triggeredAt, minute.openTime);
+      this.execute(o, worstPrice(o.side, minute), time, minute.openTime, 'trigger_minute_worst_price');
     }
   }
 
   /**
    * Armed stop-losses, then take-profits, that the minute's range reached: each triggers (its pair
-   * partner is cancelled) and fills at once at the minute's worst price.
+   * partner is cancelled) and fills at once at the minute's worst price. A stop armed only after
+   * the minute ended is not checked against it.
    */
   private stopStep(c: Candle1m): void {
+    const end = c.openTime + MINUTE_MS;
     const reached = this.ordersOf(
       (o) =>
         o.status === 'open' &&
         isStopType(o.type) &&
+        (this.armedAt.get(o.id) ?? o.arrivesAt ?? c.openTime) < end &&
         isTriggered(o.type, o.side, o.triggerPrice!, reachingPrice(o, c)),
     );
     const rank = (o: SpotOrder) => (o.type === 'stop_loss' ? 0 : 1);
@@ -252,6 +265,7 @@ class SpotCatchUp {
         this.armPlacedPairs(events, trade.time);
       }
       this.last = trade.price;
+      this.replayedTo = Math.max(this.replayedTo ?? -Infinity, trade.id);
     }
   }
 
@@ -275,7 +289,7 @@ class SpotCatchUp {
       this.cancelsDelivered.add(next.id);
       const time = next.cancelArrivesAt!;
       const events = this.engine.arriveCancel(next.id, this.at(time, this.last));
-      this.emit(events, 'aggtrade_replay', floorMinute(time));
+      this.emit(events, 'cancel_arrival', floorMinute(time));
       this.armPlacedPairs(events, time);
     }
   }

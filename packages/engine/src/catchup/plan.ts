@@ -18,11 +18,14 @@ export function inGap(openTime: number, from: number, to: number): boolean {
 }
 
 /**
- * The candles a run walks, in time order: every one that opens before `to`. Those before the gap
- * are there only for the trigger minutes of orders triggered before it.
+ * The candles a run walks, in time order: every one that opens before `to`, each minute once (the
+ * first candle given for it). Those before the gap are there only for the trigger minutes of
+ * orders triggered before it.
  */
 export function walkedCandles(candles: Candle1m[], to: number): Candle1m[] {
-  return candles.filter((c) => c.openTime < to).sort((a, b) => a.openTime - b.openTime);
+  const byMinute = new Map<number, Candle1m>();
+  for (const c of candles) if (c.openTime < to && !byMinute.has(c.openTime)) byMinute.set(c.openTime, c);
+  return [...byMinute.values()].sort((a, b) => a.openTime - b.openTime);
 }
 
 /** A resting limit or post-only order, filled only by trades through it. */
@@ -74,19 +77,19 @@ export function spotCatchUpNeeds(
 
 /**
  * The replayed trades a run may use, in time order: after the last trade processed before the gap
- * and before the first one processed live after it. Each order also takes only trades after its own
- * arrival (checked when matching).
+ * and after `cursor` (the last trade already processed, live or by an earlier run over an
+ * overlapping gap), and before the first one processed live after it; when that one is unknown,
+ * before the end of the gap. Each order also takes only trades after its own arrival (checked when
+ * matching).
  */
 export function usableTrades(
-  input: Pick<CatchUpInput, 'lastTradeIdBefore' | 'endTradeId'>,
+  input: Pick<CatchUpInput, 'lastTradeIdBefore' | 'endTradeId' | 'to'>,
   trades: AggTrade[],
+  cursor: number | undefined,
 ): AggTrade[] {
+  const after = Math.max(input.lastTradeIdBefore ?? -Infinity, cursor ?? -Infinity);
   return trades
-    .filter(
-      (t) =>
-        (input.lastTradeIdBefore === null || t.id > input.lastTradeIdBefore) &&
-        (input.endTradeId === null || t.id < input.endTradeId),
-    )
+    .filter((t) => t.id > after && (input.endTradeId === null ? t.time < input.to : t.id < input.endTradeId))
     .sort((a, b) => a.time - b.time || a.id - b.id);
 }
 

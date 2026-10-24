@@ -10,14 +10,18 @@ export interface Candle1m {
   close: Decimal;
 }
 
-/** What a catch-up event was estimated from. */
+/**
+ * What a catch-up event was estimated from; 'cancel_arrival' marks an owner's cancel delivered at
+ * its own arrival time, not an estimate.
+ */
 export type CatchUpBasis =
   | 'candle_worst_price'
   | 'trigger_minute_worst_price'
   | 'mark_candle'
   | 'funding_history'
   | 'aggtrade_replay'
-  | 'history_unavailable';
+  | 'history_unavailable'
+  | 'cancel_arrival';
 
 /** Carried by every event a catch-up run produces: the gap it covered and what the event was estimated from. */
 export interface CatchUpTag {
@@ -35,7 +39,10 @@ export interface CatchUpInput {
   to: number;
   /** The last trade id processed before the gap; replayed trades must come after it. Null when unknown. */
   lastTradeIdBefore: number | null;
-  /** The first trade id processed live after the gap; replayed trades must come before it. Null when unknown. */
+  /**
+   * The first trade id processed live after the gap; replayed trades must come before it. Null when
+   * unknown: replayed trades must then come before `to`.
+   */
   endTradeId: number | null;
   /** Last-price candles covering [floorMinute(min(from, earliest triggeredAt)), to]. */
   candles: Candle1m[];

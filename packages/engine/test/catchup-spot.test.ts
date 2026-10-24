@@ -162,7 +162,7 @@ describe('spot catch-up: stops from candles', () => {
 
     const sum = summary(events);
     expect(sum).toMatchObject({ type: 'catch_up', market: 'spot', symbol: SYMBOL, from: FROM, to: TO });
-    expect(sum.actions).toContain('Stop-loss filled 0.5 BTC at 58800 (worst price of 12:04; estimated)');
+    expect(sum.actions).toContain('Stop-loss filled 0.5 BTC at 58800 (worst price of 12:04 UTC; estimated)');
     expectTaggedInOrder(events);
 
     expect(s(t.bal('USDT').free)).toBe(s(usdtBefore.plus('29370.6')));
@@ -184,7 +184,7 @@ describe('spot catch-up: stops from candles', () => {
 
     const events = run(t, input(candles([candle(T(12, 4), '58800', '61200')])));
     expect(summary(events).actions).toEqual([
-      'Stop-loss filled 0.5 BTC at 58800 (worst price of 12:04; estimated)',
+      'Stop-loss filled 0.5 BTC at 58800 (worst price of 12:04 UTC; estimated)',
       'Take-profit 0.5 BTC cancelled: the other order of its pair triggered (estimated)',
     ]);
     const fills = ofType(events, 'fill');
@@ -214,34 +214,56 @@ describe('spot catch-up: stops from candles', () => {
         '(need 6200, available 6100; trigger 61000, candle worst 62000)',
     );
     expect(rejected!.catchUp).toEqual(tag('candle_worst_price'));
-    expect(summary(events).actions).toEqual([`Buy stop-loss expired at 12:04 (estimated): ${rejected!.reason}`]);
+    expect(summary(events).actions).toEqual([`Buy stop-loss expired at 12:04 UTC (estimated): ${rejected!.reason}`]);
     expect(ofType(events, 'fill')).toEqual([]);
     expect(s(t.bal('USDT').free)).toBe('6100');
     expect(s(t.bal('USDT').locked)).toBe('0');
     expectTaggedInOrder(events);
   });
 
-  it('a stop triggered before the gap and still waiting fills at the low of its trigger minute', () => {
+  /** A sell stop-loss 0.5 @59000 triggered at 11:59:30, whose arrival found the data stale: it waits. */
+  function triggeredBeforeGap() {
     const t = setup();
     const id = place(t, { side: 'sell', type: 'stop_loss', qty: '0.5', triggerPrice: '59000' });
     t.ctx.now = T(11, 59, 30);
     const fired = t.sim.onTrade('spot', SYMBOL, trade(50, '58990', '1', true, T(11, 59, 30)), t.ctx);
     expect(fired.map((e) => e.type)).toEqual(['order_triggered']);
-    // The data goes stale before the triggered order arrives: it waits.
     t.spotMarket.setFresh(SYMBOL, false);
     t.ctx.now = t.stored(id).arrivesAt!;
     expect(t.sim.arrive('spot', id, t.ctx)).toEqual([]);
     expect(t.stored(id)).toMatchObject({ status: 'triggered', arrivesAt: null });
+    return { t, id };
+  }
 
+  it('a stop triggered before the gap and still waiting fills at the low of its trigger minute', () => {
+    const { t, id } = triggeredBeforeGap();
     const events = run(t, input(candles([candle(T(11, 59), '58700', '59100')])));
     const fills = ofType(events, 'fill');
     expect(fills.map((e) => [e.order.id, s(e.fill.price), s(e.fill.qty)])).toEqual([[id, '58700', '0.5']]);
     expect(fills[0]!.time).toBe(T(11, 59, 30));
     expect(fills[0]!.catchUp).toEqual(tag('trigger_minute_worst_price'));
     expect(summary(events).actions).toEqual([
-      'Stop-loss filled 0.5 BTC at 58700 (worst price of 11:59, its trigger minute; estimated)',
+      'Stop-loss filled 0.5 BTC at 58700 (worst price of 11:59 UTC, its trigger minute; estimated)',
     ]);
     expectTaggedInOrder(events);
+  });
+
+  it('without its trigger minute’s candle, it fills at the first walked minute’s low, dated in that minute', () => {
+    const { t, id } = triggeredBeforeGap();
+    const events = run(t, input(candles([candle(T(12, 0), '59700', '60050')])));
+    const fills = ofType(events, 'fill');
+    expect(fills.map((e) => [e.order.id, s(e.fill.price), e.time])).toEqual([[id, '59700', T(12, 0)]]);
+    expectTaggedInOrder(events);
+  });
+
+  it('a stop that armed only after a minute ended is not checked against that minute', () => {
+    const t = setup();
+    const id = place(t, { side: 'sell', type: 'stop_loss', qty: '0.5', triggerPrice: '59000' });
+    // As if the stop reached the exchange at 12:06:30.
+    putOrder(t.sim.spot.state, { ...t.stored(id), arrivesAt: T(12, 6, 30) });
+    const events = run(t, input(candles([candle(T(12, 4), '58800', '59400'), candle(T(12, 7), '58500', '59400')])));
+    const fills = ofType(events, 'fill');
+    expect(fills.map((e) => [e.order.id, s(e.fill.price), e.time])).toEqual([[id, '58500', T(12, 7)]]);
   });
 
   it('an attached pair that waited for data arms at the start of the gap', () => {
@@ -320,8 +342,8 @@ describe('spot catch-up: limit orders from replayed trades', () => {
     expect(s(t.bal('USDT').locked)).toBe('0');
     expect(s(t.bal('BTC').free)).toBe(s(btcBefore.plus('0.999')));
     expect(summary(events).actions).toEqual([
-      'Limit buy filled 0.3 BTC at 60000 (replayed trade at 12:05:10; estimated)',
-      'Limit buy filled 0.7 BTC at 60000 (replayed trade at 12:05:40; estimated)',
+      'Limit buy filled 0.3 BTC at 60000 (replayed trade at 12:05:10 UTC; estimated)',
+      'Limit buy filled 0.7 BTC at 60000 (replayed trade at 12:05:40 UTC; estimated)',
     ]);
     expectTaggedInOrder(events);
   });
@@ -339,6 +361,57 @@ describe('spot catch-up: limit orders from replayed trades', () => {
     expect(t.stored(id).status).toBe('open');
     // Something was open, so the summary is there, with nothing done.
     expect(summary(events).actions).toEqual([]);
+  });
+
+  it('with endTradeId unknown, a trade-through after the end of the gap is not used', () => {
+    const t = setup();
+    const id = place(t, { side: 'buy', type: 'limit', qty: '1.0', price: '60000' });
+    const to = T(12, 9, 30);
+    const trades = [trade(101, '59900', '0.3', true, T(12, 9, 20)), trade(102, '59900', '0.5', true, to + 5000)];
+    const events = run(t, input(candles([candle(T(12, 9), '59900', '60050')]), trades, { to }));
+    expect(ofType(events, 'fill').map((e) => [s(e.fill.qty), e.time])).toEqual([['0.3', T(12, 9, 20)]]);
+    expect(t.sim.spot.state.lastTradeId[SYMBOL]).toBe(101);
+    expect(s(t.stored(id).filledQty)).toBe('0.3');
+  });
+
+  it('a minute given twice is walked once', () => {
+    const t = setup({ usdt: '200000' });
+    const id = place(t, { side: 'buy', type: 'limit', qty: '2.0', price: '60000' });
+    const crossed = candle(T(12, 5), '59900', '60050');
+    const events = run(t, input([...candles([crossed]), crossed], [trade(101, '59950', '0.3', true, T(12, 5, 10))]));
+    expect(ofType(events, 'fill').map((e) => s(e.fill.qty))).toEqual(['0.3']);
+    expect(s(t.stored(id).filledQty)).toBe('0.3');
+  });
+
+  it('two runs over overlapping gaps use a shared trade once, and the live feed then ignores it', () => {
+    const t = setup({ usdt: '200000' });
+    const id = place(t, { side: 'buy', type: 'limit', qty: '2.0', price: '60000' });
+    const shared = trade(101, '59950', '0.3', true, T(12, 5, 10));
+    const later = trade(105, '59950', '0.2', true, T(12, 6, 10));
+    const first = run(t, input(candles([candle(T(12, 5), '59900', '60050')]), [shared]));
+    expect(ofType(first, 'fill').map((e) => s(e.fill.qty))).toEqual(['0.3']);
+    expect(t.sim.spot.state.lastTradeId[SYMBOL]).toBe(101);
+
+    // A second gap, 12:05–12:15, overlapping the first; its trades include the shared one again.
+    const second: Candle1m[] = [];
+    for (let m = 5; m < 15; m += 1) second.push(candle(T(12, m), m <= 6 ? '59900' : '60000', '60050'));
+    t.ctx.now = T(12, 15, 1);
+    const events = applyCatchUp(
+      t.sim,
+      input(second, [shared, later], { from: T(12, 5), to: T(12, 15) }),
+      t.ctx,
+    );
+    expect(ofType(events, 'fill').map((e) => [s(e.fill.qty), e.time])).toEqual([['0.2', T(12, 6, 10)]]);
+    expect(s(t.stored(id).filledQty)).toBe('0.5');
+    expect(t.sim.spot.state.lastTradeId[SYMBOL]).toBe(105);
+
+    // Live again: a trade at or below the raised cursor is a replay and is ignored.
+    t.spotMarket.setFresh(SYMBOL, true);
+    t.ctx.now = T(12, 15, 2);
+    expect(t.sim.onTrade('spot', SYMBOL, trade(105, '59000', '1', true, T(12, 15, 2)), t.ctx)).toEqual([]);
+    expect(s(t.stored(id).filledQty)).toBe('0.5');
+    const live = t.sim.onTrade('spot', SYMBOL, trade(106, '59000', '1', true, T(12, 15, 2)), t.ctx);
+    expect(ofType(live, 'fill').map((e) => s(e.fill.qty))).toEqual(['1']);
   });
 
   it('an attached pair placed by a replayed fill is checked against the same minute in a second pass', () => {
@@ -368,7 +441,9 @@ describe('spot catch-up: limit orders from replayed trades', () => {
     ]);
     const tp = placed[1]!.order;
     expect(ofType(events, 'order_cancelled').map((e) => [e.order.id, e.reason])).toEqual([[tp.id, 'oco']]);
-    expect(summary(events).actions).toContain('Stop-loss filled 0.999 BTC at 59400 (worst price of 12:05; estimated)');
+    expect(summary(events).actions).toContain(
+      'Stop-loss filled 0.999 BTC at 59400 (worst price of 12:05 UTC; estimated)',
+    );
     expectTaggedInOrder(events);
   });
 });
@@ -395,10 +470,10 @@ describe('spot catch-up: cancels in flight across the gap', () => {
     const [late] = ofType(events, 'cancel_rejected');
     expect(late!.time).toBe(T(12, 4, 50, 200));
     expect(late!.reason).toBe('Cancel arrived too late: order already filled');
-    expect(late!.catchUp).toBeDefined();
+    expect(late!.catchUp).toEqual(tag('cancel_arrival'));
     expect(summary(events).actions).toEqual([
-      'Limit buy filled 1 BTC at 60000 (replayed trade at 12:04:30; estimated)',
-      'Cancel of limit buy arrived at 12:04:50: order already filled (estimated)',
+      'Limit buy filled 1 BTC at 60000 (replayed trade at 12:04:30 UTC; estimated)',
+      'Cancel of limit buy arrived at 12:04:50 UTC: order already filled (estimated)',
     ]);
     expect(t.stored(id).cancelArrivesAt).toBeNull();
     expectTaggedInOrder(events);
@@ -413,8 +488,9 @@ describe('spot catch-up: cancels in flight across the gap', () => {
     expect(cancelled!.order.id).toBe(id);
     expect(cancelled!.reason).toBe('user');
     expect(cancelled!.time).toBe(T(12, 4, 50, 200));
+    expect(cancelled!.catchUp).toEqual(tag('cancel_arrival'));
     expect(s(cancelled!.cancelledQty)).toBe('1');
-    expect(summary(events).actions).toEqual(['Cancel of limit buy 1 BTC took effect at 12:04:50 (estimated)']);
+    expect(summary(events).actions).toEqual(['Cancel of limit buy 1 BTC took effect at 12:04:50 UTC (estimated)']);
     expect(s(t.bal('USDT').locked)).toBe('0');
     expectTaggedInOrder(events);
   });
