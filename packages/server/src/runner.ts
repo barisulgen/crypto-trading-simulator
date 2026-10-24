@@ -53,7 +53,7 @@ import type {
   SpotState,
   Wallet,
 } from '@sim/engine';
-import { CATCHING_UP_REFUSAL, CatchUpService } from './catchup/catchUpService.ts';
+import { CATCHING_UP_REFUSAL, CatchUpService, gapJob } from './catchup/catchUpService.ts';
 import type { CatchUpHost, Gate } from './catchup/catchUpService.ts';
 import type { CatchUpHistory } from './catchup/history.ts';
 import type { Db } from './db/db.ts';
@@ -342,7 +342,8 @@ export class EngineRunner implements FundingSim {
 
   /**
    * Stops trades, marks, timers and pending arrival timers, and records every gap still open as a
-   * feed_gap ending now, with the trade cursors (after a fatal error nothing more is written).
+   * feed_gap ending now, with the trade cursors and, for a gap that needs catching up, its job
+   * (after a fatal error nothing more is written).
    */
   stop(): void {
     this.started = false;
@@ -741,13 +742,24 @@ export class EngineRunner implements FundingSim {
     for (const n of [...noticesFor(events, this.noticeLookup()), ...extra()]) this.notice(n);
   }
 
-  /** Every gap still open as a feed_gap ending now, and the trade cursors, in one transaction. */
+  /**
+   * Every gap still open as a feed_gap ending now, and the trade cursors, in one transaction. A gap
+   * whose key has a pending job or anything open is saved with its catch-up job too, as it would be
+   * had its data come back: the heartbeats go on until the stop, so the next start seeds its gap
+   * from about now and only this job keeps the span before it.
+   */
   private saveOnStop(): void {
     if (this.dead) return;
     const now = this.d.now();
     const gaps = this.gaps.takeAll(now);
+    const jobs =
+      this.violations.length > 0
+        ? []
+        : gaps
+            .filter((g) => this.needsCatchUp(marketKey(g.market, g.symbol), [g]))
+            .map((g) => gapJob(g, now));
     try {
-      persist(this.d.db, this.d.seasonId, this.d.sim, [], { feedGaps: gaps, cursor: true, now });
+      persist(this.d.db, this.d.seasonId, this.d.sim, [], { feedGaps: gaps, cursor: true, now, jobs });
       this.cursorSavedAt = now;
     } catch (e) {
       this.die('persist failed', e);

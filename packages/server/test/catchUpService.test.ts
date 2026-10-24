@@ -210,6 +210,37 @@ describe('catch-up: spot', () => {
     expect(b.fatal).toEqual([]);
   });
 
+  it('a clean shutdown with a gap open saves its span as a job: an hour later the run starts at the gap’s start and judges the stop over it all', async () => {
+    const a = setup();
+    const { stop } = withStop(a);
+    spotGap(a, 10 * MIN); // stale since 12:00:00; heartbeats go on every 10 s
+    a.runner.stop(); // a clean shutdown at 12:10:00.200, the gap still open
+    expect(a.jobs()).toEqual([
+      expect.objectContaining({ market: 'spot', status: 'pending', startedAt: T - 5000, endedAt: T + 600_200 }),
+    ]);
+
+    const b = setup({ db: a.db, clock: new FakeClock(T + 70 * MIN) });
+    b.history.candleList[SPOT] = spotCandles(T + 70 * MIN); // 12:04 went down to 98.8
+    b.runner.start();
+    await settle();
+    // One job from the original gap's start (less the lag allowance) to the restart: the startup
+    // gap from the last heartbeat joined it.
+    expect(b.jobs()).toEqual([expect.objectContaining({ status: 'done', startedAt: T - 5000, endedAt: T + 70 * MIN })]);
+    expect(b.history.calls).toEqual([`candles spot:BTCUSDT ${T - 5000} ${T + 70 * MIN}`]);
+    expect(b.fillsOf(stop.id)).toEqual([{ qty: '0.5', price: '98.8', time: T + 4 * MIN }]);
+    expect(b.fatal).toEqual([]);
+  });
+
+  it('a clean shutdown with a gap open and nothing open saves no job', () => {
+    const a = setup();
+    a.runner.start();
+    a.runner.deposit('spot', D('1000'));
+    spotGap(a, 10 * MIN);
+    a.runner.stop();
+    expect(a.jobs()).toEqual([]);
+    expect(a.eventsOf('feed_gap')).toHaveLength(1);
+  });
+
   it('a REST failure (429) is retried after 5, 10, then 20 s with attempts and the error recorded; orders on that coin are refused meanwhile', async () => {
     const t = setup();
     withStop(t);

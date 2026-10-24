@@ -25,6 +25,23 @@ export const RETRY_MAX_MS = 60_000;
 /** Binance's futures trade history covers 2 days: a perp run starting earlier than this before now has none. */
 export const PERP_TRADES_WINDOW_MS = 47 * 3_600_000;
 
+/**
+ * The job change a closed gap makes: an interval to catch up, from one lag allowance before the
+ * gap to its end, replayed after the trade cursor the gap opened with; merged into the key's
+ * pending job, clipped to the end of a done one (writeJob).
+ */
+export function gapJob(g: FeedGap, now: number): JobWrite {
+  return {
+    kind: 'merge',
+    market: g.market,
+    symbol: g.symbol,
+    startedAt: g.startedAt - LAG_ALLOWANCE_MS,
+    endedAt: g.endedAt,
+    lastTradeIdBefore: g.lastTradeIdBefore,
+    now,
+  };
+}
+
 /** A market and symbol's state: data live, a gap open, or catching up after one. */
 export type Gate = 'live' | 'stale' | 'catching_up';
 
@@ -139,16 +156,7 @@ export class CatchUpService {
    */
   enter(key: MarketKey, gaps: FeedGap[]): boolean {
     const now = this.d.now();
-    const writes: JobWrite[] = gaps.map((g) => ({
-      kind: 'merge',
-      market: g.market,
-      symbol: g.symbol,
-      startedAt: g.startedAt - LAG_ALLOWANCE_MS,
-      endedAt: g.endedAt,
-      lastTradeIdBefore: g.lastTradeIdBefore,
-      now,
-    }));
-    this.d.host.commitGaps(gaps, writes);
+    this.d.host.commitGaps(gaps, gaps.map((g) => gapJob(g, now)));
     const { market, symbol } = splitKey(key);
     const job = loadPendingJobs(this.d.db, this.d.seasonId).find((j) => j.market === market && j.symbol === symbol);
     if (!job) {

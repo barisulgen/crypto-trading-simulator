@@ -292,18 +292,27 @@ describe('EngineRunner', () => {
     ]);
   });
 
-  it('stop() records a gap still open at shutdown as a feed_gap ending at the stop time and clears its row', () => {
+  it('stop() records a gap still open at shutdown as a feed_gap ending at the stop time, with its catch-up job when an order is open', () => {
     const t = setup();
     t.runner.start(); // fresh at the first poll, T0
+    t.runner.deposit('spot', D('1000'));
+    t.runner.submit(limitBuy('99.50', '1'));
+    t.clock.advance(100); // open, and still open across the gap
     t.market.setFresh('BTCUSDT', false);
-    t.clock.advance(1000); // seen stale at T0 + 1000: the gap starts at T0, the last fresh moment
+    t.clock.advance(900); // seen stale at T0 + 1000: the gap starts at T0, the last fresh moment
     expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0, reason: 'Disconnected' }]);
     t.clock.advance(4500);
     t.runner.stop(); // at T0 + 5500
     expect(t.gaps()).toEqual([{ startedAt: T0, endedAt: T0 + 5500, reason: 'Disconnected', lastTradeIdBefore: null }]);
+    // The open row is replaced by the job: the next start catches up from the gap's start (less
+    // the lag allowance), not from its last heartbeat.
     expect(t.openGapRows()).toEqual([]);
+    const jobs = () =>
+      t.db.prepare('SELECT market, symbol, started_at AS startedAt, ended_at AS endedAt, status FROM catchup_jobs').all();
+    expect(jobs()).toEqual([{ market: 'spot', symbol: 'BTCUSDT', startedAt: T0 - 5000, endedAt: T0 + 5500, status: 'pending' }]);
     t.runner.stop(); // a second stop records nothing more
     expect(t.eventsOf('feed_gap')).toHaveLength(1);
+    expect(jobs()).toHaveLength(1);
   });
 
   it.each([
