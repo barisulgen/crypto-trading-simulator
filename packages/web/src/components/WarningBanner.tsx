@@ -1,7 +1,5 @@
 // The margin warning bar over the trade screen: shown while any position nears liquidation.
-import { useEffect, useRef } from 'react';
 import { useLive } from '../lib/live.ts';
-import { bannerEntries } from '../lib/positions.ts';
 import type { BannerEntry } from '../lib/positions.ts';
 
 const LEVEL: Record<BannerEntry['level'], { bar: string; word: string }> = {
@@ -52,20 +50,10 @@ export function WarningBannerView({ entries }: { entries: BannerEntry[] }) {
 }
 
 /**
- * The banner from the live positions. A level comes and goes only on a live mark; while a
- * position's mark is not live (stale, our connection down, catching up) its last level stays.
+ * The banner as the store holds it. A level comes and goes only on a live mark; while a position's
+ * mark is not live (stale, our connection down, catching up) its last level stays.
  */
 export function WarningBanner() {
-  const positions = useLive((s) => s.positions);
-  const down = useLive((s) => s.conn !== 'open');
-  const perp = useLive((s) => s.meta?.perp);
-  const last = useRef<BannerEntry[]>([]);
-  const entries = bannerEntries(last.current, positions, {
-    down,
-    tick: (symbol) => perp?.[symbol]?.rules?.tickSize ?? undefined,
-  });
-  useEffect(() => {
-    last.current = entries;
-  });
+  const entries = useLive((s) => s.banner);
   return <WarningBannerView entries={entries} />;
 }

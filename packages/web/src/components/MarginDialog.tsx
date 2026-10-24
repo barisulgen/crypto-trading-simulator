@@ -7,7 +7,7 @@ import type { WireMarginPreview } from '../lib/api.ts';
 import { fmtFloor, fmtPrice, fmtUsdFloor } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
 import { cmpDec, liqPriceAtTick } from '../lib/market.ts';
-import { actionBlocks } from '../lib/positions.ts';
+import { actionBlocks, marginSubmitReady } from '../lib/positions.ts';
 import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
 import type { PreviewState } from '../lib/previewLoop.ts';
 import { Button, Dialog, ErrorText, Segmented, TextField } from './ui.tsx';
@@ -87,8 +87,8 @@ export function MarginDialog({ symbol, onClose }: { symbol: string | null; onClo
   const liqAfter = (price: string | null): string => {
     if (!p) return '-';
     if (price === null) return 'None';
-    if (tick === undefined) return '-';
-    return `${fmtPrice(p.symbol, liqPriceAtTick(price, p.side, tick), { market: 'perp' })} USDT`;
+    const atTick = liqPriceAtTick(price, p.side, tick);
+    return atTick === null ? '-' : `${fmtPrice(p.symbol, atTick, { market: 'perp' })} USDT`;
   };
 
   async function submit(e: FormEvent) {
@@ -115,8 +115,13 @@ export function MarginDialog({ symbol, onClose }: { symbol: string | null; onClo
   }
 
   const reject = current ? (preview.preview?.rejectReason ?? preview.error) : null;
-  // The server's answer for this very amount says it would be refused: nothing to send.
-  const ready = key !== null && blocked === null && noRemove === null && !(current && preview.preview?.rejectReason);
+  const ready = marginSubmitReady({
+    hasAmount: key !== null,
+    blocked,
+    noRemove,
+    current,
+    rejectReason: preview.preview?.rejectReason ?? null,
+  });
   return (
     <Dialog open={symbol !== null} title={`Margin · ${base} ${p?.side ?? ''}`} onClose={onClose}>
       {!p ? (

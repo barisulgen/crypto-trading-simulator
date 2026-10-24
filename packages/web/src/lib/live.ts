@@ -22,6 +22,8 @@ import type {
   WirePosition,
 } from './api.ts';
 import { setPerpRules, setRules } from './format.ts';
+import { bannerEntries } from './positions.ts';
+import type { BannerEntry } from './positions.ts';
 
 const TRADES_KEPT = 100;
 /** An identical notice text arriving within this window bumps the earlier toast's count instead. */
@@ -86,6 +88,17 @@ export interface LiveData {
   notices: Notice[];
   noticeSeq: number;
   /**
+   * Liquidation notices not yet acknowledged, oldest first. Kept apart from `notices`, whose cap
+   * could drop one before its alert has been seen.
+   */
+  liquidationQueue: Notice[];
+  /**
+   * The margin warning banner: each position near liquidation at its last live level (see
+   * bannerEntries). Held here, not in the banner, so a level held over a stale mark survives a
+   * remount of the screen.
+   */
+  banner: BannerEntry[];
+  /**
    * Bumped whenever fills may have changed, so views showing fills know to reload them: every
    * fill, partial-fill, liquidation or catch-up notice, a change in the open orders of either
    * market (ids, status, filled quantity) and a change in wallet balances. Not bumped by the 1 s
@@ -116,6 +129,8 @@ export interface LiveState extends LiveData {
   setAccount(account: AccountSnapshot): void;
   pushNotice(level: Notice['level'], text: string): void;
   dismissNotice(id: number): void;
+  /** The owner has seen the liquidation alert of notice `id` (the notice itself stays). */
+  acknowledgeLiquidation(id: number): void;
   priceClicked(price: string): void;
 }
 
@@ -136,6 +151,8 @@ export function initialLiveData(): LiveData {
     perpOrders: [],
     notices: [],
     noticeSeq: 0,
+    liquidationQueue: [],
+    banner: [],
     fillSeq: 0,
     selected: { symbol: 'BTCUSDT', market: 'spot' },
     interval: '15m',
@@ -234,7 +251,10 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
     }
     case 'notice': {
       const n = { kind: msg.kind, level: msg.level, text: msg.text, ...(msg.liquidation ? { liquidation: msg.liquidation } : {}) };
-      const notices = addNotice(s, n, now);
+      const added = addNotice(s, n, now);
+      // A liquidation is never folded, so the notice just added is the last one.
+      const notices =
+        msg.kind === 'liquidation' ? { ...added, liquidationQueue: [...s.liquidationQueue, added.notices.at(-1)!] } : added;
       return FILL_NOTICES.has(msg.kind) ? { ...notices, fillSeq: s.fillSeq + 1 } : notices;
     }
     case 'error':
@@ -278,10 +298,24 @@ export const useLive = create<LiveState>()((set) => ({
   dismissNotice(id) {
     set((s) => ({ notices: s.notices.filter((n) => n.id !== id) }));
   },
+  acknowledgeLiquidation(id) {
+    set((s) => ({ liquidationQueue: s.liquidationQueue.filter((n) => n.id !== id) }));
+  },
   priceClicked(price) {
     set((s) => ({ priceClick: { price, seq: (s.priceClick?.seq ?? 0) + 1 } }));
   },
 }));
+
+// The banner follows the positions, our connection and the rules (the tick of the liquidation
+// price); whatever it held over a mark that is not live is kept in the store.
+useLive.subscribe((s, prev) => {
+  if (s.positions === prev.positions && s.conn === prev.conn && s.meta === prev.meta) return;
+  const banner = bannerEntries(s.banner, s.positions, {
+    down: s.conn !== 'open',
+    tick: (symbol) => s.meta?.perp?.[symbol]?.rules?.tickSize ?? undefined,
+  });
+  if (JSON.stringify(banner) !== JSON.stringify(s.banner)) useLive.setState({ banner });
+});
 
 // ---- WebSocket client ----
 

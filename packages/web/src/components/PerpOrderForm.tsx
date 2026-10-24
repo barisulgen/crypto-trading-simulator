@@ -157,10 +157,12 @@ export function PerpEstimate({
   const liqSide = reduceOnly ? (side === 'buy' ? 'short' : 'long') : positionSideOf(side);
   let liq: string;
   let liqWords = true;
+  const liqAtTick = p.estLiquidationPrice === null ? null : liqPriceAtTick(p.estLiquidationPrice, liqSide, tick);
   if (staleReason !== null) liq = 'Not shown: no live mark';
-  else if (p.estLiquidationPrice !== null) {
+  else if (p.estLiquidationPrice !== null && liqAtTick === null) liq = 'Not shown: price rules not loaded';
+  else if (liqAtTick !== null) {
     liqWords = false;
-    liq = `${fmtPrice(symbol, liqPriceAtTick(p.estLiquidationPrice, liqSide, tick), { market: 'perp' })} USDT`;
+    liq = `${fmtPrice(symbol, liqAtTick, { market: 'perp' })} USDT`;
   } else if (p.notional === null || p.rejectReason !== null) liq = '-';
   else liq = reduceOnly ? 'None (position closed)' : 'None';
 

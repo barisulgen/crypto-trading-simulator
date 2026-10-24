@@ -1,12 +1,14 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { LiquidationAlertView } from '../src/components/LiquidationAlert.tsx';
+import { LiquidationAlertDialog, LiquidationAlertView, holdOnEscape } from '../src/components/LiquidationAlert.tsx';
+import { LastPriceHint } from '../src/components/PositionTpSlDialog.tsx';
 import { PositionLine } from '../src/components/PositionsTab.tsx';
 import { WarningBannerView } from '../src/components/WarningBanner.tsx';
 import type { AccountSnapshot, WirePerpOrder, WirePosition } from '../src/lib/api.ts';
 import { pricesLoading, pricesPausedLabel } from '../src/lib/holdings.ts';
-import { initialLiveData, reduce } from '../src/lib/live.ts';
+import { initialLiveData, reduce, useLive } from '../src/lib/live.ts';
+import type { LiveData } from '../src/lib/live.ts';
 import {
   actionBlocks,
   bannerEntries,
@@ -16,6 +18,7 @@ import {
   fmtPnl,
   leverageWalletLine,
   liqDistancePct,
+  marginSubmitReady,
   pnlPctOfMargin,
   positionFigures,
   positionState,
@@ -110,7 +113,8 @@ describe('position row maths, from a wire position', () => {
 describe('banner level', () => {
   it('none below 0.5, amber from 0.5, red from 0.8, pulsing from 0.9', () => {
     expect(riskLevel('0.49')).toBe('none');
-    expect(riskLevel('0.4999999')).toBe('none');
+    // Shown as 50.0% (rounded up): amber, as the figure says.
+    expect(riskLevel('0.4999999')).toBe('amber');
     expect(riskLevel('0.5')).toBe('amber');
     expect(riskLevel('0.79')).toBe('amber');
     expect(riskLevel('0.8')).toBe('red');
@@ -118,6 +122,13 @@ describe('banner level', () => {
     expect(riskLevel('0.9')).toBe('pulse');
     expect(riskLevel('Infinity')).toBe('pulse');
     expect(riskLevel(null)).toBe('none');
+  });
+
+  it('is taken from the ratio as shown (rounded up), so the colour never disagrees with the figure', () => {
+    expect([ratioPct('0.4996'), riskLevel('0.4996')]).toEqual(['50.0%', 'amber']);
+    expect([ratioPct('0.7995'), riskLevel('0.7995')]).toEqual(['80.0%', 'red']);
+    expect([ratioPct('0.8995'), riskLevel('0.8995')]).toEqual(['90.0%', 'pulse']);
+    expect([ratioPct('0.499'), riskLevel('0.499')]).toEqual(['49.9%', 'none']);
   });
 });
 
@@ -285,6 +296,93 @@ describe('position actions', () => {
     );
     expect(actionBlocks(wire(), { fresh: true, reason: null })).toEqual({ close: null, margin: null, tpsl: null });
   });
+
+  it('a margin change is sent only with an amount, nothing blocking it, and no refusal in the current preview', () => {
+    const ok = { hasAmount: true, blocked: null, noRemove: null, current: true, rejectReason: null };
+    expect(marginSubmitReady(ok)).toBe(true);
+    expect(marginSubmitReady({ ...ok, rejectReason: 'At most 0 USDT can be removed now' })).toBe(false);
+    // A refusal for an older amount says nothing about this one.
+    expect(marginSubmitReady({ ...ok, current: false, rejectReason: 'At most 0 USDT can be removed now' })).toBe(true);
+    expect(marginSubmitReady({ ...ok, hasAmount: false })).toBe(false);
+    expect(marginSubmitReady({ ...ok, blocked: 'Catching up' })).toBe(false);
+    expect(marginSubmitReady({ ...ok, noRemove: 'No live mark price' })).toBe(false);
+  });
+});
+
+const liqDetail = (symbol: string, side: 'long' | 'short') => ({
+  symbol,
+  side,
+  qty: '0.1',
+  markPrice: '76340',
+  marginLost: '396',
+  liquidationFee: '30',
+});
+const liqMsg = (symbol: string, side: 'long' | 'short') => ({
+  type: 'notice' as const,
+  kind: 'liquidation' as const,
+  level: 'error' as const,
+  text: `LIQUIDATED: ${symbol} ${side}`,
+  liquidation: liqDetail(symbol, side),
+});
+/** Every message applied in turn, as the store does. */
+function applyAll(msgs: Parameters<typeof reduce>[1][]): LiveData {
+  let s = initialLiveData();
+  msgs.forEach((m, i) => (s = { ...s, ...reduce(s, m, 1000 + i * 2000) }));
+  return s;
+}
+
+describe('the liquidation alert queue', () => {
+  it('keeps an unacknowledged liquidation however many notices follow (the notice list keeps 50)', () => {
+    const others = Array.from({ length: 60 }, (_, i) => ({ type: 'notice' as const, kind: 'fill' as const, level: 'info' as const, text: `fill ${i}` }));
+    const s = applyAll([liqMsg('BTCUSDT', 'long'), ...others]);
+    expect(s.notices.some((n) => n.kind === 'liquidation')).toBe(false);
+    expect(s.liquidationQueue.map((n) => n.liquidation?.symbol)).toEqual(['BTCUSDT']);
+  });
+
+  it('shows two liquidations one after the other, each until acknowledged', () => {
+    const s = applyAll([liqMsg('BTCUSDT', 'long'), liqMsg('ETHUSDT', 'short')]);
+    useLive.setState(s);
+    // The alert as LiquidationAlert renders it from the store: the head of the queue.
+    const alert = () =>
+      renderToStaticMarkup(
+        createElement(LiquidationAlertDialog, { shown: useLive.getState().liquidationQueue[0] ?? null, onAcknowledge: noop }),
+      );
+    const first = alert();
+    expect(first).toContain('BTC long liquidated');
+    expect(first).not.toContain('ETH short liquidated');
+    useLive.getState().acknowledgeLiquidation(s.liquidationQueue[0]!.id);
+    expect(alert()).toContain('ETH short liquidated');
+    useLive.getState().acknowledgeLiquidation(s.liquidationQueue[1]!.id);
+    expect(alert()).not.toContain('I understand');
+    // Acknowledging leaves the notices themselves in the list.
+    expect(useLive.getState().notices.filter((n) => n.kind === 'liquidation')).toHaveLength(2);
+  });
+
+  it('Escape does not dismiss it, and it has no close button', () => {
+    let prevented = false;
+    holdOnEscape({ preventDefault: () => (prevented = true) });
+    expect(prevented).toBe(true);
+    const html = renderToStaticMarkup(
+      createElement(LiquidationAlertView, { detail: liqDetail('BTCUSDT', 'long'), text: '', onAcknowledge: noop }),
+    );
+    expect(html).not.toContain('aria-label="Close"');
+  });
+});
+
+describe('the warning banner in the store', () => {
+  it('keeps its held level across a remount: a stale mark after it neither clears nor raises it', () => {
+    useLive.setState({ ...initialLiveData(), conn: 'open', meta: null, positions: [wire({ marginRatio: '0.85' })] });
+    expect(useLive.getState().banner.map((e) => [e.level, e.stale])).toEqual([['red', false]]);
+    // The mark goes stale: the store (not the mounted banner) still holds the last live level, so a
+    // banner mounted now (WarningBanner renders the store's entries) shows it, marked stale.
+    useLive.setState({ positions: [wire({ marginRatio: '0.3', markFresh: false })] });
+    const html = renderToStaticMarkup(createElement(WarningBannerView, { entries: useLive.getState().banner }));
+    expect(html).toContain('85.0%');
+    expect(html).toContain('Stale: last live figures');
+    // Live again under 0.5: cleared.
+    useLive.setState({ positions: [wire({ marginRatio: '0.3' })] });
+    expect(useLive.getState().banner).toEqual([]);
+  });
 });
 
 describe('liquidation notices in the store', () => {
@@ -327,6 +425,12 @@ describe('a position row', () => {
     }
   });
 
+  it('with our socket down the actions stay on: the server judges on its own feed', () => {
+    const html = row(wire(), true);
+    expect(html).toContain('Stale');
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>(Close|Close part|Margin|SL\/TP)<\/button>/);
+  });
+
   it('on a stale mark the close actions are off (the server would reject them) but adding margin is not', () => {
     const html = row(wire({ markFresh: false }));
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Close<\/button>/);
@@ -360,6 +464,18 @@ describe('warning banner', () => {
     expect(html([entry({ level: 'pulse' })])).toContain('danger-pulse');
     expect(html([entry({ stale: true })])).toContain('Stale');
     expect(html([])).toBe('');
+  });
+});
+
+describe('the SL/TP hint', () => {
+  it('is dimmed and marked stale while the last price is not live', () => {
+    const live = renderToStaticMarkup(createElement(LastPriceHint, { below: true, symbol: 'BTCUSDT', last: '80000', stale: false }));
+    expect(live).toContain('Below the last price 80,000');
+    expect(live).not.toContain('Stale');
+    const stale = renderToStaticMarkup(createElement(LastPriceHint, { below: false, symbol: 'BTCUSDT', last: '80000', stale: true }));
+    expect(stale).toContain('Above the last price 80,000');
+    expect(stale).toContain('opacity-50');
+    expect(stale).toContain('Stale');
   });
 });
 

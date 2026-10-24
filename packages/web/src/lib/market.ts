@@ -300,10 +300,13 @@ export function liquidationMark(row: HistoryRow): LiquidationMark | null {
 /**
  * A liquidation price at the tick's decimals, rounded towards the mark (up for a long, down for a
  * short) as the liquidation notices round it, so the chart never shows it further away than they
- * do. Exact: decimal strings, no floats. Without a tick (rules not loaded) the price as given.
+ * do. Exact: decimal strings, no floats. Without a tick (rules not loaded) null: no price is shown
+ * until it can be rounded the right way.
  */
-export function liqPriceAtTick(price: string, side: 'long' | 'short', tick: string | undefined): string {
-  if (tick === undefined) return price;
+export function liqPriceAtTick(price: string, side: 'long' | 'short', tick: string): string;
+export function liqPriceAtTick(price: string, side: 'long' | 'short', tick: string | undefined): string | null;
+export function liqPriceAtTick(price: string, side: 'long' | 'short', tick: string | undefined): string | null {
+  if (tick === undefined) return null;
   const dp = tickDecimals(tick);
   const s = Math.max(scaleOf(price), dp);
   const unit = 10n ** BigInt(s - dp);

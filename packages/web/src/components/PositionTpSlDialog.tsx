@@ -11,6 +11,31 @@ import { Button, Dialog, ErrorText, TextField } from './ui.tsx';
 const blank = (v: string) => v.trim() === '';
 
 /**
+ * Which side of the last price a trigger must be. While the last price is not live (the perp feed
+ * stale, or our connection down) it is dimmed and marked stale: the side may have moved.
+ */
+export function LastPriceHint({
+  below,
+  symbol,
+  last,
+  stale,
+}: {
+  below: boolean;
+  symbol: string;
+  last: string | undefined;
+  stale: boolean;
+}) {
+  return (
+    <>
+      <span className={stale ? 'opacity-50' : ''}>
+        {`${below ? 'Below' : 'Above'} the last price ${fmtPrice(symbol, last, { market: 'perp' })}`}
+      </span>
+      {stale && <span className="ml-1.5 whitespace-nowrap text-muted">(Stale: live data interrupted)</span>}
+    </>
+  );
+}
+
+/**
  * POST /api/perp/tpsl: a stop-loss and/or take-profit that close the whole position at market when
  * the last price reaches them (both set: when one triggers, the other is cancelled). A position has
  * at most one of each, so a leg already set is shown with its Cancel instead of a field. Refused
@@ -21,6 +46,7 @@ export function PositionTpSlDialog({ symbol, onClose }: { symbol: string | null;
   const orders = useLive((s) => s.perpOrders);
   const feed = useLive((s) => (symbol ? feedOf(s, 'perp', symbol) : undefined));
   const last = useLive((s) => (symbol ? s.perpTickers[symbol]?.last : undefined));
+  const down = useLive((s) => s.conn !== 'open');
   const pushNotice = useLive((s) => s.pushNotice);
   const [stopLoss, setStopLoss] = useState('');
   const [takeProfit, setTakeProfit] = useState('');
@@ -38,7 +64,8 @@ export function PositionTpSlDialog({ symbol, onClose }: { symbol: string | null;
   const stops = p ? positionStops(orders, p) : { stopLoss: null, takeProfit: null };
   const blocked = p ? actionBlocks(p, feed).tpsl : null;
   const long = p?.side !== 'short';
-  const lastText = `the last price ${fmtPrice(symbol ?? '', last, { market: 'perp' })}`;
+  const lastStale = down || feed?.fresh === false;
+  const hint = (below: boolean) => <LastPriceHint below={below} symbol={symbol ?? ''} last={last} stale={lastStale} />;
 
   async function cancel(o: WirePerpOrder) {
     setError('');
@@ -108,7 +135,7 @@ export function PositionTpSlDialog({ symbol, onClose }: { symbol: string | null;
               data-autofocus
               value={stopLoss}
               onChange={(e) => setStopLoss(e.target.value)}
-              hint={`${long ? 'Below' : 'Above'} ${lastText}`}
+              hint={hint(long)}
             />
           )}
           {stops.takeProfit ? (
@@ -122,7 +149,7 @@ export function PositionTpSlDialog({ symbol, onClose }: { symbol: string | null;
               autoComplete="off"
               value={takeProfit}
               onChange={(e) => setTakeProfit(e.target.value)}
-              hint={`${long ? 'Above' : 'Below'} ${lastText}`}
+              hint={hint(!long)}
             />
           )}
           <p className="text-xs text-muted">

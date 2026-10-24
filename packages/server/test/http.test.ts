@@ -672,7 +672,29 @@ describe('perp REST', () => {
       liquidationPriceAfter: liquidationPrice(btcBrackets, 'long', D('0.01'), D('80000'), D('49.6'))!.toString(),
       rejectReason: null,
     });
-    expect(add.body.maxRemovable).toMatch(/^[\d.]+$/);
+    // At the mark 80000, a 20x long holds exactly its initial margin less the fee: nothing is removable.
+    expect(add.body.maxRemovable).toBe(
+      maxRemovableMargin({
+        brackets: btcBrackets,
+        side: 'long',
+        qty: D('0.01'),
+        entry: D('80000'),
+        margin: D('39.6'),
+        mark: D('80000'),
+        leverage: 20,
+      }).toString(),
+    );
+    expect(add.body.maxRemovable).toBe('0');
+    t.perpMarket.mark('BTCUSDT', '81000');
+    expect((await preview({ symbol: 'BTCUSDT', action: 'remove', amount: '1' })).body).toEqual({
+      marginAfter: '38.6',
+      liquidationPriceAfter: liquidationPrice(btcBrackets, 'long', D('0.01'), D('80000'), D('38.6'))!.toString(),
+      maxRemovable: '9.1',
+      rejectReason: null,
+    });
+    t.perpMarket.mark('BTCUSDT', '80000');
+    // Refused without the session.
+    expect((await t.call('POST', '/api/perp/margin/preview', { symbol: 'BTCUSDT', action: 'add', amount: '1' }, false)).status).toBe(401);
     const tooMuch = await preview({ symbol: 'BTCUSDT', action: 'remove', amount: '40' });
     expect(tooMuch.body).toMatchObject({ marginAfter: null, liquidationPriceAfter: null });
     expect(tooMuch.body.rejectReason).toBe(`At most ${tooMuch.body.maxRemovable} USDT can be removed now`);
@@ -828,6 +850,14 @@ describe('perp REST', () => {
     expect(await t.call('POST', '/api/perp/margin', { symbol: 'BTCUSDT', action: 'add', amount: '1' })).toMatchObject(refused);
     expect(await t.call('POST', '/api/perp/tpsl', { symbol: 'BTCUSDT', stopLoss: '70000' })).toMatchObject(refused);
     expect(await t.call('POST', '/api/perp/close', { symbol: 'BTCUSDT' })).toMatchObject(refused);
+    // The margin preview answers with the action's own refusal, and nothing is shown as removable.
+    expect((await t.call('POST', '/api/perp/margin/preview', { symbol: 'BTCUSDT', action: 'remove', amount: '1' })).body).toEqual({
+      marginAfter: null,
+      liquidationPriceAfter: null,
+      maxRemovable: null,
+      rejectReason: CATCHING_UP_REFUSAL,
+    });
+    expect((await t.call('GET', '/api/positions')).body.positions[0]).toMatchObject({ markFresh: true, maxRemovableMargin: null });
     expect(await t.call('POST', '/api/transfer', { from: 'leverage', to: 'spot', amount: '1' })).toMatchObject({
       status: 409,
       body: { error: LEVERAGE_TRANSFER_REFUSAL },

@@ -287,8 +287,8 @@ describe('liquidation price on the chart', () => {
     expect(liqPriceAtTick('76345.38095238095238095238', 'long', '0.10000000')).toBe('76345.4');
     expect(liqPriceAtTick('2.000001', 'long', '0.001')).toBe('2.001');
     expect(liqPriceAtTick('2.000999', 'short', '0.001')).toBe('2');
-    // Rules not loaded yet: the price as computed, never rounded the wrong way.
-    expect(liqPriceAtTick('76345.43', 'long', undefined)).toBe('76345.43');
+    // Rules not loaded yet: no price at all, never the raw one shown as if at the tick.
+    expect(liqPriceAtTick('76345.43', 'long', undefined)).toBeNull();
   });
 });
 

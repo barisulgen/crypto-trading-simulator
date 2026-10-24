@@ -423,9 +423,15 @@ export class EngineRunner implements FundingSim {
     return this.d.sim.preview('perp', req, this.ctx());
   }
 
-  /** Read-only: what adding or removing margin would do now; nothing is persisted. */
+  /**
+   * Read-only: what adding or removing margin would do now; nothing is persisted. While the action
+   * itself would be refused (integrity failure, the symbol catching up) the answer is that refusal,
+   * with nothing removable.
+   */
   previewMargin(symbol: string, action: 'add' | 'remove', amount: string): MarginPreview {
     this.refuseIfDead();
+    const refusal = this.tradingRefusal(perpKey(symbol));
+    if (refusal !== null) return { marginAfter: null, liquidationPriceAfter: null, maxRemovable: null, rejectReason: refusal };
     return this.d.sim.previewMargin(symbol, action, amount, this.ctx());
   }
 
@@ -602,7 +608,9 @@ export class EngineRunner implements FundingSim {
           maintenanceMargin: null,
           marginRatio: null,
           liquidationPrice: brackets ? liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin) : null,
-          maxRemovableMargin: this.d.sim.maxRemovable(p.symbol, ctx),
+          // Nothing is removable while a removal would be refused anyway.
+          maxRemovableMargin:
+            this.tradingRefusal(perpKey(p.symbol)) === null ? this.d.sim.maxRemovable(p.symbol, ctx) : null,
         };
         if (mark === null) return view;
         const pnl = unrealizedPnl(p.side, p.qty, p.entryPrice, mark);
@@ -647,8 +655,15 @@ export class EngineRunner implements FundingSim {
   /** Refuses when nothing may trade; with a key, also while that key catches up after a gap. */
   private refuseTrading(key?: MarketKey): void {
     this.refuseIfDead();
-    if (this.violations.length > 0) throw new RefusedError(INTEGRITY_REFUSAL);
-    if (key !== undefined && this.catchUp.isCatchingUp(key)) throw new RefusedError(CATCHING_UP_REFUSAL);
+    const refusal = this.tradingRefusal(key);
+    if (refusal !== null) throw new RefusedError(refusal);
+  }
+
+  /** Why an owner action would be refused now (integrity failure; the key catching up), or null. */
+  private tradingRefusal(key?: MarketKey): string | null {
+    if (this.violations.length > 0) return INTEGRITY_REFUSAL;
+    if (key !== undefined && this.catchUp.isCatchingUp(key)) return CATCHING_UP_REFUSAL;
+    return null;
   }
 
   private marketOf(market: Market): RunnerMarket | RunnerPerpMarket {

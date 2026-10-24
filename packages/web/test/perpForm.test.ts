@@ -496,6 +496,12 @@ describe('perp estimate', () => {
     expect(html).toContain('76,345.5');
   });
 
+  it('before the tick is known the liquidation price is not shown, not even unrounded', () => {
+    const html = render({ tick: undefined });
+    expect(html).not.toContain('76,345');
+    expect(html).toContain('Not shown: price rules not loaded');
+  });
+
   it('an estimate made at another leverage than the chip shows is dimmed and says which', () => {
     const html = render({ leverage: 25 });
     expect(html).toContain('Estimated at 20x');

@@ -18,19 +18,27 @@ export type RiskLevel = 'none' | 'amber' | 'red' | 'pulse';
 
 const LEVEL_RANK: Record<RiskLevel, number> = { none: 0, amber: 1, red: 2, pulse: 3 };
 
-/** The risk level of a margin ratio; 'none' below 0.5 or when the ratio is unknown. */
+/** A margin ratio in percent, rounded up to 0.1: the figure every ratio display and level uses. */
+const ratioUp = (ratio: string) => pctOfDir(ratio, '1', 1, 'ceil');
+
+/**
+ * The risk level of a margin ratio, judged on the figure shown (rounded up to 0.1 %), so a ratio
+ * shown as 50.0 % is amber even when it is a hair under 0.5; 'none' when the ratio is unknown.
+ */
 export function riskLevel(ratio: string | null): RiskLevel {
   if (ratio === null) return 'none';
-  if (ratio === INFINITE || cmpDec(ratio, '0.9') >= 0) return 'pulse';
-  if (cmpDec(ratio, '0.8') >= 0) return 'red';
-  if (cmpDec(ratio, '0.5') >= 0) return 'amber';
+  if (ratio === INFINITE) return 'pulse';
+  const pct = ratioUp(ratio);
+  if (cmpDec(pct, '90') >= 0) return 'pulse';
+  if (cmpDec(pct, '80') >= 0) return 'red';
+  if (cmpDec(pct, '50') >= 0) return 'amber';
   return 'none';
 }
 
 /** A margin ratio as a percentage rounded up to 0.1 (as the margin warnings show it): '82.4%'; '∞' once the balance is gone. */
 export function ratioPct(ratio: string): string {
   if (ratio === INFINITE) return '∞';
-  return `${fmtNum(pctOfDir(ratio, '1', 1, 'ceil'), 1)}%`;
+  return `${fmtNum(ratioUp(ratio), 1)}%`;
 }
 
 /** Unrealised P&L as a percentage of the margin, 2 decimals, rounded down (a loss away from zero); null without margin. */
@@ -65,7 +73,7 @@ export interface PositionFigures {
  * tick neither is shown, never the price rounded to nearest.
  */
 export function positionFigures(p: WirePosition, tick: string | undefined): PositionFigures {
-  const liq = p.liquidationPrice !== null && tick !== undefined ? liqPriceAtTick(p.liquidationPrice, p.side, tick) : null;
+  const liq = p.liquidationPrice === null ? null : liqPriceAtTick(p.liquidationPrice, p.side, tick);
   return {
     pnl: p.unrealizedPnl,
     pnlPct: p.unrealizedPnl === null ? null : pnlPctOfMargin(p.unrealizedPnl, p.margin),
@@ -218,6 +226,23 @@ export function leverageWalletLine(account: AccountSnapshot): LeverageWalletLine
   return { free: lev.free, inOrders: lev.locked, inPositions, stale: (account.marksPaused?.length ?? 0) > 0, loading };
 }
 
+// ---- margin dialog ----
+
+/**
+ * Whether the margin dialog may send its change: an amount typed, nothing blocking the action (a
+ * catch-up, no live mark for a removal) and no refusal in the server's preview of this very amount
+ * (`current`: the answer shown is for what is typed now).
+ */
+export function marginSubmitReady(p: {
+  hasAmount: boolean;
+  blocked: string | null;
+  noRemove: string | null;
+  current: boolean;
+  rejectReason: string | null;
+}): boolean {
+  return p.hasAmount && p.blocked === null && p.noRemove === null && !(p.current && p.rejectReason !== null);
+}
+
 // ---- actions ----
 
 const CATCHING_UP_BLOCK = 'Catching up after a data gap: closing, margin and stops resume when it is done';
@@ -255,6 +280,6 @@ export function chartLines(
   down: boolean,
 ): { entry: string | null; liq: string | null; dimmed: boolean } {
   if (!p) return { entry: null, liq: null, dimmed: false };
-  const liq = p.liquidationPrice !== null && tick !== undefined ? liqPriceAtTick(p.liquidationPrice, p.side, tick) : null;
+  const liq = p.liquidationPrice === null ? null : liqPriceAtTick(p.liquidationPrice, p.side, tick);
   return { entry: p.entryPrice, liq, dimmed: down || !p.markFresh };
 }

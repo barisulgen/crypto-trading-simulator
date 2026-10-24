@@ -4,7 +4,7 @@ import type { AggTrade, SpotOrderRequest } from '@sim/engine';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
 import { openGap, toJson, touchAlive } from '../src/db/store.ts';
-import { PAUSED_REASON, RefusedError, RESTART_REASON, submittedOrder } from '../src/runner.ts';
+import { INTEGRITY_REFUSAL, PAUSED_REASON, RefusedError, RESTART_REASON, submittedOrder } from '../src/runner.ts';
 import { FeedGaps } from '../src/feedGaps.ts';
 import { marketKey, splitKey } from '../src/market/marketKey.ts';
 import type { MarketKey } from '../src/market/marketKey.ts';
@@ -1342,6 +1342,24 @@ describe('perps through the runner', () => {
       liquidationFee: '30',
     });
     expect(t.sent.filter((m) => m.type === 'account').at(-1)!.account.leverage.positions).toEqual([]);
+  });
+
+  it('under an integrity refusal the margin preview gives the refusal and nothing is removable', () => {
+    const a = setup();
+    a.runner.start();
+    withLong(a);
+    expect(a.runner.positions()[0]!.maxRemovableMargin).not.toBeNull();
+    a.runner.stop();
+    a.db.prepare("UPDATE balances SET locked = '5' WHERE asset = 'USDT' AND wallet = 'leverage'").run();
+    const b = setup({ db: a.db, clock: a.clock });
+    expect(() => b.runner.addMargin('BTCUSDT', '1')).toThrow(INTEGRITY_REFUSAL);
+    expect(b.runner.previewMargin('BTCUSDT', 'add', '1')).toEqual({
+      marginAfter: null,
+      liquidationPriceAfter: null,
+      maxRemovable: null,
+      rejectReason: INTEGRITY_REFUSAL,
+    });
+    expect(b.runner.positions()[0]!.maxRemovableMargin).toBeNull();
   });
 
   it('a spot trade never fills a perp order, and a futures trade never fills a spot order', () => {

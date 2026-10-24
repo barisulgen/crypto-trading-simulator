@@ -1,5 +1,5 @@
 // The modal that tells the owner a position was liquidated; it stays until acknowledged.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import type { LiquidationDetail } from '../lib/api.ts';
 import { fmtCost, fmtPrice, fmtQty } from '../lib/format.ts';
@@ -64,54 +64,50 @@ export function LiquidationAlertView({
   );
 }
 
-/**
- * On each liquidation notice, a modal with its figures. It closes only with its button (not
- * Escape, not a click outside), one liquidation after another; acknowledging it leaves the notice
- * itself in the notice list.
- */
-export function LiquidationAlert() {
-  const notices = useLive((s) => s.notices);
-  // Notice ids only grow: everything up to `seen` has been acknowledged.
-  const [seen, setSeen] = useState(0);
-  const [shown, setShown] = useState<Notice | null>(null);
-  const ref = useRef<HTMLDialogElement>(null);
+/** Escape asks a dialog to close: this one waits for its button instead. */
+export function holdOnEscape(e: { preventDefault(): void }): void {
+  e.preventDefault();
+}
 
-  // The oldest liquidation not yet acknowledged; kept once shown, even if its notice is dismissed.
-  useEffect(() => {
-    if (shown) return;
-    const next = notices.find((n) => n.kind === 'liquidation' && n.id > seen);
-    if (next) setShown(next);
-  }, [notices, seen, shown]);
+/**
+ * The modal for the liquidation `shown` (none: closed). It closes only with its button (not
+ * Escape, not a click outside); a browser that closes it anyway sees it open again.
+ */
+export function LiquidationAlertDialog({ shown, onAcknowledge }: { shown: Notice | null; onAcknowledge(): void }) {
+  const ref = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (shown && !d.open) {
-      d.showModal();
-      d.querySelector<HTMLElement>('[data-autofocus]')?.focus();
-    }
+    if (shown && !d.open) d.showModal();
+    if (shown) d.querySelector<HTMLElement>('[data-autofocus]')?.focus();
     if (!shown && d.open) d.close();
   }, [shown]);
-
-  const acknowledge = () => {
-    if (shown) setSeen(shown.id);
-    setShown(null);
-  };
 
   return (
     <dialog
       ref={ref}
       role="alertdialog"
       aria-label="Position liquidated"
-      // Escape would close a dialog: this one waits for the button. Should the browser close it
-      // anyway (a repeated Escape), it opens again until acknowledged.
-      onCancel={(e) => e.preventDefault()}
+      onCancel={holdOnEscape}
       onClose={() => {
         if (shown) ref.current?.showModal();
       }}
       className="m-0 mt-auto w-full max-w-none rounded-t-dialog border border-down bg-panel p-0 text-fg backdrop:bg-scrim desk:m-auto desk:w-[25rem] desk:rounded-dialog"
     >
-      {shown && <LiquidationAlertView detail={shown.liquidation} text={shown.text} onAcknowledge={acknowledge} />}
+      {shown && (
+        <LiquidationAlertView key={shown.id} detail={shown.liquidation} text={shown.text} onAcknowledge={onAcknowledge} />
+      )}
     </dialog>
   );
+}
+
+/**
+ * On each liquidation notice, the alert, one after another from the store's queue (which keeps
+ * them however many notices follow); acknowledging one leaves its notice in the notice list.
+ */
+export function LiquidationAlert() {
+  const shown = useLive((s) => s.liquidationQueue[0] ?? null);
+  const acknowledge = useLive((s) => s.acknowledgeLiquidation);
+  return <LiquidationAlertDialog shown={shown} onAcknowledge={() => shown && acknowledge(shown.id)} />;
 }
