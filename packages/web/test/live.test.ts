@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountSnapshot, Meta, ServerMessage, WireAggTrade, WireOrder } from '../src/lib/api.ts';
-import { initialLiveData, reduce, selectionChange, useLive } from '../src/lib/live.ts';
+import { acknowledged, initialLiveData, reduce, selectionChange, useLive } from '../src/lib/live.ts';
 import type { LiveData } from '../src/lib/live.ts';
 import { selectionFromParams, selectionParams } from '../src/lib/route.ts';
 
@@ -218,6 +218,32 @@ describe('market selection', () => {
     s = apply(s, { type: 'orders', orders: [], perpOrders: [{ id: 'o1', status: 'new', filledQty: '0' } as never] });
     expect(s.perpOrders.map((o) => o.id)).toEqual(['o1']);
     expect(s.fillSeq).toBe(fillSeq + 1);
+  });
+
+  it('alerts each liquidation once by its event id: the replay on connect and the live notice never both queue it', () => {
+    const liq = (eventId: number): ServerMessage => ({
+      type: 'notice',
+      kind: 'liquidation',
+      level: 'error',
+      text: `LIQUIDATED: BTCUSDT long 0.1 at mark 76340.0 (${eventId})`,
+      liquidation: { eventId, symbol: 'BTCUSDT', side: 'long', qty: '0.1', markPrice: '76340', marginLost: '396', liquidationFee: '30' },
+    });
+    let s = initialLiveData();
+    s = apply(s, liq(7)); // live
+    s = apply(s, liq(7)); // the same one replayed on a reconnect, not acknowledged yet
+    s = apply(s, liq(8));
+    expect(s.liquidationQueue.map((n) => n.liquidation?.eventId)).toEqual([7, 8]);
+    expect(s.notices.filter((n) => n.kind === 'liquidation')).toHaveLength(2);
+    // Acknowledged here: a replay sent before the server took the acknowledgement is not alerted again.
+    s = { ...s, ...acknowledged(s, s.liquidationQueue[0]!.id) };
+    expect(s.liquidationQueue.map((n) => n.liquidation?.eventId)).toEqual([8]);
+    expect(s.ackedLiquidations).toEqual([7]);
+    s = apply(s, liq(7));
+    expect(s.liquidationQueue.map((n) => n.liquidation?.eventId)).toEqual([8]);
+    // One without an event id (an older server) is still alerted, each time.
+    const { eventId: _, ...bare } = (liq(9) as unknown as { liquidation: Record<string, unknown> }).liquidation;
+    s = apply(s, { ...(liq(9) as object), liquidation: bare } as unknown as ServerMessage);
+    expect(s.liquidationQueue).toHaveLength(2);
   });
 
   it('bumps fillSeq on liquidation and catch-up notices too (they move the chart markers)', () => {

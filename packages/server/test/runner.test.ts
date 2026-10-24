@@ -1392,6 +1392,7 @@ describe('perps through the runner', () => {
     ]);
     // The same figures as data, for the owner's alert: exact decimal strings, rounded only for display.
     expect(t.sent.filter((m) => m.type === 'notice')[0]!.liquidation).toEqual({
+      eventId: t.db.prepare("SELECT id FROM events WHERE type = 'liquidation'").pluck().get(),
       symbol: 'BTCUSDT',
       side: 'long',
       qty: '0.1',

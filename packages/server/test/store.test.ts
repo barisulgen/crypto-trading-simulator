@@ -20,6 +20,7 @@ import { FakePerpMarket, perpCtx } from '../../engine/test/perpFixtures.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
 import {
+  acknowledgeLiquidations,
   checkInvariants,
   insertEquitySnapshot,
   loadOpenGaps,
@@ -33,6 +34,7 @@ import {
   recentOrders,
   settleLateCancels,
   touchAlive,
+  unacknowledgedLiquidations,
 } from '../src/db/store.ts';
 
 const NOW = 1_000_000;
@@ -104,16 +106,16 @@ function partialFillScenario() {
 }
 
 describe('openDb', () => {
-  it('applies migrations once: user_version 4; a fresh database is not marked as test data', () => {
+  it('applies migrations once: user_version 5; a fresh database is not marked as test data', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(4);
+    expect(db.pragma('user_version', { simple: true })).toBe(5);
     expect(db.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toBeUndefined();
     expect(currentSeasonId(db)).toBe(1);
     expect(currentSeasonId(db)).toBe(1);
     expect(db.prepare('SELECT name FROM seasons').all()).toEqual([{ name: 'Season 1' }]);
   });
 
-  it('a second open of the same file keeps version 4 and its data', async () => {
+  it('a second open of the same file keeps version 5 and its data', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -125,7 +127,7 @@ describe('openDb', () => {
       touchAlive(a, 123);
       a.close();
       const b = openDb(file);
-      expect(b.pragma('user_version', { simple: true })).toBe(4);
+      expect(b.pragma('user_version', { simple: true })).toBe(5);
       expect(b.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toBeUndefined();
       expect(b.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get()).toEqual({ value: '123' });
       touchAlive(b, 456);
@@ -136,7 +138,7 @@ describe('openDb', () => {
     }
   });
 
-  it('migrations 002 to 004 apply to a Phase 1 database (user_version 1): rows intact, test_data still set', async () => {
+  it('migrations 002 to 005 apply to a Phase 1 database (user_version 1): rows intact, test_data still set', async () => {
     const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -174,8 +176,12 @@ describe('openDb', () => {
       v1.close();
 
       db = openDb(file);
-      expect(db.pragma('user_version', { simple: true })).toBe(4);
-      expect(dump(db)).toEqual(before);
+      expect(db.pragma('user_version', { simple: true })).toBe(5);
+      // Every row as it was; meta gains only the liquidation alerts' marker (none recorded: 0).
+      const [metaBefore, ...restBefore] = before;
+      const [meta, ...rest] = dump(db);
+      expect(rest).toEqual(restBefore);
+      expect(meta).toEqual([...(metaBefore as unknown[]), { key: 'liquidations_acked_through', value: '0' }]);
       expect(db.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toEqual({ value: '1' });
       // The fill keeps every value; the perp columns are empty on it.
       expect(db.prepare('SELECT * FROM fills').all()).toEqual(
@@ -223,7 +229,7 @@ describe('openDb', () => {
       v2.close();
 
       db = openDb(file);
-      expect(db.pragma('user_version', { simple: true })).toBe(4);
+      expect(db.pragma('user_version', { simple: true })).toBe(5);
       expect(db.prepare('SELECT * FROM trade_cursor ORDER BY season_id, symbol').all()).toEqual([
         { season_id: 1, market: 'spot', symbol: 'BTCUSDT', last_trade_id: 42 },
         { season_id: 1, market: 'spot', symbol: 'ETHUSDT', last_trade_id: 7 },
@@ -231,6 +237,7 @@ describe('openDb', () => {
       ]);
       expect(db.prepare('SELECT key, value FROM meta ORDER BY key').all()).toEqual([
         { key: 'last_alive', value: '777' },
+        { key: 'liquidations_acked_through', value: '0' },
         { key: 'test_data', value: '1' },
       ]);
       // The gap open before the upgrade does not know its cursor.
@@ -241,6 +248,44 @@ describe('openDb', () => {
       db.prepare("INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (1, 'perp', 'BTCUSDT', 5)").run();
       const state = loadSpotState(db, 1, loadLedger(db, 1, ASSETS));
       expect(state.lastTradeId).toEqual({ BTCUSDT: 42, ETHUSDT: 7 });
+    } finally {
+      db?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('migration 005 counts every liquidation recorded before it as acknowledged; later ones wait until acknowledged', async () => {
+    const { mkdtempSync, readdirSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { default: Database } = await import('better-sqlite3');
+    const dir = mkdtempSync(join(tmpdir(), 'sim-db-'));
+    let db: Db | null = null;
+    try {
+      const file = join(dir, 'sim.sqlite');
+      const v4 = new Database(file);
+      const migrations = readdirSync(new URL('../src/db/migrations/', import.meta.url)).filter((m) => m < '005');
+      for (const m of migrations.sort()) v4.exec(readFileSync(new URL(`../src/db/migrations/${m}`, import.meta.url), 'utf8'));
+      v4.pragma('user_version = 4');
+      const liq = (symbol: string) => JSON.stringify({ type: 'liquidation', market: 'perp', symbol });
+      v4.exec(`INSERT INTO seasons (name, started_at) VALUES ('Season 1', 5)`);
+      const ins = v4.prepare("INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (1, 10, ?, 'BTCUSDT', 'perp', ?)");
+      ins.run('liquidation', liq('BTCUSDT'));
+      ins.run('fill', '{}');
+      v4.close();
+
+      db = openDb(file);
+      expect(db.prepare("SELECT value FROM meta WHERE key = 'liquidations_acked_through'").get()).toEqual({ value: '1' });
+      expect(unacknowledgedLiquidations(db, 1)).toEqual([]);
+      const later = Number(db.prepare("INSERT INTO events (season_id, time, type, symbol, market, payload) VALUES (1, 20, 'liquidation', 'ETHUSDT', 'perp', ?)").run(liq('ETHUSDT')).lastInsertRowid);
+      expect(unacknowledgedLiquidations(db, 1)).toEqual([{ id: later, payload: { type: 'liquidation', market: 'perp', symbol: 'ETHUSDT' } }]);
+      expect(unacknowledgedLiquidations(db, 2)).toEqual([]); // another season's are not this one's
+      expect(acknowledgeLiquidations(db, 1, 2)).toBe(false); // the fill is no liquidation
+      expect(acknowledgeLiquidations(db, 2, later)).toBe(false);
+      expect(acknowledgeLiquidations(db, 1, later)).toBe(true);
+      expect(unacknowledgedLiquidations(db, 1)).toEqual([]);
+      expect(acknowledgeLiquidations(db, 1, 1)).toBe(true); // an earlier one never moves the marker back
+      expect(db.prepare("SELECT value FROM meta WHERE key = 'liquidations_acked_through'").get()).toEqual({ value: String(later) });
     } finally {
       db?.close();
       rmSync(dir, { recursive: true, force: true });

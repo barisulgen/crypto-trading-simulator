@@ -80,7 +80,14 @@ export interface HubDeps {
   market: HubMarket;
   perpMarket: HubPerpMarket;
   candles: Record<Market, { subscribe(symbol: string, interval: string, cb: (c: Candle) => void): () => void }>;
-  runner: { account(): AccountSnapshot; openOrders(): SpotOrder[]; openPerpOrders(): PerpOrder[]; positions(): PositionView[] };
+  runner: {
+    account(): AccountSnapshot;
+    openOrders(): SpotOrder[];
+    openPerpOrders(): PerpOrder[];
+    positions(): PositionView[];
+    /** The liquidation notices whose alert has not been acknowledged, oldest first (absent: none). */
+    unacknowledgedLiquidations?(): object[];
+  };
   symbols: string[];
   setTimer: SetTimer;
   logger: Logger;
@@ -154,7 +161,10 @@ export class ClientHub {
     this.clients.clear();
   }
 
-  /** A new connection: snapshot first (tickers, health, account, orders, marks, positions), then live messages. */
+  /**
+   * A new connection: snapshot first (tickers, health, account, orders, marks, positions, then the
+   * liquidation notices not acknowledged yet), then live messages.
+   */
   add(socket: HubSocket, session: HubSession | null = null): void {
     const client: Client = { key: null, unsubscribeKline: null, alive: true, session };
     this.clients.set(socket, client);
@@ -171,6 +181,7 @@ export class ClientHub {
     this.sendTo(socket, { type: 'orders', orders: this.d.runner.openOrders(), perpOrders: this.d.runner.openPerpOrders() }, true);
     this.sendTo(socket, { type: 'marks', marks: this.d.perpMarket.marks() }, true);
     this.sendTo(socket, { type: 'positions', positions: this.d.runner.positions() }, true);
+    for (const n of this.d.runner.unacknowledgedLiquidations?.() ?? []) this.sendTo(socket, { type: 'notice', ...n }, true);
   }
 
   /** Send to every client (the runner's account, orders, positions, notice and health messages). */

@@ -443,6 +443,15 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     return send(reply, 200, d.runner.previewMargin(s, action, reqStr(b, 'amount')));
   });
 
+  // The owner has seen the alert of this liquidation (alerts come oldest first): it and every
+  // earlier one are not alerted again on the next connect. Only a liquidation's own event id.
+  app.post('/api/liquidations/ack', async (req, reply) => {
+    const b = only(objectBody(req), ['eventId']);
+    const eventId = reqInt(b, 'eventId');
+    if (eventId < 1 || !d.runner.acknowledgeLiquidations(eventId)) throw new InputError('Unknown liquidation');
+    return send(reply, 200, { acknowledged: eventId });
+  });
+
   // Close-position stops on the symbol's position; refused ones are recorded and returned with 200.
   app.post('/api/perp/tpsl', async (req, reply) => {
     const b = only(objectBody(req), ['symbol', 'stopLoss', 'takeProfit']);

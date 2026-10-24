@@ -22,7 +22,7 @@ import {
   LEVERAGE_TRANSFER_STALE_REFUSAL,
   MARGIN_STALE_REFUSAL,
 } from '../src/runner.ts';
-import { FakeClock, FakeHealth, FakeHistory, TestMarket, TestPerpMarket } from './helpers.ts';
+import { FakeClock, FakeHealth, FakeHistory, settle, TestMarket, TestPerpMarket } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
 const SECRET_ENV = { BINANCE_KEY: 'kKEY-9f3a1e', BINANCE_SECRET: 'sSECRET-77b2c4', APP_PASSWORD: 'pw-LAN-4c1d0a' };
@@ -837,6 +837,74 @@ describe('perp REST', () => {
     expect(recentPerp.every((o: any) => o.market === 'perp')).toBe(true);
     const recentSpot = (await t.call('GET', '/api/orders?status=recent')).body.orders;
     expect(recentSpot.map((o: any) => [o.market, o.status])).toEqual([['spot', 'filled']]);
+  });
+
+  it('a liquidation from catch-up with no socket open is delivered once on connect, then not again after the acknowledgement', async () => {
+    const a = await perpApp();
+    await openLong(a); // 0.01 at 80000, 20x: liquidated at a mark of 76345.4
+    a.runner.stop(); // the last heartbeat at T0; no browser connected from here on
+    const MIN = 60_000;
+    const history = new FakeHistory();
+    const at = Math.floor(T0 / MIN) * MIN + 3 * MIN;
+    history.markList.BTCUSDT = [{ openTime: at, open: D('80000'), high: D('80000'), low: D('76000'), close: D('76000') }];
+    const t = await makeApp({ db: a.db, clock: new FakeClock(T0 + 10 * MIN), history });
+    apps.push(t.app);
+    await t.login();
+    await settle();
+    expect(t.runner.gate('perp:BTCUSDT')).toBe('live');
+    expect(t.runner.positions()).toEqual([]);
+    const liquidations = (msgs: any[]) => msgs.filter((m) => m.type === 'notice' && m.kind === 'liquidation');
+
+    const first = await t.connect();
+    await waitFor(() => first.msgs.find((m) => m.type === 'positions'));
+    await waitFor(() => liquidations(first.msgs)[0]);
+    const [alert] = liquidations(first.msgs);
+    expect(alert.level).toBe('error');
+    expect(alert.text).toMatch(/^LIQUIDATED: BTCUSDT long 0\.01 at mark 76345\.4/);
+    expect(alert.liquidation).toEqual({
+      eventId: expect.any(Number),
+      symbol: 'BTCUSDT',
+      side: 'long',
+      qty: '0.01',
+      markPrice: expect.any(String),
+      marginLost: '39.6',
+      liquidationFee: expect.any(String),
+    });
+    const second = await t.connect(); // not acknowledged yet: a second tab gets it too
+    await waitFor(() => liquidations(second.msgs)[0]);
+    expect(liquidations(first.msgs)).toHaveLength(1);
+    second.ws.terminate();
+
+    // Acknowledged: by an existing liquidation's id only.
+    const ack = (eventId: unknown) => t.call('POST', '/api/liquidations/ack', { eventId });
+    expect(await ack('1')).toMatchObject({ status: 400 });
+    expect(await ack(alert.liquidation.eventId + 1000)).toMatchObject({ status: 400, body: { error: 'Unknown liquidation' } });
+    expect((await t.call('POST', '/api/liquidations/ack', { eventId: alert.liquidation.eventId, extra: 1 })).status).toBe(400);
+    expect(await t.call('POST', '/api/liquidations/ack', { eventId: alert.liquidation.eventId }, false)).toMatchObject({ status: 401 });
+    expect(await ack(alert.liquidation.eventId)).toMatchObject({ status: 200 });
+    first.ws.terminate();
+
+    const third = await t.connect();
+    await waitFor(() => third.msgs.find((m) => m.type === 'positions'));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(liquidations(third.msgs)).toEqual([]);
+    third.ws.terminate();
+  });
+
+  it('a live liquidation notice carries its event id, the same one a later connect would replay', async () => {
+    const t = await perpApp();
+    await openLong(t);
+    const { ws, msgs } = await t.connect();
+    await waitFor(() => msgs.find((m) => m.type === 'positions'));
+    t.perpMarket.mark('BTCUSDT', '76000');
+    const live = await waitFor(() => msgs.find((m) => m.type === 'notice' && m.kind === 'liquidation'));
+    const other = await t.connect();
+    const replayed = await waitFor(() => other.msgs.find((m) => m.type === 'notice' && m.kind === 'liquidation'));
+    expect(replayed.liquidation).toEqual(live.liquidation);
+    expect(replayed.text).toBe(live.text);
+    expect(typeof live.liquidation.eventId).toBe('number');
+    ws.terminate();
+    other.ws.terminate();
   });
 
   it('while the perp data is stale, margin changes and leverage transfers are refused with a 409 and the reason', async () => {

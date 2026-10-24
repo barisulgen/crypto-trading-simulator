@@ -109,6 +109,8 @@ export interface WireMarginPreview {
 
 /** A liquidation's figures as data (exact decimal strings): the position, the mark, the margin lost and the fee in it. */
 export interface LiquidationDetail {
+  /** The liquidation event's id: acknowledging its alert sends it back. */
+  eventId?: number;
   symbol: string;
   side: 'long' | 'short';
   qty: string;
@@ -324,5 +326,7 @@ export const api = {
     request<{ order: WirePerpOrder }>('POST', '/api/perp/close', qty === undefined ? { symbol } : { symbol, qty }).then(
       (r) => r.order,
     ),
+  /** The owner has seen the alert of liquidation event `eventId`: the server stops sending it (and earlier ones) on connect. */
+  acknowledgeLiquidation: (eventId: number) => request<{ acknowledged: number }>('POST', '/api/liquidations/ack', { eventId }),
   login: (password: string) => request<{ ok: true }>('POST', '/api/login', { password }),
 };

@@ -30,6 +30,8 @@ const TRADES_KEPT = 100;
 const NOTICE_COLLAPSE_MS = 1000;
 /** Notices kept in the store (oldest dropped first). */
 const NOTICES_KEPT = 50;
+/** Acknowledged liquidation event ids kept, so a late replay of one is not alerted again. */
+const ACKED_KEPT = 50;
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 10_000;
 /** The backoff starts over only after a connection stayed open this long (no fast flapping). */
@@ -92,6 +94,8 @@ export interface LiveData {
    * could drop one before its alert has been seen.
    */
   liquidationQueue: Notice[];
+  /** The event ids of the liquidation alerts acknowledged here (the latest ACKED_KEPT). */
+  ackedLiquidations: number[];
   /**
    * The margin warning banner: each position near liquidation at its last live level (see
    * bannerEntries). Held here, not in the banner, so a level held over a stale mark survives a
@@ -129,7 +133,7 @@ export interface LiveState extends LiveData {
   setAccount(account: AccountSnapshot): void;
   pushNotice(level: Notice['level'], text: string): void;
   dismissNotice(id: number): void;
-  /** The owner has seen the liquidation alert of notice `id` (the notice itself stays). */
+  /** The owner has seen the liquidation alert of notice `id` (the notice itself stays); the server is told. */
   acknowledgeLiquidation(id: number): void;
   priceClicked(price: string): void;
 }
@@ -152,6 +156,7 @@ export function initialLiveData(): LiveData {
     notices: [],
     noticeSeq: 0,
     liquidationQueue: [],
+    ackedLiquidations: [],
     banner: [],
     fillSeq: 0,
     selected: { symbol: 'BTCUSDT', market: 'spot' },
@@ -335,6 +340,15 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
       return moved ? { ...next, fillSeq: s.fillSeq + 1 } : next;
     }
     case 'notice': {
+      // The server sends every liquidation not acknowledged yet on connect, so a reconnect can
+      // repeat one already shown or alerted here: each event is alerted once.
+      const eventId = msg.kind === 'liquidation' ? msg.liquidation?.eventId : undefined;
+      if (
+        eventId !== undefined &&
+        (s.ackedLiquidations.includes(eventId) || s.liquidationQueue.some((x) => x.liquidation?.eventId === eventId))
+      ) {
+        return {};
+      }
       const n = { kind: msg.kind, level: msg.level, text: msg.text, ...(msg.liquidation ? { liquidation: msg.liquidation } : {}) };
       const added = addNotice(s, n, now);
       // A liquidation is never folded, so the notice just added is the last one.
@@ -356,6 +370,15 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
     default:
       return {};
   }
+}
+
+/** The liquidation alert of notice `id` has been seen: off the queue, and its event remembered as acknowledged. */
+export function acknowledged(s: Pick<LiveData, 'liquidationQueue' | 'ackedLiquidations'>, id: number): Partial<LiveData> {
+  const eventId = s.liquidationQueue.find((n) => n.id === id)?.liquidation?.eventId;
+  return {
+    liquidationQueue: s.liquidationQueue.filter((n) => n.id !== id),
+    ...(eventId !== undefined ? { ackedLiquidations: [...s.ackedLiquidations, eventId].slice(-ACKED_KEPT) } : {}),
+  };
 }
 
 export const useLive = create<LiveState>()((set) => ({
@@ -384,7 +407,10 @@ export const useLive = create<LiveState>()((set) => ({
     set((s) => ({ notices: s.notices.filter((n) => n.id !== id) }));
   },
   acknowledgeLiquidation(id) {
-    set((s) => ({ liquidationQueue: s.liquidationQueue.filter((n) => n.id !== id) }));
+    const eventId = useLive.getState().liquidationQueue.find((n) => n.id === id)?.liquidation?.eventId;
+    set((s) => acknowledged(s, id));
+    // The server then stops sending it on connect; if this fails it is alerted again on the next one.
+    if (eventId !== undefined) void api.acknowledgeLiquidation(eventId).catch(() => {});
   },
   priceClicked(price) {
     set((s) => ({ priceClick: { price, seq: (s.priceClick?.seq ?? 0) + 1 } }));

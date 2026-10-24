@@ -400,14 +400,15 @@ function refuseUnloadedPerpState(db: Db, seasonId: number): void {
  * Throws, writing nothing, when the season's perp state was never loaded on this database handle
  * while the database holds positions or funding state (see refuseUnloadedPerpState).
  * Applied funding times more than 30 days before `now` (else the latest event's time) are dropped
- * first. Afterwards finished orders leave memory (evictTerminal). Returns whether the cursors were written.
+ * first. Afterwards finished orders leave memory (evictTerminal). Each event's row id is set in
+ * `eventIds` when given. Returns whether the cursors were written.
  */
 export function persist(
   db: Db,
   seasonId: number,
   sim: SimEngine,
   events: SimEvent[],
-  extra: { feedGaps?: FeedGap[]; cursor?: boolean; now?: number; jobs?: JobWrite[] } = {},
+  extra: { feedGaps?: FeedGap[]; cursor?: boolean; now?: number; jobs?: JobWrite[]; eventIds?: Map<SimEvent, number> } = {},
 ): boolean {
   const state = sim.spot.state;
   const perp = sim.perp.state;
@@ -500,7 +501,8 @@ export function persist(
     const perpTouched = new Map<string, { order: PerpOrder; time: number }>();
     for (const e of events) {
       const { symbol, market } = eventSymbolMarket(e);
-      insEvent.run(seasonId, e.time, e.type, symbol, market, toJson(e));
+      const row = insEvent.run(seasonId, e.time, e.type, symbol, market, toJson(e));
+      extra.eventIds?.set(e, Number(row.lastInsertRowid));
       if (e.type === 'fill') writeFill(e.fill);
       if (e.type === 'round_trip_closed') {
         const t: RoundTrip = e.roundTrip;
@@ -940,6 +942,38 @@ export function queryFills(db: Db, seasonId: number, q: { market: Market; symbol
 /** Whether the database holds data recorded before catch-up existed (meta.test_data, set only by Phase 1). */
 export function isTestData(db: Db): boolean {
   return db.prepare("SELECT 1 FROM meta WHERE key = 'test_data'").get() !== undefined;
+}
+
+// ---- liquidation alerts ----
+
+const ACKED_KEY = 'liquidations_acked_through';
+
+function ackedThrough(db: Db): number {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(ACKED_KEY) as { value: string } | undefined;
+  return row ? Number(row.value) : 0;
+}
+
+/** The season's liquidation events after the last one acknowledged, oldest first, with their row ids. */
+export function unacknowledgedLiquidations(db: Db, seasonId: number): { id: number; payload: unknown }[] {
+  const rows = db
+    .prepare("SELECT id, payload FROM events WHERE season_id = ? AND type = 'liquidation' AND id > ? ORDER BY id")
+    .all(seasonId, ackedThrough(db)) as { id: number; payload: string }[];
+  return rows.map((r) => ({ id: r.id, payload: JSON.parse(r.payload) as unknown }));
+}
+
+/**
+ * The owner has seen the alert of liquidation event `id` (alerts come oldest first): it and every
+ * earlier one are acknowledged. False, changing nothing, when `id` is not one of the season's
+ * liquidation events.
+ */
+export function acknowledgeLiquidations(db: Db, seasonId: number, id: number): boolean {
+  const known = db.prepare("SELECT 1 FROM events WHERE id = ? AND season_id = ? AND type = 'liquidation'").get(id, seasonId);
+  if (known === undefined) return false;
+  db.prepare(
+    `INSERT INTO meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = CAST(max(CAST(meta.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)`,
+  ).run(ACKED_KEY, String(id));
+  return true;
 }
 
 // ---- equity, heartbeat ----

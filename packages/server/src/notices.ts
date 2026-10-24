@@ -1,4 +1,4 @@
-import { Decimal } from '@sim/engine';
+import { D, Decimal } from '@sim/engine';
 import type { Fill, MarginWarning, PerpEvent, PerpFill, PerpRules, PositionSide, SimEvent, SpotRules } from '@sim/engine';
 
 export interface Notice {
@@ -21,8 +21,13 @@ export interface Notice {
   liquidation?: LiquidationDetail;
 }
 
-/** What a liquidation took: the position (symbol, side, quantity), the mark it happened at, the margin lost and the fee in it. */
+/**
+ * What a liquidation took: the position (symbol, side, quantity), the mark it happened at, the
+ * margin lost and the fee in it; with the id of its event, which acknowledges its alert.
+ */
 export interface LiquidationDetail {
+  /** The liquidation event's id; absent only when it is not known. */
+  eventId?: number;
   symbol: string;
   side: PositionSide;
   qty: string;
@@ -37,6 +42,8 @@ export interface NoticeLookup {
   perpRules(symbol: string): PerpRules | null;
   /** The liquidation price of the symbol's open position as it is now; null when none, or it can never be liquidated. */
   liquidationPrice(symbol: string): Decimal | null;
+  /** The id the event was saved with, when known. */
+  eventId?(e: SimEvent): number | undefined;
 }
 
 const isPerp = (e: SimEvent): e is PerpEvent => 'market' in e && e.market === 'perp';
@@ -45,7 +52,8 @@ const isPerp = (e: SimEvent): e is PerpEvent => 'market' in e && e.market === 'p
  * One notice per fill (spot or perp), partial fill, rejection (one per pair), late cancel,
  * trigger, thin-book cancel, funding payment or receipt, and liquidation. What a catch-up run
  * applied after a gap gets one notice, from its summary, listing every action (each estimated);
- * its own events give none, so nothing it estimated reads like a live fill.
+ * its own events give none, so nothing it estimated reads like a live fill, except a liquidation:
+ * the position is gone whatever applied it, so it raises the owner's alert as a live one does.
  */
 export function noticesFor(events: SimEvent[], lookup: NoticeLookup): Notice[] {
   const out: Notice[] = [];
@@ -55,7 +63,10 @@ export function noticesFor(events: SimEvent[], lookup: NoticeLookup): Notice[] {
       out.push(catchUpNotice(e));
       continue;
     }
-    if ('catchUp' in e && e.catchUp !== undefined) continue;
+    if ('catchUp' in e && e.catchUp !== undefined) {
+      if (e.type === 'liquidation') out.push(liquidationNotice(e, tickOf(lookup.perpRules(e.symbol)), lookup.eventId?.(e)));
+      continue;
+    }
     const perp = isPerp(e);
     switch (e.type) {
       case 'fill': {
@@ -98,31 +109,74 @@ export function noticesFor(events: SimEvent[], lookup: NoticeLookup): Notice[] {
       case 'funding':
         out.push({ kind: 'funding', level: 'info', text: fundingText(e) });
         break;
-      case 'liquidation': {
-        const tick = tickOf(lookup.perpRules(e.symbol));
-        const p = e.position;
-        out.push({
-          kind: 'liquidation',
-          level: 'error',
-          text:
-            `LIQUIDATED: ${e.symbol} ${p.side} ${p.qty} at mark ${atTick(e.markPrice, tick)}` +
-            ` — margin lost $${usdUp(e.marginLost)} (fee $${usdUp(e.liquidationFee)})`,
-          liquidation: {
-            symbol: e.symbol,
-            side: p.side,
-            qty: p.qty.toString(),
-            markPrice: e.markPrice.toString(),
-            marginLost: e.marginLost.toString(),
-            liquidationFee: e.liquidationFee.toString(),
-          },
-        });
+      case 'liquidation':
+        out.push(liquidationNotice(e, tickOf(lookup.perpRules(e.symbol)), lookup.eventId?.(e)));
         break;
-      }
       default:
         break;
     }
   }
   return out;
+}
+
+/** What a liquidation notice reads of its event (as engine values, or revived from its saved row). */
+interface LiquidationFigures {
+  symbol: string;
+  position: { side: PositionSide; qty: Decimal };
+  markPrice: Decimal;
+  marginLost: Decimal;
+  liquidationFee: Decimal;
+  catchUp?: unknown;
+}
+
+/**
+ * `LIQUIDATED: BTCUSDT long 0.1 at mark 76340.0 — margin lost $396.00 (fee $30.00)`, with the same
+ * figures as data (exact decimal strings) and the event's id. One a catch-up applied says so.
+ */
+function liquidationNotice(e: LiquidationFigures, tick: number | null, eventId: number | undefined): Notice {
+  const p = e.position;
+  const caught = e.catchUp !== undefined && e.catchUp !== null ? ' · applied by the catch-up after a data gap' : '';
+  return {
+    kind: 'liquidation',
+    level: 'error',
+    text:
+      `LIQUIDATED: ${e.symbol} ${p.side} ${p.qty} at mark ${atTick(e.markPrice, tick)}` +
+      ` — margin lost $${usdUp(e.marginLost)} (fee $${usdUp(e.liquidationFee)})${caught}`,
+    liquidation: {
+      ...(eventId !== undefined ? { eventId } : {}),
+      symbol: e.symbol,
+      side: p.side,
+      qty: p.qty.toString(),
+      markPrice: e.markPrice.toString(),
+      marginLost: e.marginLost.toString(),
+      liquidationFee: e.liquidationFee.toString(),
+    },
+  };
+}
+
+/**
+ * The notice of a saved liquidation event (its row id and JSON payload), as it was sent live: for
+ * an alert the owner has not acknowledged yet. `rules` are the symbol's perp rules (null before
+ * they load: the mark is then shown unrounded).
+ */
+export function savedLiquidationNotice(id: number, payload: unknown, rules: PerpRules | null): Notice {
+  const p = payload as {
+    symbol: string;
+    position: { side: PositionSide; qty: string };
+    markPrice: string;
+    marginLost: string;
+    liquidationFee: string;
+    catchUp?: unknown;
+  };
+  const figures: LiquidationFigures = {
+    symbol: p.symbol,
+    position: { side: p.position.side, qty: D(p.position.qty) },
+    markPrice: D(p.markPrice),
+    marginLost: D(p.marginLost),
+    liquidationFee: D(p.liquidationFee),
+    ...(p.catchUp !== undefined ? { catchUp: p.catchUp } : {}),
+  };
+  return liquidationNotice(figures, tickOf(rules), id);
 }
 
 /**

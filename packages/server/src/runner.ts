@@ -58,6 +58,7 @@ import type { CatchUpHost, Gate } from './catchup/catchUpService.ts';
 import type { CatchUpHistory } from './catchup/history.ts';
 import type { Db } from './db/db.ts';
 import {
+  acknowledgeLiquidations,
   checkInvariants,
   extendJob,
   insertEquitySnapshot,
@@ -69,6 +70,7 @@ import {
   storedOrderExists,
   toJson,
   touchAlive,
+  unacknowledgedLiquidations,
 } from './db/store.ts';
 import type { FeedGap, JobWrite } from './db/store.ts';
 import { FeedGaps, OFFLINE_REASON } from './feedGaps.ts';
@@ -77,7 +79,7 @@ import type { Logger } from './log.ts';
 import { marketKey, splitKey } from './market/marketKey.ts';
 import type { MarketKey } from './market/marketKey.ts';
 import type { SetTimer } from './market/ws.ts';
-import { marginWarningNotice, noticesFor } from './notices.ts';
+import { marginWarningNotice, noticesFor, savedLiquidationNotice } from './notices.ts';
 import type { Notice, NoticeLookup } from './notices.ts';
 
 export { CATCHING_UP_REFUSAL, OFFLINE_REASON, RESTART_REASON, noticesFor };
@@ -648,6 +650,25 @@ export class EngineRunner implements FundingSim {
       });
   }
 
+  /**
+   * The liquidations whose alert the owner has not acknowledged, oldest first, as the liquidation
+   * notices sent live (each with its event id): sent to every browser that connects, so one applied
+   * while none was connected is still alerted.
+   */
+  unacknowledgedLiquidations(): Notice[] {
+    return unacknowledgedLiquidations(this.d.db, this.d.seasonId).map((r) =>
+      savedLiquidationNotice(r.id, r.payload, this.perpRulesOf((r.payload as { symbol: string }).symbol)),
+    );
+  }
+
+  /**
+   * The owner acknowledged the alert of liquidation event `eventId`, and so every earlier one.
+   * False when it is not one of the season's liquidations.
+   */
+  acknowledgeLiquidations(eventId: number): boolean {
+    return acknowledgeLiquidations(this.d.db, this.d.seasonId, eventId);
+  }
+
   /** The symbol's perp leverage setting (the default, capped at the maximum, until one is set) and margin mode. */
   perpSetting(symbol: string): { leverage: number; marginMode: 'isolated' } {
     return { leverage: leverageFor(this.d.sim.perp.state, symbol, this.bracketsOf(symbol)), marginMode: 'isolated' };
@@ -765,9 +786,10 @@ export class EngineRunner implements FundingSim {
 
   private commit(events: SimEvent[], gaps: FeedGap[] = [], extra: () => Notice[] = () => [], jobs: JobWrite[] = []): void {
     const now = this.d.now();
+    const eventIds = new Map<SimEvent, number>();
     try {
       const cursor = now - this.cursorSavedAt >= CURSOR_FLUSH_MS;
-      const extras = { feedGaps: gaps, cursor, now, jobs };
+      const extras = { feedGaps: gaps, cursor, now, jobs, eventIds };
       if (persist(this.d.db, this.d.seasonId, this.d.sim, events, extras)) this.cursorSavedAt = now;
     } catch (e) {
       this.die('persist failed', e);
@@ -781,7 +803,8 @@ export class EngineRunner implements FundingSim {
       }
     }
     this.publishState(events.length > 0);
-    for (const n of [...noticesFor(events, this.noticeLookup()), ...extra()]) this.notice(n);
+    const lookup = { ...this.noticeLookup(), eventId: (e: SimEvent) => eventIds.get(e) };
+    for (const n of [...noticesFor(events, lookup), ...extra()]) this.notice(n);
   }
 
   /**
