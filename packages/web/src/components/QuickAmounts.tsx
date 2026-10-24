@@ -9,16 +9,19 @@ export function QuickAmounts({
   active,
   disabled,
   of,
+  whole = `free ${of}`,
   onPick,
 }: {
   active: Pct | null;
   disabled: boolean;
   /** The asset the percentages are of (USDT on a buy, the coin on a sell). */
   of: string;
+  /** What the percentages are of, in words (default 'free ' and the asset). */
+  whole?: string;
   onPick(pct: Pct): void;
 }) {
   return (
-    <div role="group" aria-label={`Share of free ${of}`} className="grid grid-cols-4 gap-1">
+    <div role="group" aria-label={`Share of ${whole}`} className="grid grid-cols-4 gap-1">
       {PCTS.map((pct) => {
         const on = active === pct;
         return (
@@ -27,7 +30,7 @@ export function QuickAmounts({
             type="button"
             aria-pressed={on}
             disabled={disabled}
-            title={`${pct}% of free ${of}`}
+            title={`${pct}% of ${whole}`}
             onClick={() => onPick(pct)}
             className={`h-9 min-w-0 rounded-ctl border border-line text-xs tabular-nums disabled:cursor-not-allowed disabled:opacity-50 desk:h-7 ${
               on

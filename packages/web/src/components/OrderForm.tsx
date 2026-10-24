@@ -1,4 +1,5 @@
-// Buy/sell form for the selected coin with a live estimate from the server's preview.
+// The order slot: buy/sell form for the selected coin with a live estimate from the server's
+// preview, or the perpetual's form.
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import type { OrderType, Side } from '@sim/engine';
@@ -21,6 +22,7 @@ import { NO_PREVIEW, PreviewLoop } from '../lib/previewLoop.ts';
 import type { PreviewState } from '../lib/previewLoop.ts';
 import { NO_QUICK, amountStep, quickAmount, quickHint, quickStep, spotFree } from '../lib/quickAmount.ts';
 import type { Pct, QuickEvent, QuickState } from '../lib/quickAmount.ts';
+import { PerpOrderForm } from './PerpOrderForm.tsx';
 import { Available, QuickAmounts } from './QuickAmounts.tsx';
 import { Segmented, TextField } from './ui.tsx';
 
@@ -160,12 +162,18 @@ function Estimate({
   );
 }
 
-/**
- * The order form (Trade slot): side, type, price or trigger, amount in coins or dollars, an
- * optional stop-loss / take-profit pair on buys, the live estimate and the submit button. Every
- * field is sent exactly as typed. Results arrive as the server's notices.
- */
+/** The order slot: the perpetual's form for a perp market, else the spot form. */
 export function OrderForm() {
+  const market = useLive((s) => s.selected.market);
+  return market === 'perp' ? <PerpOrderForm /> : <SpotOrderForm />;
+}
+
+/**
+ * The spot order form: side, type, price or trigger, amount in coins or dollars, an optional
+ * stop-loss / take-profit pair on buys, the live estimate and the submit button. Every field is
+ * sent exactly as typed. Results arrive as the server's notices.
+ */
+function SpotOrderForm() {
   const symbol = useLive((s) => s.selected.symbol);
   const rules = useLive((s) => s.meta?.rules[symbol]);
   const health = useLive((s) => s.health[symbol]);

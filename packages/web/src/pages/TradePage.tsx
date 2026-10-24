@@ -39,20 +39,6 @@ function SelectedTitle() {
   );
 }
 
-/** Until perpetual orders can be placed here, the order slot says so instead of offering a spot form. */
-function PerpOrdersUnavailable() {
-  const symbol = useLive((s) => s.selected.symbol);
-  const select = useLive((s) => s.select);
-  return (
-    <div className="m-auto flex max-w-[16rem] flex-col items-center gap-3 p-6 text-center text-xs text-muted">
-      <p>Perpetual orders cannot be placed from this screen yet.</p>
-      <button type="button" onClick={() => select(symbol, 'spot')} className="text-fg underline underline-offset-2">
-        Trade {symbol.replace(/USDT$/, '')} on Spot
-      </button>
-    </div>
-  );
-}
-
 const FALLBACK_SYMBOLS = ['BTC', 'ETH', 'SOL', 'NEAR', 'XRP', 'BNB', 'DOGE', 'SUI', 'HYPE', 'AVAX'].map(
   (c) => `${c}USDT`,
 );
@@ -120,7 +106,7 @@ export function TradePage() {
         </Panel>
 
         <Panel slot="form" active={on('form')} title="Place order">
-          {market === 'perp' ? <PerpOrdersUnavailable /> : <OrderForm />}
+          <OrderForm />
         </Panel>
 
         <Panel slot="tabs" active={on('tabs')}>

@@ -10,6 +10,8 @@ import type {
   Market,
   OrderPreview,
   PerpOrder,
+  PerpOrderRequest,
+  PerpPreview,
   PerpRules,
   Position,
   PriceLevel,
@@ -45,6 +47,7 @@ export type WireFillRow = WireFill & {
 export type WireAggTrade = Wire<AggTrade>;
 export type WireLevel = Wire<PriceLevel>;
 export type WirePreview = Wire<OrderPreview>;
+export type WirePerpPreview = Wire<PerpPreview>;
 
 export const INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 export type Interval = (typeof INTERVALS)[number];
@@ -273,5 +276,15 @@ export const api = {
     request<{ order: WireOrder }>('DELETE', `/api/orders/${encodeURIComponent(id)}`).then((r) => r.order),
   attachOco: (p: { symbol: string; qty: string; stopLoss: string; takeProfit: string }) =>
     request<{ orders: WireOrder[] }>('POST', '/api/oco', p).then((r) => r.orders),
+  /** As for spot, every amount and price is sent exactly as typed. */
+  perpPreview: (req: PerpOrderRequest) => request<WirePerpPreview>('POST', '/api/perp/orders/preview', req),
+  placePerpOrder: (req: PerpOrderRequest) =>
+    request<{ order: WirePerpOrder }>('POST', '/api/perp/orders', req).then((r) => r.order),
+  /** The symbol's settings after the change; a refusal (locked, out of range) is an ApiError with the reason. */
+  setLeverage: (symbol: string, leverage: number) =>
+    request<{ symbol: string; leverage: number; marginMode: 'isolated' }>('POST', '/api/perp/leverage', {
+      symbol,
+      leverage,
+    }),
   login: (password: string) => request<{ ok: true }>('POST', '/api/login', { password }),
 };

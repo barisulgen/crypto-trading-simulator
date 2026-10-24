@@ -8,15 +8,16 @@ export const EDIT_DEBOUNCE_MS = 250;
 /** While the form is complete, book updates refresh the preview at most this often. */
 export const BOOK_REFRESH_MS = 500;
 
-export interface PreviewState {
+/** `P` is the market's preview: spot by default, or the perp one. */
+export interface PreviewState<P = WirePreview> {
   /** The request (JSON) this answer is for; null when there is nothing to preview. */
   key: string | null;
-  preview: WirePreview | null;
+  preview: P | null;
   /** An input or server error (HTTP 4xx/5xx) instead of a preview. */
   error: string | null;
 }
 
-export const NO_PREVIEW: PreviewState = { key: null, preview: null, error: null };
+export const NO_PREVIEW: PreviewState<never> = { key: null, preview: null, error: null };
 
 /**
  * `setKey` on every form change (a request as JSON, or null), `bookChanged` on every order-book
@@ -24,7 +25,7 @@ export const NO_PREVIEW: PreviewState = { key: null, preview: null, error: null 
  * update asks again at most every 500 ms, and never while a request for the same form is still
  * on its way, so a slow server still gets its answers shown.
  */
-export class PreviewLoop {
+export class PreviewLoop<P = WirePreview> {
   private key: string | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private lastAsk = 0;
@@ -33,8 +34,8 @@ export class PreviewLoop {
   private readonly latest = createLatest();
 
   constructor(
-    private readonly fetch: (key: string) => Promise<WirePreview>,
-    private readonly onState: (s: PreviewState) => void,
+    private readonly fetch: (key: string) => Promise<P>,
+    private readonly onState: (s: PreviewState<P>) => void,
   ) {}
 
   setKey(key: string | null): void {

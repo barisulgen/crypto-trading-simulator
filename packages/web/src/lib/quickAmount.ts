@@ -1,7 +1,7 @@
-// The order form's quick-amount buttons (25/50/75/100 % of the free balance) and its
-// "Available" line. Pure decimal-string arithmetic: amounts are floored, never rounded up, so
-// the form never offers more than the free balance covers.
-import type { OrderType, Side } from '@sim/engine';
+// The order forms' quick-amount buttons (25/50/75/100 % of the free balance, or of a perp
+// position) and the spot form's "Available" line. Pure decimal-string arithmetic: amounts are
+// floored, never rounded up, so a form never offers more than the free balance covers.
+import type { OrderType, PerpOrderRequest, Side } from '@sim/engine';
 import type { AccountSnapshot, WireLevel } from './api.ts';
 import { fmtBalance, fmtFloor, fmtNum, fmtUsdFloor, tickDecimals } from './format.ts';
 import { addDec, cmpDec, floorDivToStep, floorToStep, mulDec, subDec } from './market.ts';
@@ -162,6 +162,92 @@ export function quickAmount(i: QuickInput): QuickResult | null {
   if (value === null) return null;
   const c = cents(value);
   return { amount: c.amount, belowStep: false, belowCent: c.zero, ...(i.pct === 100 ? { sellAll: qty } : {}) };
+}
+
+// ---- perpetuals ----
+
+export interface PerpQuickInput {
+  /** The unit the amount field is in: coins or dollars (USDT notional). */
+  unit: 'coin' | 'usd';
+  pct: Pct;
+  /** Free leverage-wallet USDT. */
+  free: string;
+  /** The symbol's leverage setting. */
+  leverage: number;
+  /** Taker fee rate ('0.0005'). */
+  taker: string;
+  /**
+   * The price coins are counted at: for an opening order see perpSizingPrice; for a reduce-only
+   * one the price the server converts dollars at (the limit price, else the mark). Null when none.
+   */
+  price: string | null;
+  /** The quantity step for this order type (see amountStep). */
+  step: string;
+  /** Reduce-only: the position the percentages are shares of; null for an opening order. */
+  reduce: { qty: string } | null;
+}
+
+const DP8 = '0.00000001';
+
+/**
+ * The notional a share of the free leverage USDT opens when all of it goes to the order's cost:
+ * initial margin plus the taker fee, share × free × leverage ÷ (1 + leverage × taker), rounded
+ * down to 8 decimals.
+ */
+export function marginShareNotional(free: string, pct: Pct, leverage: number, taker: string): string {
+  const lev = String(leverage);
+  const budget = mulDec(mulDec(free, FRACTION[pct]), lev);
+  return floorDivToStep(budget, addDec('1', mulDec(lev, taker)), DP8);
+}
+
+/**
+ * The price an opening perp order's coins are sized at: the limit price as typed (limit, post-only)
+ * or else the best price on the order's side, raised to the mark when that is higher, so the
+ * coins never come to more than the margin covers at either. Null when there is no price at all.
+ * `mark` is the live mark only (null while it is stale).
+ */
+export function perpSizingPrice(p: {
+  type: PerpOrderRequest['type'];
+  side: Side;
+  price: string;
+  bestBid: string | undefined;
+  bestAsk: string | undefined;
+  mark: string | null;
+}): string | null {
+  const best = p.side === 'buy' ? p.bestAsk : p.bestBid;
+  const own = (p.type === 'market' ? null : validPrice(p.price)) ?? best ?? null;
+  const known = [own, p.mark].filter((v): v is string => v !== null && cmpDec(v, '0') > 0);
+  if (known.length === 0) return null;
+  return known.reduce((a, b) => (cmpDec(a, b) >= 0 ? a : b));
+}
+
+/**
+ * The amount a perp quick-amount button fills in, or null when there is no price to size it with.
+ * Minimums and the maximum position are not checked: the server's preview gives the reason.
+ *
+ * - Opening order: the notional marginShareNotional gives; in dollars floored to the cent, in
+ *   coins divided by the price and floored to the step.
+ * - Reduce-only: the share of the position's size floored to the step; in dollars that quantity
+ *   at the price, floored to the cent. At 100 % the order sends the coins themselves (sellAll),
+ *   so it reduces the whole position whatever the price does before it arrives.
+ */
+export function perpQuickAmount(i: PerpQuickInput): QuickResult | null {
+  if (i.reduce) {
+    const qty = floorToStep(mulDec(i.reduce.qty, FRACTION[i.pct]), i.step);
+    if (i.unit === 'coin') return { amount: qty, belowStep: isZero(qty), belowCent: false };
+    if (isZero(qty)) return { amount: '0', belowStep: true, belowCent: false };
+    if (i.price === null) return null;
+    const c = cents(mulDec(qty, i.price));
+    return { amount: c.amount, belowStep: false, belowCent: c.zero, ...(i.pct === 100 ? { sellAll: qty } : {}) };
+  }
+  const notional = marginShareNotional(i.free, i.pct, i.leverage, i.taker);
+  if (i.unit === 'usd') {
+    const c = cents(notional);
+    return { amount: c.amount, belowStep: false, belowCent: c.zero };
+  }
+  if (i.price === null) return null;
+  const qty = floorDivToStep(notional, i.price, i.step);
+  return { amount: qty, belowStep: isZero(qty), belowCent: false };
 }
 
 export interface AvailableInput {
