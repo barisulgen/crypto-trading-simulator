@@ -1,3 +1,4 @@
+import type { CatchUpTag } from './catchup/types.ts';
 import type { Decimal } from './decimal.ts';
 
 export type Side = 'buy' | 'sell';
@@ -197,12 +198,24 @@ export type CancelReason =
   /** The trade history needed to replay a gap is no longer available. */
   | 'catch_up_unavailable';
 
-/** Order, fill and round-trip events carry `market` only optionally: absent means spot. */
+/**
+ * Order, fill and round-trip events carry `market` only optionally: absent means spot. Those a
+ * catch-up run produced carry `catchUp`: the gap and what the event was estimated from; their time
+ * is the moment they represent.
+ */
 export type EngineEvent =
   | { type: 'deposit'; time: number; wallet: Wallet; amount: Decimal; totalDeposited: Decimal }
   | { type: 'transfer'; time: number; from: Wallet; to: Wallet; amount: Decimal }
-  | { type: 'order_placed'; market?: 'spot'; time: number; order: SpotOrder }
-  | { type: 'order_rejected'; market?: 'spot'; time: number; order: SpotOrder; reason: string; afterTrigger?: boolean }
+  | { type: 'order_placed'; market?: 'spot'; time: number; order: SpotOrder; catchUp?: CatchUpTag }
+  | {
+      type: 'order_rejected';
+      market?: 'spot';
+      time: number;
+      order: SpotOrder;
+      reason: string;
+      afterTrigger?: boolean;
+      catchUp?: CatchUpTag;
+    }
   | {
       type: 'order_cancelled';
       market?: 'spot';
@@ -210,16 +223,33 @@ export type EngineEvent =
       order: SpotOrder;
       reason: CancelReason;
       cancelledQty: Decimal;
+      catchUp?: CatchUpTag;
     }
   /** The owner's cancel arrived after the order had filled, triggered, been rejected or been cancelled. */
-  | { type: 'cancel_rejected'; market?: 'spot'; time: number; order: SpotOrder; reason: string }
-  | { type: 'order_triggered'; market?: 'spot'; time: number; order: SpotOrder; lastPrice: Decimal }
+  | { type: 'cancel_rejected'; market?: 'spot'; time: number; order: SpotOrder; reason: string; catchUp?: CatchUpTag }
+  | {
+      type: 'order_triggered';
+      market?: 'spot';
+      time: number;
+      order: SpotOrder;
+      lastPrice: Decimal;
+      catchUp?: CatchUpTag;
+    }
   /**
    * `consumed`: for a taker fill, the quantity it took at each book level (walk order), so the
-   * market can hold those levels back from later walks; absent for a maker fill.
+   * market can hold those levels back from later walks; absent for a maker fill and for a
+   * catch-up fill (no book was walked).
    */
-  | { type: 'fill'; market?: 'spot'; time: number; fill: Fill; order: SpotOrder; consumed?: PriceLevel[] }
-  | { type: 'round_trip_closed'; market?: 'spot'; time: number; roundTrip: RoundTrip };
+  | {
+      type: 'fill';
+      market?: 'spot';
+      time: number;
+      fill: Fill;
+      order: SpotOrder;
+      consumed?: PriceLevel[];
+      catchUp?: CatchUpTag;
+    }
+  | { type: 'round_trip_closed'; market?: 'spot'; time: number; roundTrip: RoundTrip; catchUp?: CatchUpTag };
 
 export type ActionResult = { ok: true; events: EngineEvent[] } | { ok: false; reason: string };
 

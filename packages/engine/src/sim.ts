@@ -1,5 +1,8 @@
 import type { Decimal } from './decimal.ts';
 import { deposit, transfer } from './account/ledger.ts';
+import { spotCatchUpNeeds } from './catchup/plan.ts';
+import { applySpotCatchUp } from './catchup/spot.ts';
+import type { Candle1m, CatchUpEvent, CatchUpInput, CatchUpNeeds } from './catchup/types.ts';
 import type { Ledger } from './account/ledger.ts';
 import type { PerpEngine } from './perp/engine.ts';
 import type {
@@ -25,8 +28,8 @@ import type {
   Wallet,
 } from './types.ts';
 
-/** Every event the account's engines emit: what is persisted and broadcast. */
-export type SimEvent = EngineEvent | PerpEvent;
+/** Every event the account's engines emit, and catch-up summaries: what is persisted and broadcast. */
+export type SimEvent = EngineEvent | PerpEvent | CatchUpEvent;
 
 /** Everything impure the account needs: time, randomness, ids, and each market's data and fees. */
 export interface SimCtx {
@@ -170,4 +173,35 @@ export class SimEngine {
   applyFunding(symbol: string, fundingTime: number, rate: Decimal, markPrice: Decimal, ctx: SimCtx): PerpEvent[] {
     return this.perp.applyFunding(symbol, fundingTime, rate, markPrice, ctxFor(ctx, 'perp'));
   }
+}
+
+// ---- catch-up after a gap in live data ----
+
+/**
+ * What a catch-up run over the gap [from, to) of `market`/`symbol` needs beyond its last-price
+ * candles: the minutes whose trades must be fetched (a candle went strictly through a resting limit
+ * or post-only order that had reached the exchange by that minute's end), and whether mark candles
+ * and funding history are needed. Reads only.
+ */
+export function catchUpNeeds(
+  sim: SimEngine,
+  market: Market,
+  symbol: string,
+  from: number,
+  to: number,
+  candles: Candle1m[],
+): CatchUpNeeds {
+  if (market === 'perp') throw new Error('Catch-up for the perp market is not available yet');
+  return spotCatchUpNeeds(sim.spot.state, symbol, from, to, candles);
+}
+
+/**
+ * Apply what would have happened during a gap in live data, minute by minute, from candles and
+ * replayed trades (no historical book exists, so nothing reads the live one). Every event is dated
+ * at the moment it represents and carries `catchUp`; a `catch_up` summary follows when an order or
+ * a position existed during the gap. No events at all when nothing did.
+ */
+export function applyCatchUp(sim: SimEngine, input: CatchUpInput, ctx: SimCtx): SimEvent[] {
+  if (input.market === 'perp') throw new Error('Catch-up for the perp market is not available yet');
+  return applySpotCatchUp(sim.spot, input, ctxFor(ctx, 'spot'));
 }

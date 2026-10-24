@@ -263,7 +263,7 @@ export function loadPerpState(db: Db, seasonId: number, ledger: Ledger): PerpSta
 // ---- persist ----
 
 function isPerpEvent(e: SimEvent): e is PerpEvent {
-  return 'market' in e && e.market === 'perp';
+  return e.type !== 'catch_up' && 'market' in e && e.market === 'perp';
 }
 
 function perpEventSymbol(e: PerpEvent): string {
@@ -284,6 +284,7 @@ function perpEventSymbol(e: PerpEvent): string {
 }
 
 function eventSymbolMarket(e: SimEvent): { symbol: string | null; market: string | null } {
+  if (e.type === 'catch_up') return { symbol: e.symbol, market: e.market };
   if (isPerpEvent(e)) return { symbol: perpEventSymbol(e), market: 'perp' };
   switch (e.type) {
     case 'deposit':

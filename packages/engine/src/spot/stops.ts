@@ -182,7 +182,7 @@ export function triggerStops(s: SpotState, symbol: string, trade: AggTrade, ctx:
  * recorded so the fill's drift measures trigger → execution. A pair partner is cancelled now
  * (a triggered order is certain to execute) and the pair's lock moves to the triggered leg.
  */
-function trigger(s: SpotState, order: SpotOrder, last: Decimal, ctx: EngineCtx): EngineEvent[] {
+export function trigger(s: SpotState, order: SpotOrder, last: Decimal, ctx: EngineCtx): EngineEvent[] {
   const partners = untriggeredPartners(s, order);
   const lockAmount = partners.reduce((sum, p) => sum.plus(p.lockAmount), order.lockAmount);
   const triggered: SpotOrder = {
@@ -269,13 +269,28 @@ function expire(
   rules: SpotRules,
   ctx: EngineCtx,
 ): EngineEvent[] {
-  const kind = order.type === 'stop_loss' ? 'stop' : 'take-profit';
   // The book average is shown at the symbol's price precision (tick), rounded half-up.
   const avg = walk.avgPrice;
   const shownAvg = avg && !rules.tickSize.isZero() ? avg.toNearest(rules.tickSize, Decimal.ROUND_HALF_UP) : avg;
+  return expireTriggered(s, order, walk.quote, available, `book average ${shownAvg}`, ctx);
+}
+
+/**
+ * A triggered buy expires in full: what it would cost (`need`) exceeds its lock plus free USDT
+ * (`available`). `priced` names the price it was costed at, e.g. "book average 101.5".
+ */
+export function expireTriggered(
+  s: SpotState,
+  order: SpotOrder,
+  need: Decimal,
+  available: Decimal,
+  priced: string,
+  ctx: EngineCtx,
+): EngineEvent[] {
+  const kind = order.type === 'stop_loss' ? 'stop' : 'take-profit';
   const reason =
     `Triggered ${kind} expired: insufficient funds at execution ` +
-    `(need ${walk.quote}, available ${available}; trigger ${order.triggerPrice}, book average ${shownAvg})`;
+    `(need ${need}, available ${available}; trigger ${order.triggerPrice}, ${priced})`;
   return rejectPending(s, order, reason, ctx, true);
 }
 

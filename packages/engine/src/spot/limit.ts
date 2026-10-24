@@ -15,12 +15,11 @@ import type {
   SpotOrderRequest,
   SpotRules,
 } from '../types.ts';
-import { assertBasisCovers, recordFill } from './accounting.ts';
+import { recordFill } from './accounting.ts';
 import { allocateTradeThrough } from './matching.ts';
 import {
-  applyFill,
   emptyPreview,
-  makeFill,
+  fillAt,
   newOrder,
   noFields,
   openCounts,
@@ -31,7 +30,7 @@ import {
   settleTaker,
 } from './orders.ts';
 import type { RequestFields } from './orders.ts';
-import { credit, freeOf, putOrder, releaseFunds, spendFunds } from './state.ts';
+import { freeOf, putOrder } from './state.ts';
 import type { SpotState } from './state.ts';
 import { expectedNetQty, validateAttachedPair } from './stops.ts';
 
@@ -154,36 +153,7 @@ function makerFill(
   rules: SpotRules,
   ctx: EngineCtx,
 ): EngineEvent[] {
-  assertBasisCovers(s, rules, order.side, qty);
-  const buy = order.side === 'buy';
-  const price = order.price!;
-  const quote = qty.mul(price);
-  const fee = spotFee(order.side, qty, quote, ctx.fees.maker, rules.base, rules.quote);
-  let lock = spendFunds(s, order.lockAsset, buy ? quote : qty, order.lockAmount);
-  credit(s, fee.asset, (buy ? qty : quote).minus(fee.amount));
-
-  const done = order.filledQty.plus(qty).gte(order.qty!);
-  if (done && lock.gt(0)) {
-    releaseFunds(s, order.lockAsset, lock);
-    lock = D(0);
-  }
-  const fill = makeFill(
-    order,
-    {
-      qty,
-      price,
-      quote,
-      liquidity: 'maker',
-      fee,
-      bestAtArrival: ctx.market.best(order.symbol, order.side),
-      slippageUsd: D(0),
-      driftUsd: D(0),
-    },
-    ctx,
-  );
-  const updated = applyFill(order, fill, done ? 'filled' : 'partially_filled', lock);
-  putOrder(s, updated);
-  return recordFill(s, fill, updated, rules, ctx);
+  return fillAt(s, order, qty, order.price!, 'maker', rules, ctx, ctx.market.best(order.symbol, order.side));
 }
 
 /**

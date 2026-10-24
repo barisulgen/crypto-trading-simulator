@@ -222,6 +222,46 @@ export function applyFill(order: SpotOrder, fill: Fill, status: OrderStatus, loc
 }
 
 /**
+ * One fill of `qty` at `price`, with no book walked: a resting limit filled by a trade through it
+ * (at its own price), or a catch-up fill at a price estimated from history. The fee is the rate of
+ * `liquidity`; the cost (buy) or coins (sell) come from the order's lock first, then from free
+ * funds. The order is done when its quantity is filled (a dollar-sized order with its one fill);
+ * then what is left of its lock is released. `bestAtArrival` is the live best price, null when
+ * there is none (catch-up). Without the finish: the caller activates pairs and closes trips.
+ */
+export function fillAt(
+  s: SpotState,
+  order: SpotOrder,
+  qty: Decimal,
+  price: Decimal,
+  liquidity: 'maker' | 'taker',
+  rules: SpotRules,
+  ctx: EngineCtx,
+  bestAtArrival: Decimal | null = null,
+): EngineEvent[] {
+  assertBasisCovers(s, rules, order.side, qty);
+  const buy = order.side === 'buy';
+  const quote = qty.mul(price);
+  const fee = spotFee(order.side, qty, quote, ctx.fees[liquidity], rules.base, rules.quote);
+  let lock = spendFunds(s, order.lockAsset, buy ? quote : qty, order.lockAmount);
+  credit(s, fee.asset, (buy ? qty : quote).minus(fee.amount));
+
+  const done = order.qty === null || order.filledQty.plus(qty).gte(order.qty);
+  if (done && lock.gt(0)) {
+    releaseFunds(s, order.lockAsset, lock);
+    lock = D(0);
+  }
+  const fill = makeFill(
+    order,
+    { qty, price, quote, liquidity, fee, bestAtArrival, slippageUsd: D(0), driftUsd: D(0) },
+    ctx,
+  );
+  const updated = applyFill(order, fill, done ? 'filled' : 'partially_filled', lock);
+  putOrder(s, updated);
+  return recordFill(s, fill, updated, rules, ctx);
+}
+
+/**
  * Settle one taker fill for the walked amount: spend from the lock first (then free) and
  * credit the received asset net of the taker fee. `retain` of the unspent lock stays locked
  * for a resting remainder (marketable limit); the rest of the unspent lock is released.

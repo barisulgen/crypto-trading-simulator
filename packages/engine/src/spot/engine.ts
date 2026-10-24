@@ -21,6 +21,7 @@ import {
   amountTooSmall,
   arrivalDelay,
   emptyPreview,
+  fillAt,
   fillOrThin,
   marketStep,
   marketTarget,
@@ -124,12 +125,18 @@ export class SpotEngine {
     return this.finish(this.arrivePending(order, ctx), ctx);
   }
 
-  /**
-   * What follows every action that can end orders: the attached pairs of buys it finished are
-   * activated, then round trips that a sell's cancel or rejection lets close are closed.
-   */
   private finish(events: EngineEvent[], ctx: EngineCtx): EngineEvent[] {
-    return closeTripsAfterSellEnds(this.s, activateAttachedPairs(this.s, events, ctx), ctx);
+    return finishSpot(this.s, events, ctx);
+  }
+
+  /**
+   * Fill `qty` of an order at `price` with the fee of `liquidity`, without walking any book: the
+   * fill path catch-up shares with the live limit fills, for prices estimated from history. The
+   * attached pair of a buy it completes is placed and round trips are settled, as after any fill.
+   */
+  fillAt(order: SpotOrder, qty: Decimal, price: Decimal, liquidity: 'maker' | 'taker', ctx: EngineCtx): EngineEvent[] {
+    const rules = ctx.market.rules(order.symbol);
+    return this.finish(fillAt(this.s, order, qty, price, liquidity, rules, ctx), ctx);
   }
 
   /** A submitted order reaches the exchange, without its finish; a no-op unless pending and due. */
@@ -415,6 +422,15 @@ export class SpotEngine {
     }
     return fillOrThin(this.s, order, walk, book, rules, ctx);
   }
+}
+
+/**
+ * What follows every action that can end orders: the attached pairs of buys it finished are
+ * activated, then round trips that a sell's cancel or rejection lets close are closed. Run once
+ * over all the events of one action: running it twice would place a pair twice.
+ */
+export function finishSpot(s: SpotState, events: EngineEvent[], ctx: EngineCtx): EngineEvent[] {
+  return closeTripsAfterSellEnds(s, activateAttachedPairs(s, events, ctx), ctx);
 }
 
 /**
