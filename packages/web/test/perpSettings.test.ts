@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { btcBrackets, btcPerpRules } from '../../engine/test/perpFixtures.ts';
 import { PerpOrderForm } from '../src/components/PerpOrderForm.tsx';
 import type { Meta, PerpMeta, ServerMessage } from '../src/lib/api.ts';
-import { initialLiveData, perpSettingOf, reduce, useLive } from '../src/lib/live.ts';
+import { confirmedLeverage, initialLiveData, perpSettingOf, reduce, useLive } from '../src/lib/live.ts';
 
 const wire = <T>(v: T) => JSON.parse(JSON.stringify(v));
 /** /api/meta as loaded at start: BTCUSDT's perpetual at 20x. */
@@ -54,6 +54,23 @@ describe('perp settings pushed over the socket', () => {
     expect(perpSettingOf(s, 'BTCUSDT')).toEqual({ leverage: 25, marginMode: 'isolated' });
     // A symbol neither knows: nothing is guessed.
     expect(perpSettingOf(s, 'ETHUSDT')).toBeUndefined();
+  });
+
+  it("a leverage change's answer never overwrites a newer push that arrived while it was on its way", () => {
+    let s = { ...initialLiveData(), meta };
+    s = { ...s, ...reduce(s, pushed(20), 0) };
+    // This page asks for 25x; another browser's 30x is pushed before the answer comes back.
+    const started = s.perpSettingsPushes.BTCUSDT ?? 0;
+    s = { ...s, ...reduce(s, pushed(30), 1) };
+    s = { ...s, ...confirmedLeverage(s, 'BTCUSDT', 25, started) };
+    expect(perpSettingOf(s, 'BTCUSDT')?.leverage).toBe(30);
+    // With no push meanwhile, the answer is written at once (the push that follows agrees).
+    const again = s.perpSettingsPushes.BTCUSDT ?? 0;
+    s = { ...s, ...confirmedLeverage(s, 'BTCUSDT', 12, again) };
+    expect(perpSettingOf(s, 'BTCUSDT')?.leverage).toBe(12);
+    // A symbol never pushed yet: written too.
+    const fresh = { ...initialLiveData(), meta };
+    expect(perpSettingOf({ ...fresh, ...confirmedLeverage(fresh, 'BTCUSDT', 7, 0) }, 'BTCUSDT')?.leverage).toBe(7);
   });
 
   it('the leverage chip follows a change made elsewhere, with no reload', () => {

@@ -3,14 +3,9 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import { fmtUsd } from '../lib/format.ts';
-import { catchingUpBlock, perpSettingOf, useLive } from '../lib/live.ts';
+import { catchingUpBlock, confirmedLeverage, perpSettingOf, useLive } from '../lib/live.ts';
 import { maxPositionAt } from '../lib/perpForm.ts';
 import { Button, Dialog, ErrorText, TextField } from './ui.tsx';
-
-/** The store's copy of a symbol's leverage setting, after the server confirmed a change (its push follows). */
-function storeLeverage(symbol: string, leverage: number): void {
-  useLive.setState((s) => ({ perpSettings: { ...s.perpSettings, [symbol]: { leverage, marginMode: 'isolated' } } }));
-}
 
 /** A whole number from 1 to max as typed, or null. */
 function wholeIn(input: string, max: number): number | null {
@@ -57,8 +52,9 @@ export function LeverageDialog({ open, symbol, onClose }: { open: boolean; symbo
     setBusy(true);
     setError('');
     try {
+      const pushes = useLive.getState().perpSettingsPushes[symbol] ?? 0;
       const r = await api.setLeverage(symbol, chosen);
-      storeLeverage(symbol, r.leverage);
+      useLive.setState((s) => confirmedLeverage(s, symbol, r.leverage, pushes));
       pushNotice('info', `${base} perpetual leverage set to ${r.leverage}x`);
       onClose();
     } catch (err) {

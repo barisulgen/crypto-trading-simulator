@@ -90,6 +90,8 @@ export interface LiveData {
    * anywhere); empty until then. Ahead of the ones /api/meta loaded (see perpSettingOf).
    */
   perpSettings: Record<string, PerpSetting>;
+  /** Per symbol, how many pushes have carried its settings: tells an answer from a newer push (see confirmedLeverage). */
+  perpSettingsPushes: Record<string, number>;
   account: AccountSnapshot | null;
   /** Open spot orders, newest first. */
   orders: WireOrder[];
@@ -159,6 +161,7 @@ export function initialLiveData(): LiveData {
     marks: {},
     positions: null,
     perpSettings: {},
+    perpSettingsPushes: {},
     account: null,
     orders: [],
     perpOrders: [],
@@ -367,6 +370,21 @@ export function perpSettingOf(s: Pick<LiveState, 'meta' | 'perpSettings'>, symbo
   return loaded ? { leverage: loaded.leverage, marginMode: loaded.marginMode } : undefined;
 }
 
+/**
+ * The leverage the server confirmed in answer to this page's change, written only when no push of
+ * the symbol's settings arrived since the request started (`pushesAtStart`, its push count then):
+ * such a push may carry a newer change made elsewhere, and the push of this change follows anyway.
+ */
+export function confirmedLeverage(
+  s: Pick<LiveData, 'perpSettings' | 'perpSettingsPushes'>,
+  symbol: string,
+  leverage: number,
+  pushesAtStart: number,
+): Partial<LiveData> {
+  if ((s.perpSettingsPushes[symbol] ?? 0) !== pushesAtStart) return {};
+  return { perpSettings: { ...s.perpSettings, [symbol]: { leverage, marginMode: 'isolated' } } };
+}
+
 /** Whether a book, trades or kline message is for the market and coin shown (no market means spot). */
 function isSelected(s: LiveData, msg: { market?: Market; symbol: string }): boolean {
   return msg.symbol === s.selected.symbol && (msg.market ?? 'spot') === s.selected.market;
@@ -383,8 +401,11 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
       return { marks: msg.marks };
     case 'positions':
       return { positions: msg.positions };
-    case 'perpSettings':
-      return { perpSettings: msg.settings };
+    case 'perpSettings': {
+      const perpSettingsPushes = { ...s.perpSettingsPushes };
+      for (const symbol of Object.keys(msg.settings)) perpSettingsPushes[symbol] = (perpSettingsPushes[symbol] ?? 0) + 1;
+      return { perpSettings: msg.settings, perpSettingsPushes };
+    }
     case 'account': {
       const moved = s.account !== null && balancesKey(s.account) !== balancesKey(msg.account);
       return moved ? { account: msg.account, fillSeq: s.fillSeq + 1 } : { account: msg.account };
