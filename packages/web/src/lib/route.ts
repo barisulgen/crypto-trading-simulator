@@ -26,12 +26,6 @@ export function navigate(path: RoutePath, params: Record<string, string> = {}): 
   location.hash = href(path, params);
 }
 
-/** Point the address at a route without a new history entry or a hashchange event. */
-export function replaceRoute(path: RoutePath, params: Record<string, string> = {}): void {
-  const next = href(path, params);
-  if (location.hash !== next) history.replaceState(history.state, '', next);
-}
-
 /** The trade screen's market and coin as kept in the hash: '#/?m=perp&s=BTCUSDT'. */
 export interface TradeSelection {
   symbol: string;
@@ -58,6 +52,27 @@ export function selectionFromParams(
 /** The hash parameters for a market and coin. */
 export function selectionParams(sel: TradeSelection): Record<string, string> {
   return { m: sel.market, s: sel.symbol };
+}
+
+/**
+ * The address the trade screen should show for its selection, or null to leave `hash` as it is:
+ * when it already shows the selection, or when it is not the trade route. The trade screen still
+ * renders once with a new address (a History link, Back, Forward) before the app swaps it out, and
+ * writing its selection then would undo that navigation.
+ */
+export function selectionHref(hash: string, sel: TradeSelection): string | null {
+  if (parseHash(hash).path !== '/') return null;
+  const next = href('/', selectionParams(sel));
+  return next === hash ? null : next;
+}
+
+/**
+ * Write the trade selection into the address without a new history entry or a hashchange event;
+ * does nothing once the address has left the trade route.
+ */
+export function replaceSelection(sel: TradeSelection): void {
+  const next = selectionHref(location.hash, sel);
+  if (next !== null) history.replaceState(history.state, '', next);
 }
 
 const subscribe = (cb: () => void) => {
