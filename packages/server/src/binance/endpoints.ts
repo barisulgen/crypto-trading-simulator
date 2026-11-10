@@ -86,11 +86,14 @@ export function assertKeyTransport(e: Pick<BinanceEndpoints, 'futuresRest'>, key
   throw new Error(`${ENDPOINT_ENV.futuresRest} must be an https:// address (or http:// on this computer) while BINANCE_KEY is set`);
 }
 
-/** The endpoints that differ from live Binance, by setting name. */
+/**
+ * The endpoints that differ from live Binance, for the log: each setting's name with its scheme,
+ * host and port only. A path may carry a relay's token, so it is never shown.
+ */
 export function overriddenEndpoints(e: BinanceEndpoints): string[] {
   return (Object.keys(DEFAULT_ENDPOINTS) as (keyof BinanceEndpoints)[])
     .filter((k) => e[k] !== DEFAULT_ENDPOINTS[k])
-    .map((k) => `${ENDPOINT_ENV[k]}=${e[k]}`);
+    .map((k) => `${ENDPOINT_ENV[k]} (${new URL(e[k]).origin})`);
 }
 
 /** The spot combined-stream socket, before its stream names. */

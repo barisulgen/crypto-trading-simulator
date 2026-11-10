@@ -7,6 +7,7 @@ import { loadConfig } from '../src/config.ts';
 import {
   DEFAULT_ENDPOINTS,
   klineSocketUrl,
+  overriddenEndpoints,
   perpDepthStreamUrl,
   perpMarketStreamUrl,
   spotStreamUrl,
@@ -258,5 +259,22 @@ describe('Binance clients on configured endpoints', () => {
       'wss://stream.binance.com:9443/ws',
       'wss://fstream.binance.com/market/ws',
     ]);
+  });
+});
+
+describe('overriddenEndpoints', () => {
+  it('is empty for live Binance', () => {
+    expect(overriddenEndpoints({ ...DEFAULT_ENDPOINTS })).toEqual([]);
+  });
+
+  it('names each overridden setting with its scheme, host and port only, never its path', () => {
+    const lines = overriddenEndpoints({
+      ...DEFAULT_ENDPOINTS,
+      spotRest: 'http://127.0.0.1:9001/secret-path',
+      futuresWs: 'wss://relay.example/token-123',
+    });
+    expect(lines).toEqual(['BINANCE_SPOT_REST_URL (http://127.0.0.1:9001)', 'BINANCE_FUTURES_WS_URL (wss://relay.example)']);
+    expect(lines.join(' ')).not.toContain('secret-path');
+    expect(lines.join(' ')).not.toContain('token-123');
   });
 });
