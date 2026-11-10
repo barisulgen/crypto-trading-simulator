@@ -79,8 +79,8 @@ import type { Logger } from './log.ts';
 import { marketKey, splitKey } from './market/marketKey.ts';
 import type { MarketKey } from './market/marketKey.ts';
 import type { SetTimer } from './market/ws.ts';
-import { marginWarningNotice, noticesFor, savedLiquidationNotice } from './notices.ts';
-import type { Notice, NoticeLookup } from './notices.ts';
+import { feedNotice, marginWarningNotice, noticesFor, savedLiquidationNotice } from './notices.ts';
+import type { FeedNoticeEntry, Notice, NoticeLookup } from './notices.ts';
 
 export { CATCHING_UP_REFUSAL, OFFLINE_REASON, RESTART_REASON, noticesFor };
 export type { Gate, Notice };
@@ -107,6 +107,11 @@ const EQUITY_MS = 60_000;
  * A call with events, changed orders or a gap saves it in its own transaction.
  */
 export const CURSOR_FLUSH_MS = 5000;
+/**
+ * Feed notices of one kind (data interrupted, or restored) arriving within this long of the first
+ * go out as one, when it ends: an outage or a pause interrupts, then restores, every market at once.
+ */
+export const FEED_NOTICE_WINDOW_MS = 2000;
 
 /** An action the runner will not perform in its current state (integrity failure, stopped after an error). */
 export class RefusedError extends Error {
@@ -294,6 +299,8 @@ export class EngineRunner implements FundingSim {
   private lastStateKey = '';
   /** When the trade cursor was last saved. */
   private cursorSavedAt: number;
+  /** The feed notices waiting to go out as one (see feedNotice); null when none waits. */
+  private feedBatch: { kind: 'feed_gap' | 'feed_restored'; entries: FeedNoticeEntry[] } | null = null;
   private readonly spotTradeListener = (symbol: string, trade: AggTrade) =>
     this.background(() => this.onTrade('spot', symbol, trade));
   private readonly perpTradeListener = (symbol: string, trade: AggTrade) =>
@@ -352,11 +359,13 @@ export class EngineRunner implements FundingSim {
   }
 
   /**
-   * Stops trades, marks, timers and pending arrival timers, and records every gap still open as a
-   * feed_gap ending now, with the trade cursors and, for a gap that needs catching up, its job
-   * (after a fatal error nothing more is written).
+   * Sends the feed notice still waiting for its window; stops trades, marks, timers and pending
+   * arrival timers; and records every gap still open as a feed_gap ending now, with the trade
+   * cursors and, for a gap that needs catching up, its job (after a fatal error nothing more is
+   * written).
    */
   stop(): void {
+    this.flushFeedNotices();
     this.started = false;
     this.d.spotMarket.off('trade', this.spotTradeListener);
     this.d.perpMarket.off('trade', this.perpTradeListener);
@@ -1276,7 +1285,7 @@ export class EngineRunner implements FundingSim {
       this.apply((ctx) => this.d.sim.onFresh(market, symbol, ctx), gaps);
       if (gaps.length > 0) this.releaseHeldCalls(key);
     }
-    if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${label(key)}` });
+    if (gaps.length > 0) this.feedNotice('feed_restored', key);
     return gaps.length > 0;
   }
 
@@ -1327,13 +1336,13 @@ export class EngineRunner implements FundingSim {
       this.gaps.markFresh(key, now);
       if (this.enterCatchUp(key, gaps)) this.catchUp.holdTrade(key, trade);
       else this.resume(key, [...this.catchUp.takeHeld(key), trade], null, gaps[0]!.startedAt);
-      this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${label(key)}` });
+      this.feedNotice('feed_restored', key);
       return;
     }
     this.apply((ctx) => this.d.sim.onTrade(market, symbol, trade, ctx), gaps);
     if (gaps.length > 0) this.releaseHeldCalls(key);
     if (fresh) this.gaps.markFresh(key, now);
-    if (gaps.length > 0) this.notice({ kind: 'feed_restored', level: 'info', text: `Live data restored for ${label(key)}` });
+    if (gaps.length > 0) this.feedNotice('feed_restored', key);
     if (opened || gaps.length > 0) this.broadcastHealth();
   }
 
@@ -1368,7 +1377,7 @@ export class EngineRunner implements FundingSim {
   private startGap(key: MarketKey, reason: string, pausedSince: number | null = null, notAfter: number | null = null): boolean {
     if (!this.gaps.start(key, reason, pausedSince, notAfter)) return false;
     this.catchUp.gapOpened(key);
-    this.notice({ kind: 'feed_gap', level: 'warn', text: `Live data interrupted for ${label(key)}: ${reason}` });
+    this.feedNotice('feed_gap', key, reason);
     return true;
   }
 
@@ -1397,6 +1406,31 @@ export class EngineRunner implements FundingSim {
 
   private notice(n: Notice): void {
     this.d.onBroadcast({ type: 'notice', ...n });
+  }
+
+  /**
+   * Tells the owner a key's data was interrupted (with why) or restored, at most
+   * FEED_NOTICE_WINDOW_MS later: those of the same kind within that window of the first go out as
+   * one notice. One of the other kind sends what waits at once, first, so the owner reads them in
+   * the order they happened. The history keeps each key's own feed_gap whatever the notice says.
+   */
+  private feedNotice(kind: 'feed_gap' | 'feed_restored', key: MarketKey, reason?: string): void {
+    if (this.feedBatch !== null && this.feedBatch.kind !== kind) this.flushFeedNotices();
+    if (this.feedBatch === null) {
+      const batch: { kind: typeof kind; entries: FeedNoticeEntry[] } = { kind, entries: [] };
+      this.feedBatch = batch;
+      this.timer(() => {
+        if (this.feedBatch === batch) this.flushFeedNotices();
+      }, FEED_NOTICE_WINDOW_MS);
+    }
+    this.feedBatch.entries.push({ ...splitKey(key), ...(reason !== undefined ? { reason } : {}) });
+  }
+
+  /** The feed notices waiting for their window, sent now as one. */
+  private flushFeedNotices(): void {
+    const batch = this.feedBatch;
+    this.feedBatch = null;
+    if (batch !== null && batch.entries.length > 0) this.notice(feedNotice(batch.kind, batch.entries));
   }
 
   private noticeLookup(): NoticeLookup {
@@ -1434,12 +1468,6 @@ export class EngineRunner implements FundingSim {
       return null;
     }
   }
-}
-
-/** How a key is named to the owner: the symbol for spot, `BTCUSDT perp` for a perpetual. */
-function label(key: MarketKey): string {
-  const { market, symbol } = splitKey(key);
-  return market === 'spot' ? symbol : `${symbol} perp`;
 }
 
 /** The order a submit created (its first event names it: placed or rejected). */

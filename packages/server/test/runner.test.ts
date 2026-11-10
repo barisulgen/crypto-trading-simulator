@@ -5,6 +5,7 @@ import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
 import { openGap, toJson, touchAlive } from '../src/db/store.ts';
 import {
+  FEED_NOTICE_WINDOW_MS,
   INTEGRITY_REFUSAL,
   LEVERAGE_TRANSFER_STALE_REFUSAL,
   MARGIN_STALE_REFUSAL,
@@ -164,11 +165,12 @@ describe('EngineRunner', () => {
     t.clock.advance(1000);
     expect(t.orderRow(order.id)!.status).toBe('triggered');
     expect(JSON.parse(t.orderRow(order.id)!.data).arrivesAt).toBeNull();
-    expect(t.notices()).toContain('Live data interrupted for BTCUSDT: Disconnected');
     expect(t.eventsOf('feed_gap')).toEqual([]);
 
     t.market.setFresh('BTCUSDT', true);
     t.clock.advance(1000);
+    // The restore sends the interruption still waiting for its window first.
+    expect(t.notices()).toContain('Live data interrupted for BTCUSDT: Disconnected');
     // The triggered stop was open across the gap: the key catches up first (no candles here).
     expect(t.runner.gate(marketKey('spot', 'BTCUSDT'))).toBe('catching_up');
     await settle();
@@ -762,12 +764,11 @@ describe('feed gaps', () => {
     t.clock.advance(1000); // the next poll finds the symbol fresh
     expect(t.gaps()).toEqual([{ startedAt: T, endedAt: T + 28_801_000, reason: PAUSED, lastTradeIdBefore: null }]);
     expect(t.openGapRows()).toEqual([]);
-    // The pause is a gap in both markets' data, each closed by that poll.
+    // The pause is a gap in both markets' data, each closed by that poll: one notice each way.
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
     expect(t.notices()).toEqual([
-      `Live data interrupted for BTCUSDT: ${PAUSED}`,
-      `Live data interrupted for BTCUSDT perp: ${PAUSED}`,
-      'Live data restored for BTCUSDT',
-      'Live data restored for BTCUSDT perp',
+      `Live data interrupted for 2 markets: BTC (spot and perp): ${PAUSED}`,
+      'Live data restored for 2 markets: BTC (spot and perp)',
     ]);
   });
 
@@ -1025,10 +1026,10 @@ describe('feed gaps', () => {
     expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0 + 1000, reason: 'Server paused (sleep or freeze)' }]);
     t.clock.advance(0); // the overdue poll: the stall is already handled
     expect(t.health.stalls).toEqual([T0 + 9000]);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
     expect(t.notices().filter((n) => n.startsWith('Live data interrupted'))).toEqual([
-      `Live data interrupted for BTCUSDT: ${PAUSED_REASON}`,
-      `Live data interrupted for BTCUSDT perp: ${PAUSED_REASON}`,
-    ]); // once per market
+      `Live data interrupted for 2 markets: BTC (spot and perp): ${PAUSED_REASON}`,
+    ]); // once, for both markets
   });
 
   it('a wall clock stepping back never puts a gap start after its detection', () => {
@@ -1039,6 +1040,120 @@ describe('feed gaps', () => {
     t.market.setFresh('BTCUSDT', false);
     t.market.trade('BTCUSDT', trade('99.95')); // skipped: the gap opens now
     expect(t.openGapRows()).toEqual([{ symbol: 'BTCUSDT', startedAt: T0 - 60_000, reason: 'Disconnected' }]);
+  });
+});
+
+describe('feed notices', () => {
+  const SYMBOLS2 = ['BTCUSDT', 'ETHUSDT'];
+  /** A started runner over BTC and ETH, both markets fresh, past its first poll. */
+  function twoCoins() {
+    const t = setup({ symbols: SYMBOLS2 });
+    t.market.setFresh('ETHUSDT', true);
+    t.perp.setFresh('ETHUSDT', true);
+    t.runner.start();
+    t.clock.advance(1000);
+    return t;
+  }
+  const feedNotices = (t: ReturnType<typeof setup>) =>
+    t.sent.filter((m) => m.type === 'notice' && (m.kind === 'feed_gap' || m.kind === 'feed_restored')).map((m) => m.text as string);
+  const setFresh = (t: ReturnType<typeof setup>, keys: string[], fresh: boolean) => {
+    for (const k of keys) {
+      const { market, symbol } = splitKey(k as MarketKey);
+      (market === 'spot' ? t.market : t.perp).setFresh(symbol, fresh);
+    }
+  };
+  const ALL = ['spot:BTCUSDT', 'spot:ETHUSDT', 'perp:BTCUSDT', 'perp:ETHUSDT'];
+
+  it('restores within the window give exactly one notice listing every market, sent as the window ends', () => {
+    expect(FEED_NOTICE_WINDOW_MS).toBe(2000);
+    const t = twoCoins();
+    setFresh(t, ALL, false);
+    t.clock.advance(1000); // one poll opens all four gaps
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    expect(feedNotices(t)).toEqual(['Live data interrupted for 4 markets: BTC, ETH (spot and perp): Disconnected']);
+
+    t.sent.length = 0;
+    setFresh(t, ALL, true);
+    t.clock.advance(1000); // the next poll closes them all
+    expect(feedNotices(t)).toEqual([]);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS - 1);
+    expect(feedNotices(t)).toEqual([]);
+    t.clock.advance(1); // never later than the window
+    expect(feedNotices(t)).toEqual(['Live data restored for 4 markets: BTC, ETH (spot and perp)']);
+    t.clock.advance(10_000);
+    expect(feedNotices(t)).toHaveLength(1);
+    // History keeps one feed_gap per market.
+    expect(t.eventsOf('feed_gap').map((e) => e.symbol).sort()).toEqual(['BTCUSDT', 'BTCUSDT', 'ETHUSDT', 'ETHUSDT']);
+  });
+
+  it('a single market keeps its own wording; a mix names each coin with its markets', () => {
+    const t = twoCoins();
+    setFresh(t, ['perp:ETHUSDT'], false);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    setFresh(t, ['perp:ETHUSDT'], true);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    expect(feedNotices(t)).toEqual(['Live data interrupted for ETHUSDT perp: Disconnected', 'Live data restored for ETHUSDT perp']);
+
+    t.sent.length = 0;
+    setFresh(t, ['spot:BTCUSDT', 'perp:BTCUSDT', 'spot:ETHUSDT'], false);
+    t.clock.advance(1000);
+    setFresh(t, ['spot:BTCUSDT', 'perp:BTCUSDT', 'spot:ETHUSDT'], true);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    expect(feedNotices(t)).toEqual([
+      'Live data interrupted for 3 markets: BTC (spot and perp), ETH (spot): Disconnected',
+      'Live data restored for 3 markets: BTC (spot and perp), ETH (spot)',
+    ]);
+  });
+
+  it('interruptions with different reasons give each group of markets its own reason', () => {
+    const t = twoCoins();
+    t.perp.staleReason = 'No mark price for 10s';
+    setFresh(t, ALL, false);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    expect(feedNotices(t)).toEqual([
+      'Live data interrupted for 4 markets: BTC, ETH (spot): Disconnected; BTC, ETH (perp): No mark price for 10s',
+    ]);
+  });
+
+  it('restores further apart than the window give separate notices', () => {
+    const t = twoCoins();
+    setFresh(t, ['spot:BTCUSDT', 'spot:ETHUSDT'], false);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    t.sent.length = 0;
+    setFresh(t, ['spot:BTCUSDT'], true);
+    t.clock.advance(1000);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    setFresh(t, ['spot:ETHUSDT'], true);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    expect(feedNotices(t)).toEqual(['Live data restored for BTCUSDT', 'Live data restored for ETHUSDT']);
+  });
+
+  it('an interruption while restores wait sends them first, so the owner reads them in the order they happened', () => {
+    const t = twoCoins();
+    setFresh(t, ['spot:BTCUSDT'], false);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    t.sent.length = 0;
+    setFresh(t, ['spot:BTCUSDT'], true);
+    t.clock.advance(1000); // restored, waiting for the window
+    setFresh(t, ['spot:ETHUSDT'], false);
+    t.clock.advance(1000); // interrupted: the restore goes out at once
+    expect(feedNotices(t)).toEqual(['Live data restored for BTCUSDT']);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    expect(feedNotices(t)).toEqual(['Live data restored for BTCUSDT', 'Live data interrupted for ETHUSDT: Disconnected']);
+  });
+
+  it('stop() sends the notice still waiting for its window', () => {
+    const t = twoCoins();
+    setFresh(t, ALL, false);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    t.sent.length = 0;
+    setFresh(t, ALL, true);
+    t.clock.advance(1000);
+    expect(feedNotices(t)).toEqual([]);
+    t.runner.stop();
+    expect(feedNotices(t)).toEqual(['Live data restored for 4 markets: BTC, ETH (spot and perp)']);
+    t.clock.advance(10_000);
+    expect(feedNotices(t)).toHaveLength(1);
   });
 });
 
@@ -1514,7 +1629,6 @@ describe('perps through the runner', () => {
       { market: 'perp', symbol: 'BTCUSDT', startedAt: T0 + 500, reason: 'Disconnected', lastTradeIdBefore: 700 },
     ]);
     expect(t.openGapRows()).toEqual([]);
-    expect(t.notices()).toContain('Live data interrupted for BTCUSDT perp: Disconnected');
     t.perp.trade('BTCUSDT', perpTrade(701, '80000', '0.001')); // skipped on stale data: the cursor stays
     expect(t.sim.perp.state.lastTradeId.BTCUSDT).toBe(700);
 
@@ -1522,7 +1636,8 @@ describe('perps through the runner', () => {
     t.clock.advance(1000);
     expect(perpGaps(t.db)).toEqual([{ startedAt: T0 + 500, endedAt: T0 + 3000, reason: 'Disconnected', lastTradeIdBefore: 700 }]);
     expect(t.gaps()).toEqual([]);
-    expect(t.notices()).toContain('Live data restored for BTCUSDT perp');
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    expect(t.notices()).toEqual(['Live data interrupted for BTCUSDT perp: Disconnected', 'Live data restored for BTCUSDT perp']);
   });
 
   it('a stale mark alone makes no gap while the market reports the symbol fresh', () => {

@@ -1,5 +1,5 @@
 import { D, Decimal } from '@sim/engine';
-import type { Fill, MarginWarning, PerpEvent, PerpFill, PerpRules, PositionSide, SimEvent, SpotRules } from '@sim/engine';
+import type { Fill, MarginWarning, Market, PerpEvent, PerpFill, PerpRules, PositionSide, SimEvent, SpotRules } from '@sim/engine';
 
 export interface Notice {
   kind:
@@ -203,6 +203,56 @@ function catchUpNotice(e: Extract<SimEvent, { type: 'catch_up' }>): Notice {
   const head = `Caught up ${name} after the data gap ${at(e.from)}–${at(e.to)} UTC`;
   const text = e.actions.length > 0 ? `${head}: ${e.actions.join('; ')}` : `${head}: nothing to apply`;
   return { kind: 'catch_up', level: e.actions.length > 0 ? 'warn' : 'info', text };
+}
+
+/** A market whose live data was interrupted (with why) or restored. */
+export interface FeedNoticeEntry {
+  market: Market;
+  symbol: string;
+  /** Why it was interrupted; absent on a restore. */
+  reason?: string;
+}
+
+/**
+ * One notice for markets interrupted or restored together. One market reads as before: `Live data
+ * restored for BTCUSDT perp`, `Live data interrupted for BTCUSDT: Disconnected`. Several are
+ * counted and their coins named once each with the markets they cover (marketsText): `Live data
+ * restored for 20 markets: BTC, ETH, … (spot and perp)`. Interruptions are grouped by reason, each
+ * group followed by its own: `...: BTC, ETH (spot): Disconnected; BTC (perp): No mark price for 10s`.
+ */
+export function feedNotice(kind: 'feed_gap' | 'feed_restored', entries: FeedNoticeEntry[]): Notice {
+  const restored = kind === 'feed_restored';
+  const head = restored ? 'Live data restored for' : 'Live data interrupted for';
+  const level = restored ? 'info' : 'warn';
+  if (entries.length === 1) {
+    const e = entries[0]!;
+    const name = e.market === 'spot' ? e.symbol : `${e.symbol} perp`;
+    return { kind, level, text: restored ? `${head} ${name}` : `${head} ${name}: ${e.reason}` };
+  }
+  const count = `${head} ${entries.length} markets: `;
+  if (restored) return { kind, level, text: count + marketsText(entries) };
+  const reasons = [...new Set(entries.map((e) => e.reason))];
+  const groups = reasons.map((r) => `${marketsText(entries.filter((e) => e.reason === r))}: ${r}`);
+  return { kind, level, text: count + groups.join('; ') };
+}
+
+const MARKET_GROUPS = ['spot and perp', 'spot', 'perp'] as const;
+
+/** `BTC, ETH (spot and perp), SOL (spot)`: each coin once, grouped by the markets it has among `entries`, coins in their order. */
+function marketsText(entries: FeedNoticeEntry[]): string {
+  const marketsOf = new Map<string, Set<Market>>();
+  for (const e of entries) {
+    const coin = baseOf(e.symbol, null);
+    marketsOf.set(coin, (marketsOf.get(coin) ?? new Set<Market>()).add(e.market));
+  }
+  const coinsIn = new Map<string, string[]>();
+  for (const [coin, markets] of marketsOf) {
+    const group = markets.size === 2 ? 'spot and perp' : [...markets][0]!;
+    coinsIn.set(group, [...(coinsIn.get(group) ?? []), coin]);
+  }
+  return MARKET_GROUPS.filter((g) => coinsIn.has(g))
+    .map((g) => `${coinsIn.get(g)!.join(', ')} (${g})`)
+    .join(', ');
 }
 
 /** `Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC` (price at tick decimals + 2, half up; slippage rounded up). */
