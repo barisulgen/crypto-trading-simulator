@@ -75,9 +75,21 @@ export interface CatchUpNeeds {
   funding: boolean;
 }
 
+/** A time a summary line names, as data: the minute (shown HH:MM) or, with `seconds`, the moment (HH:MM:SS). */
+export interface CatchUpTime {
+  at: number;
+  seconds: boolean;
+}
+
+/** One summary line: its text, with each time it names kept as data, so a reader can show it in its own time zone. */
+export type CatchUpLine = (string | CatchUpTime)[];
+
 /**
  * The summary after a catch-up run that had an order or a position to look after: what was applied,
  * one line per action, each marked estimated. Emitted even when nothing was applied (no actions).
+ * `actions` are the lines as text, their times in UTC and saying so (for logs, and for any reader
+ * that does not format the times itself); `lines` the same lines with their times as data. An event
+ * recorded before the times were kept as data has `actions` only.
  */
 export interface CatchUpEvent {
   type: 'catch_up';
@@ -87,4 +99,5 @@ export interface CatchUpEvent {
   from: number;
   to: number;
   actions: string[];
+  lines?: CatchUpLine[];
 }

@@ -18,15 +18,17 @@ import {
   hhmm,
   hhmmss,
   inGap,
+  line,
   lower,
   MINUTE_MS,
   reachingPrice,
   restingLimit,
   usableTrades,
+  utcText,
   walkedCandles,
   worstPrice,
 } from './plan.ts';
-import type { Candle1m, CatchUpBasis, CatchUpEvent, CatchUpInput } from './types.ts';
+import type { Candle1m, CatchUpBasis, CatchUpEvent, CatchUpInput, CatchUpLine } from './types.ts';
 
 /**
  * Perp catch-up over one symbol's gap, minute by minute: funding windows open, then liquidation on
@@ -84,7 +86,7 @@ class PerpCatchUp {
   private readonly s: PerpState;
   private readonly symbol: string;
   private readonly out: PerpEvent[] = [];
-  private readonly actions: string[] = [];
+  private readonly actions: CatchUpLine[] = [];
   /** When each stop armed by this run did so: a stop cannot trigger before it is armed. */
   private readonly armedAt = new Map<string, number>();
   /** Orders whose in-flight cancel this run has delivered (or tried to). */
@@ -187,7 +189,8 @@ class PerpCatchUp {
       time,
       from,
       to,
-      actions: this.actions,
+      actions: this.actions.map(utcText),
+      lines: this.actions,
     };
     return [...this.out, summary];
   }
@@ -269,7 +272,7 @@ class PerpCatchUp {
       const events = cancelOrder(this.s, o, 'catch_up_unavailable', remainingQty(o), this.at(from, null));
       this.emit(events, 'history_unavailable', floorMinute(from));
     }
-    if (resting.length > 0) this.actions.push(HISTORY_UNAVAILABLE_LINE);
+    if (resting.length > 0) this.actions.push([HISTORY_UNAVAILABLE_LINE]);
   }
 
   /** Attached legs that waited for data arm at the start of the gap. */
@@ -485,8 +488,8 @@ class PerpCatchUp {
   /** Tag and keep the events; their summary lines follow, those of `lead` events first. */
   private emit(events: PerpEvent[], basis: CatchUpBasis, minute: number, lead?: PerpEvent['type']): void {
     const { from, to } = this.input;
-    const first: string[] = [];
-    const rest: string[] = [];
+    const first: CatchUpLine[] = [];
+    const rest: CatchUpLine[] = [];
     for (const e of events) {
       this.out.push({ ...e, catchUp: { from, to, basis } });
       this.clock = Math.max(this.clock, e.time);
@@ -497,53 +500,53 @@ class PerpCatchUp {
   }
 
   /** One line of the summary for an event, or null for events another line already covers. */
-  private describe(e: PerpEvent, basis: CatchUpBasis, minute: number): string | null {
+  private describe(e: PerpEvent, basis: CatchUpBasis, minute: number): CatchUpLine | null {
     const base = this.base;
     switch (e.type) {
       case 'fill': {
         const what = `${label(e.order)} filled ${e.fill.qty} ${base} at ${grouped(e.fill.price)}`;
-        if (basis === 'aggtrade_replay') return `${what} (replayed trade at ${hhmmss(e.time)}; estimated)`;
-        const of = basis === 'trigger_minute_worst_price' ? `${hhmm(minute)}, its trigger minute` : hhmm(minute);
+        if (basis === 'aggtrade_replay') return line`${what} (replayed trade at ${hhmmss(e.time)}; estimated)`;
+        const of = basis === 'trigger_minute_worst_price' ? line`${hhmm(minute)}, its trigger minute` : line`${hhmm(minute)}`;
         const uncapped = e.fill.uncappedPrice;
         if (e.fill.bankruptcyCapped && uncapped && !uncapped.eq(e.fill.price)) {
-          return `${what}, the bankruptcy price (worst price of ${of} was ${grouped(uncapped)}; estimated)`;
+          return line`${what}, the bankruptcy price (worst price of ${of} was ${grouped(uncapped)}; estimated)`;
         }
         if (e.fill.bankruptcyCapped) {
-          return `${what} (worst price of ${of}; fee cut to the ${grouped(e.fill.fee)} USDT the margin had left; estimated)`;
+          return line`${what} (worst price of ${of}; fee cut to the ${grouped(e.fill.fee)} USDT the margin had left; estimated)`;
         }
-        return `${what} (worst price of ${of}; estimated)`;
+        return line`${what} (worst price of ${of}; estimated)`;
       }
       case 'funding': {
         const settled = `settled rate ${e.rate}, mark ${grouped(e.markPrice)}`;
-        const on = `on ${e.qty} ${base} ${e.side} at ${hhmm(e.fundingTime)} (${settled})`;
+        const on = line`on ${e.qty} ${base} ${e.side} at ${hhmm(e.fundingTime)} (${settled})`;
         const unpaid = e.uncollected ? `; ${grouped(e.uncollected)} USDT could not be collected` : '';
         return e.amount.isNegative()
-          ? `Funding paid ${grouped(e.amount.neg())} USDT ${on}${unpaid}`
-          : `Funding received ${grouped(e.amount)} USDT ${on}`;
+          ? line`Funding paid ${grouped(e.amount.neg())} USDT ${on}${unpaid}`
+          : line`Funding received ${grouped(e.amount)} USDT ${on}`;
       }
       case 'liquidation': {
         const p = e.position;
         const who = `${p.side === 'long' ? 'Long' : 'Short'} ${p.qty} ${base}`;
-        const when = `its liquidation price, when the mark reached it at ${hhmm(minute)}`;
-        return `${who} liquidated at ${grouped(e.markPrice)}, ${when}; margin lost ${grouped(e.marginLost)} USDT (estimated)`;
+        const when = line`its liquidation price, when the mark reached it at ${hhmm(minute)}`;
+        return line`${who} liquidated at ${grouped(e.markPrice)}, ${when}; margin lost ${grouped(e.marginLost)} USDT (estimated)`;
       }
       case 'order_rejected':
-        if (e.afterTrigger) return `${label(e.order)} expired at ${hhmm(minute)} (estimated): ${e.reason}`;
+        if (e.afterTrigger) return line`${label(e.order)} expired at ${hhmm(minute)} (estimated): ${e.reason}`;
         // Attached legs are rejected together: one line for both.
         if (e.order.parentId !== null && e.order.type === 'take_profit' && this.attachOf(e.order)?.stopLoss) {
           return null;
         }
-        return `${label(e.order)} rejected at ${hhmmss(e.time)} (estimated): ${e.reason}`;
+        return line`${label(e.order)} rejected at ${hhmmss(e.time)} (estimated): ${e.reason}`;
       case 'order_cancelled': {
         if (e.reason === 'catch_up_unavailable') return null;
         const what = e.order.closePosition ? label(e.order) : `${label(e.order)} ${e.cancelledQty} ${base}`;
-        if (e.reason === 'oco') return `${what} cancelled: the other order of its pair triggered (estimated)`;
-        if (e.reason === 'user') return `Cancel of ${lower(what)} took effect at ${hhmmss(e.time)} (estimated)`;
-        return `${what} cancelled at ${hhmmss(e.time)} (${e.reason}; estimated)`;
+        if (e.reason === 'oco') return line`${what} cancelled: the other order of its pair triggered (estimated)`;
+        if (e.reason === 'user') return line`Cancel of ${lower(what)} took effect at ${hhmmss(e.time)} (estimated)`;
+        return line`${what} cancelled at ${hhmmss(e.time)} (${e.reason}; estimated)`;
       }
       case 'cancel_rejected': {
         const order = lower(label(e.order));
-        return `Cancel of ${order} arrived at ${hhmmss(e.time)}: order already ${e.order.status} (estimated)`;
+        return line`Cancel of ${order} arrived at ${hhmmss(e.time)}: order already ${e.order.status} (estimated)`;
       }
       case 'order_placed': {
         const attach = this.attachOf(e.order);
@@ -554,7 +557,7 @@ class PerpCatchUp {
           attach.stopLoss ? `stop-loss ${grouped(attach.stopLoss)}` : null,
           attach.takeProfit ? `take-profit ${grouped(attach.takeProfit)}` : null,
         ].filter((l) => l !== null);
-        return `Attached ${legs.join(' / ')} placed at ${hhmmss(e.time)} (estimated)`;
+        return line`Attached ${legs.join(' / ')} placed at ${hhmmss(e.time)} (estimated)`;
       }
       default:
         return null;

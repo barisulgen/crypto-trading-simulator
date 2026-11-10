@@ -4,6 +4,7 @@ import type {
   AggTrade,
   Balance,
   Bracket,
+  CatchUpLine,
   Decimal,
   FeeSchedule,
   Fill,
@@ -144,6 +145,17 @@ export interface NoticeMessage {
   text: string;
   /** On a liquidation notice: its figures as data. */
   liquidation?: LiquidationDetail;
+  /** On a catch-up notice: what it says with its times as data (absent from an older server). */
+  catchUp?: CatchUpNoticeDetail;
+}
+
+/** A catch-up summary's market, gap (ms) and lines, each line's times as data (see catchUpLineText). */
+export interface CatchUpNoticeDetail {
+  market: Market;
+  symbol: string;
+  from: number;
+  to: number;
+  lines: CatchUpLine[];
 }
 
 export interface Candle {

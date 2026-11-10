@@ -3,7 +3,7 @@ import type { PerpState } from '../perp/state.ts';
 import type { SpotState } from '../spot/state.ts';
 import { isLimitType } from '../spot/limit.ts';
 import type { AggTrade, OrderStatus, Side } from '../types.ts';
-import type { Candle1m, CatchUpInput, CatchUpNeeds } from './types.ts';
+import type { Candle1m, CatchUpInput, CatchUpLine, CatchUpNeeds, CatchUpTime } from './types.ts';
 
 /** Which minutes and data a catch-up run needs, and the minute walk every run shares. */
 
@@ -146,8 +146,39 @@ export function reachingPrice(o: { type: string; side: Side }, c: Candle1m): Dec
   return upward ? c.high : c.low;
 }
 
-/** Times in summary lines, in UTC and saying so: "12:04 UTC", "12:04:50 UTC". */
-export const hhmm = (t: number) => `${new Date(t).toISOString().slice(11, 16)} UTC`;
-export const hhmmss = (t: number) => `${new Date(t).toISOString().slice(11, 19)} UTC`;
+/** Times in summary lines, as data: a minute (shown HH:MM) and a moment to the second (HH:MM:SS). */
+export const hhmm = (t: number): CatchUpTime => ({ at: t, seconds: false });
+export const hhmmss = (t: number): CatchUpTime => ({ at: t, seconds: true });
+
+const isTime = (v: unknown): v is CatchUpTime =>
+  typeof v === 'object' && v !== null && typeof (v as CatchUpTime).at === 'number' && typeof (v as CatchUpTime).seconds === 'boolean';
+
+/**
+ * A summary line from a template literal: each time (hhmm, hhmmss) kept as data, a line given inside
+ * another spliced into it, anything else as its text; neighbouring text joined into one string.
+ */
+export function line(strings: TemplateStringsArray, ...values: unknown[]): CatchUpLine {
+  const out: CatchUpLine = [];
+  const text = (s: string) => {
+    if (s === '') return;
+    const last = out.length - 1;
+    if (typeof out[last] === 'string') out[last] += s;
+    else out.push(s);
+  };
+  const part = (v: unknown) => (isTime(v) ? out.push(v) : text(String(v)));
+  strings.forEach((s, i) => {
+    text(s);
+    if (i >= values.length) return;
+    const v = values[i];
+    if (Array.isArray(v)) v.forEach(part);
+    else part(v);
+  });
+  return out;
+}
+
+/** A summary line as text, its times in UTC and saying so: "12:04 UTC", "12:04:50 UTC". */
+export function utcText(l: CatchUpLine): string {
+  return l.map((p) => (typeof p === 'string' ? p : `${new Date(p.at).toISOString().slice(11, p.seconds ? 19 : 16)} UTC`)).join('');
+}
 
 export const lower = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);

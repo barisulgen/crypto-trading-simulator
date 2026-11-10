@@ -8,7 +8,16 @@ export { deposit, emptyLedger, transfer } from './account/ledger.ts';
 export type { Ledger } from './account/ledger.ts';
 export { applyCatchUp, catchUpNeeds, ctxFor, SimEngine } from './sim.ts';
 export type { SimCtx, SimEvent } from './sim.ts';
-export type { Candle1m, CatchUpBasis, CatchUpEvent, CatchUpInput, CatchUpNeeds, CatchUpTag } from './catchup/types.ts';
+export type {
+  Candle1m,
+  CatchUpBasis,
+  CatchUpEvent,
+  CatchUpInput,
+  CatchUpLine,
+  CatchUpNeeds,
+  CatchUpTag,
+  CatchUpTime,
+} from './catchup/types.ts';
 export { floorMinute, MINUTE_MS } from './catchup/plan.ts';
 export * from './spot/state.ts';
 export * from './spot/engine.ts';

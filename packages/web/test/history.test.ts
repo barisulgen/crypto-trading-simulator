@@ -2,7 +2,7 @@ import { D } from '@sim/engine';
 import type { CatchUpBasis } from '@sim/engine';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { btcPerpRules } from '../../engine/test/perpFixtures.ts';
 import { noticesFor } from '../../server/src/notices.ts';
 import { LiquidationAlertView } from '../src/components/LiquidationAlert.tsx';
@@ -22,6 +22,7 @@ import {
   parseFilters,
 } from '../src/lib/history.ts';
 import type { EventView, HistoryFilters } from '../src/lib/history.ts';
+import { initialLiveData, reduce } from '../src/lib/live.ts';
 import { fmtDateTime } from '../src/lib/market.ts';
 
 /** Local time, as the owner's clock shows it. */
@@ -1230,5 +1231,69 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     };
     expect(Object.keys(BASIS_WHY).sort()).toEqual(Object.keys(all).sort());
     expect(bases.map(([b]) => b).sort()).toEqual(Object.keys(all).sort());
+  });
+});
+
+describe("catch-up times in the browser's time zone", () => {
+  // UTC+5:30: a time shown in it can never pass for the UTC one.
+  const zone = process.env.TZ;
+  beforeAll(() => {
+    process.env.TZ = 'Asia/Kolkata';
+  });
+  afterAll(() => {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  });
+  const U = (h: number, m: number, sec = 0) => Date.UTC(2026, 9, 24, h, m, sec);
+  const timed = [
+    ['Stop-loss filled 0.5 BTC at 58,800 (worst price of ', { at: U(12, 4), seconds: false }, '; estimated)'],
+    ['Cancel of limit buy arrived at ', { at: U(12, 4, 50), seconds: true }, ': order already filled (estimated)'],
+  ];
+  const actions = [
+    'Stop-loss filled 0.5 BTC at 58,800 (worst price of 12:04 UTC; estimated)',
+    'Cancel of limit buy arrived at 12:04:50 UTC: order already filled (estimated)',
+  ];
+  const summary = { type: 'catch_up', market: 'perp', symbol: 'BTCUSDT', time: U(12, 10), from: U(12, 0), to: U(12, 10), actions };
+  const row = (payload: unknown): HistoryRow => ({ id: 1, time: U(12, 10), type: 'catch_up', symbol: 'BTCUSDT', market: 'perp', payload });
+
+  it('the History row shows the gap and every time its lines name in local time', () => {
+    const v = describeEvent(row({ ...summary, lines: timed }));
+    expect(lines(v)).toEqual(['Gap start: 24 Oct 2026 17:30:00', 'Gap end: 24 Oct 2026 17:40:00', 'Gap length: 10m 00s']);
+    expect(v.list).toEqual({
+      label: 'Applied',
+      items: [
+        'Stop-loss filled 0.5 BTC at 58,800 (worst price of 17:34; estimated)',
+        'Cancel of limit buy arrived at 17:34:50: order already filled (estimated)',
+      ],
+    });
+  });
+
+  it("the toast reads the same local times, and each of its lines is the History row's", () => {
+    const msg = {
+      type: 'notice' as const,
+      kind: 'catch_up' as const,
+      level: 'warn' as const,
+      text: `Caught up BTCUSDT perp after the data gap 12:00–12:10 UTC: ${actions.join('; ')}`,
+      catchUp: { market: 'perp' as const, symbol: 'BTCUSDT', from: U(12, 0), to: U(12, 10), lines: timed },
+    };
+    const text = (reduce(initialLiveData(), msg, U(12, 10)).notices ?? [])[0]!.text;
+    expect(text).toBe(
+      'Caught up BTCUSDT perp after the data gap 17:30–17:40: ' +
+        'Stop-loss filled 0.5 BTC at 58,800 (worst price of 17:34; estimated); ' +
+        'Cancel of limit buy arrived at 17:34:50: order already filled (estimated)',
+    );
+    for (const item of describeEvent(row({ ...summary, lines: timed })).list!.items) expect(text).toContain(item);
+    const none = { ...msg, level: 'info' as const, catchUp: { ...msg.catchUp, market: 'spot' as const, lines: [] } };
+    expect((reduce(initialLiveData(), none, U(12, 10)).notices ?? [])[0]!.text).toBe(
+      'Caught up BTCUSDT after the data gap 17:30–17:40: nothing to apply',
+    );
+  });
+
+  it('a summary recorded before its times were kept as data shows its stored text unchanged', () => {
+    const v = describeEvent(row(summary));
+    expect(v.list).toEqual({ label: 'Applied', items: actions });
+    // And a notice without them (an older server) is shown as it was sent.
+    const msg = { type: 'notice' as const, kind: 'catch_up' as const, level: 'warn' as const, text: 'Caught up BTCUSDT 12:00–12:10 UTC' };
+    expect((reduce(initialLiveData(), msg, U(12, 10)).notices ?? [])[0]!.text).toBe(msg.text);
   });
 });

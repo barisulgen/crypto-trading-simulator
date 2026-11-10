@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import { deposit, emptyLedger } from '../src/account/ledger.ts';
+import { utcText } from '../src/catchup/plan.ts';
 import type { Candle1m, CatchUpInput } from '../src/catchup/types.ts';
 import { PerpEngine } from '../src/perp/engine.ts';
 import { emptyPerpState } from '../src/perp/state.ts';
@@ -187,6 +188,12 @@ describe('spot catch-up: stops from candles', () => {
       'Stop-loss filled 0.5 BTC at 58,800 (worst price of 12:04 UTC; estimated)',
       'Take-profit 0.5 BTC cancelled: the other order of its pair triggered (estimated)',
     ]);
+    // The same lines with their times as data, for a reader to show in its own time zone.
+    expect(summary(events).lines).toEqual([
+      ['Stop-loss filled 0.5 BTC at 58,800 (worst price of ', { at: T(12, 4), seconds: false }, '; estimated)'],
+      ['Take-profit 0.5 BTC cancelled: the other order of its pair triggered (estimated)'],
+    ]);
+    expect(summary(events).lines!.map(utcText)).toEqual(summary(events).actions);
     const fills = ofType(events, 'fill');
     expect(fills.map((e) => [e.order.id, s(e.fill.price), s(e.fill.qty)])).toEqual([[sl!.id, '58800', '0.5']]);
     const cancelled = ofType(events, 'order_cancelled');
@@ -344,6 +351,10 @@ describe('spot catch-up: limit orders from replayed trades', () => {
     expect(summary(events).actions).toEqual([
       'Limit buy filled 0.3 BTC at 60,000 (replayed trade at 12:05:10 UTC; estimated)',
       'Limit buy filled 0.7 BTC at 60,000 (replayed trade at 12:05:40 UTC; estimated)',
+    ]);
+    expect(summary(events).lines).toEqual([
+      ['Limit buy filled 0.3 BTC at 60,000 (replayed trade at ', { at: T(12, 5, 10), seconds: true }, '; estimated)'],
+      ['Limit buy filled 0.7 BTC at 60,000 (replayed trade at ', { at: T(12, 5, 40), seconds: true }, '; estimated)'],
     ]);
     expectTaggedInOrder(events);
   });

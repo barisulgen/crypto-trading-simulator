@@ -26,6 +26,7 @@ import {
   signOf,
   tickDecimals,
 } from './format.ts';
+import { catchUpLineText } from './catchUp.ts';
 import { addDec, cmpDec, fmtDateTime, fmtFundingPct, liqPriceAtTick, subDec } from './market.ts';
 import { fmtPnl } from './positions.ts';
 
@@ -707,7 +708,8 @@ function describeKnown(row: HistoryRow): EventView {
       );
     }
     case 'catch_up': {
-      // The summary of a catch-up run: the gap, and each action it applied in its own words.
+      // The summary of a catch-up run: the gap, and each action it applied in its own words, its
+      // times in local time; one recorded before its times were kept as data, as it was stored.
       const c = row.payload as Wire<CatchUpEvent>;
       const fields: Field[] = [
         { label: 'Gap start', value: fmtDateTime(c.from) },
@@ -715,7 +717,8 @@ function describeKnown(row: HistoryRow): EventView {
         { label: 'Gap length', value: fmtDuration(c.to - c.from) },
       ];
       if (c.actions.length === 0) return view('Caught up', 'accent', fields, { label: 'Applied', text: 'Nothing to apply' });
-      return view('Caught up', 'accent', fields, null, { label: 'Applied', items: [...c.actions] });
+      const items = c.lines ? c.lines.map(catchUpLineText) : [...c.actions];
+      return view('Caught up', 'accent', fields, null, { label: 'Applied', items });
     }
     default:
       return view(row.type, 'muted', [], { label: 'Data', text: rawJson(row.payload) });

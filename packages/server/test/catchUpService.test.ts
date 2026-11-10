@@ -173,6 +173,13 @@ describe('catch-up: spot', () => {
     const line = 'Stop-loss filled 0.5 BTC at 98.8 (worst price of 12:04 UTC; estimated)';
     expect(t.eventsOf('catch_up').map((e) => [e.symbol, e.payload.actions])).toEqual([[SYMBOL, [line]]]);
     expect(t.notices()).toContain(`Caught up BTCUSDT after the data gap 11:59–12:10 UTC: ${line}`);
+    // The times as data, in the event and in the notice, for the browser to show in local time.
+    const minute = { at: T + 4 * MIN, seconds: false };
+    const lines = [['Stop-loss filled 0.5 BTC at 98.8 (worst price of ', minute, '; estimated)']];
+    const summary = t.eventsOf('catch_up')[0]!.payload;
+    expect(summary.lines).toEqual(lines);
+    const notice = t.sent.find((m) => m.type === 'notice' && m.kind === 'catch_up')!;
+    expect(notice.catchUp).toEqual({ market: 'spot', symbol: SYMBOL, from: summary.from, to, lines });
     expect(t.notices().filter((n) => n.startsWith('Sold 0.5'))).toEqual([]); // the estimated fill reads only in the summary
     expect(t.fatal).toEqual([]);
   });

@@ -1,5 +1,16 @@
 import { D, Decimal, grouped } from '@sim/engine';
-import type { Fill, MarginWarning, Market, PerpEvent, PerpFill, PerpRules, PositionSide, SimEvent, SpotRules } from '@sim/engine';
+import type {
+  CatchUpLine,
+  Fill,
+  MarginWarning,
+  Market,
+  PerpEvent,
+  PerpFill,
+  PerpRules,
+  PositionSide,
+  SimEvent,
+  SpotRules,
+} from '@sim/engine';
 
 export interface Notice {
   kind:
@@ -19,6 +30,20 @@ export interface Notice {
   text: string;
   /** A liquidation notice's figures as data (exact decimal strings), for an alert that shows them. */
   liquidation?: LiquidationDetail;
+  /** A catch-up notice's market, gap and lines with their times as data, for a reader to show in its own time zone. */
+  catchUp?: CatchUpDetail;
+}
+
+/**
+ * What a catch-up summary says, with its times as data (ms): the market and symbol, the gap (from,
+ * to) and each line it applied (none when there was nothing to apply).
+ */
+export interface CatchUpDetail {
+  market: Market;
+  symbol: string;
+  from: number;
+  to: number;
+  lines: CatchUpLine[];
 }
 
 /**
@@ -195,14 +220,17 @@ export function marginWarningNotice(w: MarginWarning, rules: PerpRules | null): 
 
 /**
  * `Caught up BTCUSDT perp after the data gap 12:00–12:10 UTC: <action>; <action>`, or `...: nothing
- * to apply`. A warning when anything was applied.
+ * to apply`. A warning when anything was applied. The text, in UTC, is for logs and for any reader
+ * that does not format the times itself; `catchUp` carries the same with its times as data.
  */
 function catchUpNotice(e: Extract<SimEvent, { type: 'catch_up' }>): Notice {
   const name = e.market === 'spot' ? e.symbol : `${e.symbol} perp`;
   const at = (t: number) => new Date(t).toISOString().slice(11, 16);
   const head = `Caught up ${name} after the data gap ${at(e.from)}–${at(e.to)} UTC`;
   const text = e.actions.length > 0 ? `${head}: ${e.actions.join('; ')}` : `${head}: nothing to apply`;
-  return { kind: 'catch_up', level: e.actions.length > 0 ? 'warn' : 'info', text };
+  const notice: Notice = { kind: 'catch_up', level: e.actions.length > 0 ? 'warn' : 'info', text };
+  if (e.lines === undefined) return notice;
+  return { ...notice, catchUp: { market: e.market, symbol: e.symbol, from: e.from, to: e.to, lines: e.lines } };
 }
 
 /** A market whose live data was interrupted (with why) or restored. */

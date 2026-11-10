@@ -21,6 +21,7 @@ import type {
   WirePerpRules,
   WirePosition,
 } from './api.ts';
+import { catchUpNoticeText } from './catchUp.ts';
 import { setPerpRules, setRules } from './format.ts';
 import { CATCHING_UP_REASON } from './orderForm.ts';
 import { bannerEntries } from './positions.ts';
@@ -384,7 +385,9 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
       ) {
         return {};
       }
-      const n = { kind: msg.kind, level: msg.level, text: msg.text, ...(msg.liquidation ? { liquidation: msg.liquidation } : {}) };
+      // A catch-up summary's times read in local time when the server sent them as data.
+      const text = msg.catchUp ? catchUpNoticeText(msg.catchUp) : msg.text;
+      const n = { kind: msg.kind, level: msg.level, text, ...(msg.liquidation ? { liquidation: msg.liquidation } : {}) };
       const added = addNotice(s, n, now);
       // A liquidation is never folded, so the notice just added is the last one.
       const notices =

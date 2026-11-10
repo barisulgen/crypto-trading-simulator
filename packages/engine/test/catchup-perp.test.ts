@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { D } from '../src/decimal.ts';
 import type { Decimal } from '../src/decimal.ts';
 import { deposit, emptyLedger } from '../src/account/ledger.ts';
+import { utcText } from '../src/catchup/plan.ts';
 import type { Candle1m, CatchUpInput } from '../src/catchup/types.ts';
 import { PerpEngine } from '../src/perp/engine.ts';
 import { emptyPerpState } from '../src/perp/state.ts';
@@ -198,6 +199,16 @@ describe('perp catch-up: funding and mark-candle liquidation (long 0.1 @80000, m
       'Long 0.1 BTC liquidated at 76,353.31325301, its liquidation price, when the mark reached it at 09:13 UTC; ' +
         'margin lost 395.21 USDT (estimated)',
     ]);
+    // The same lines with their times as data, for a reader to show in its own time zone.
+    expect(summary(events).lines).toEqual([
+      ['Funding paid 0.79 USDT on 0.1 BTC long at ', { at: T(8, 0), seconds: false }, ' (settled rate 0.0001, mark 79,000)'],
+      [
+        'Long 0.1 BTC liquidated at 76,353.31325301, its liquidation price, when the mark reached it at ',
+        { at: T(9, 13), seconds: false },
+        '; margin lost 395.21 USDT (estimated)',
+      ],
+    ]);
+    expect(summary(events).lines!.map(utcText)).toEqual(summary(events).actions);
     expectTaggedInOrder(events);
   });
 
@@ -457,6 +468,9 @@ describe('perp catch-up: close-position stops from last-price candles', () => {
     expect(summary(events).actions).toEqual([
       'Stop-loss filled 0.1 BTC at 76,040, the bankruptcy price (worst price of 10:02 UTC was 70,000; estimated)',
     ]);
+    expect(summary(events).lines).toEqual([
+      ['Stop-loss filled 0.1 BTC at 76,040, the bankruptcy price (worst price of ', { at: T(10, 2), seconds: false }, ' was 70,000; estimated)'],
+    ]);
     expectTaggedInOrder(events);
   });
 
@@ -579,6 +593,7 @@ describe('perp catch-up: limit orders', () => {
     expect(summary(events).actions).toEqual([
       'Futures trade history covers only 2 days; open limit orders were cancelled',
     ]);
+    expect(summary(events).lines).toEqual([['Futures trade history covers only 2 days; open limit orders were cancelled']]);
     expectTaggedInOrder(events);
   });
 
