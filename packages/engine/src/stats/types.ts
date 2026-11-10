@@ -72,3 +72,41 @@ export interface TradeQuality {
   longestWinStreak: number;
   longestLossStreak: number;
 }
+
+/** What trading cost, in USDT, over a set of events. */
+export interface Costs {
+  makerFees: Decimal;
+  takerFees: Decimal;
+  liquidationFees: Decimal;
+  /** Positive. */
+  fundingPaid: Decimal;
+  fundingReceived: Decimal;
+  /** Received minus paid. */
+  fundingNet: Decimal;
+  /** Fill slippage plus the catch-up gap cost. */
+  slippage: Decimal;
+  /** The part of `slippage` that a stop or take-profit gapped through its trigger in a catch-up estimate. */
+  catchUpGapCost: Decimal;
+  /** Price drift between order arrival and fill; informational, not in `total`. */
+  drift: Decimal;
+  /** Fees, liquidation fees, slippage and funding paid on net (funding received does not reduce it). */
+  total: Decimal;
+  /** `total` over `preCost`; null when `preCost` is not above zero. */
+  share: Decimal | null;
+  /** Net P&L before costs: the net P&L plus `total`. */
+  preCost: Decimal;
+  /** Losses neither the margin nor free leverage USDT could cover. */
+  uncovered: Decimal;
+  /** Fills produced by a catch-up run. */
+  estimatedFills: number;
+}
+
+/** Liquidations and leverage over a range. */
+export interface Risk {
+  liquidations: number;
+  lostToLiquidations: Decimal;
+  liquidationFees: Decimal;
+  /** Mean leverage of the positions open in the range; null when there are none. */
+  avgLeverage: Decimal | null;
+  maxLeverage: number | null;
+}
