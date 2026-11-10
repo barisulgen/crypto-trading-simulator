@@ -19,7 +19,7 @@ function setup(opts: { usdt?: string; btc?: string } = {}) {
   const ctx = testCtx(market, { now: NOW });
   const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
   const usdt = D(opts.usdt ?? '1000');
-  if (usdt.gt(0)) deposit(engine.state.ledger, 'spot', usdt, ctx);
+  if (usdt.gt(0)) deposit(engine.state.ledger, 'spot', usdt, ctx, D('100'));
   seedCoins(engine.state, 'BTC', D(opts.btc ?? '2'));
   const bal = (asset: string) => engine.state.ledger.balances.spot[asset]!;
   const stored = (id: string) => engine.state.orders.get(id)!;

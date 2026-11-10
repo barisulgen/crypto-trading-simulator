@@ -70,7 +70,8 @@ export function credit(l: Ledger, wallet: Wallet, asset: string, amount: Decimal
   b.free = b.free.plus(amount);
 }
 
-export function deposit(l: Ledger, wallet: Wallet, amount: Decimal, ctx: { now: number }): ActionResult {
+/** `btcAsk` is the live BTC spot best ask at the moment of the deposit, recorded with it. */
+export function deposit(l: Ledger, wallet: Wallet, amount: Decimal, ctx: { now: number }, btcAsk: Decimal): ActionResult {
   if (!amount.isFinite() || !amount.gt(0)) return { ok: false, reason: 'Deposit must be greater than 0' };
   if (amount.decimalPlaces() > 2) return { ok: false, reason: 'Deposit has at most 2 decimals' };
   const b = balanceOf(l, wallet, 'USDT');
@@ -78,7 +79,7 @@ export function deposit(l: Ledger, wallet: Wallet, amount: Decimal, ctx: { now: 
   l.totalDeposited = l.totalDeposited.plus(amount);
   return {
     ok: true,
-    events: [{ type: 'deposit', time: ctx.now, wallet, amount, totalDeposited: l.totalDeposited }],
+    events: [{ type: 'deposit', time: ctx.now, wallet, amount, totalDeposited: l.totalDeposited, btcAsk }],
   };
 }
 

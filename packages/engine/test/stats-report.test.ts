@@ -218,8 +218,8 @@ function trip(
 }
 
 /** A BTC long: opened at `open` (taker fee 0.4), closed at `close` (taker fee 0.39) with trading P&L `pnl`. */
-function btcPerpTrade(id: string, open: number, close: number, pnl = '10'): SimEvent[] {
-  const p = position({ id, openedAt: open });
+function btcPerpTrade(id: string, open: number, close: number, pnl = '10', leverage = 10): SimEvent[] {
+  const p = position({ id, openedAt: open, leverage });
   return [
     opened(p),
     perpFill(id, open, { fee: D('0.4'), feeUsd: D('0.4') }),
@@ -329,7 +329,7 @@ describe('computeStats: filters', () => {
   it('range boundary: a trade opened before `from` and closed inside counts; only its closing fee is a cost', () => {
     const events = rows([
       deposit(T0, 'leverage', '1000', '1000'),
-      ...btcPerpTrade('p0', t(1), t(2)),
+      ...btcPerpTrade('p0', t(1), t(2), '10', 50),
       ...btcPerpTrade('p1', t(2), t(5)),
     ]);
     const r = computeStats(input({ events }), { ...ALL, from: t(3) });
@@ -337,7 +337,9 @@ describe('computeStats: filters', () => {
     expect(r.quality.best!.id).toBe('p1');
     expect(r.quality.best!.openedAt).toBe(t(2));
     expect(s(r.costs.takerFees)).toBe('0.39');
+    // p0 (50x) closed before `from`: only p1's 10x counts.
     expect(r.risk.maxLeverage).toBe(10);
+    expect(s(r.risk.avgLeverage)).toBe('10');
   });
 
   it('coin + market: BTCUSDT on leverage is only the perp BTC trade and its costs', () => {
@@ -667,8 +669,8 @@ describe('computeStats against the real engine', () => {
     };
 
     at(t(0));
-    ok(sim.deposit('spot', D(2000), ctx));
-    ok(sim.deposit('leverage', D(200), ctx));
+    ok(sim.deposit('spot', D(2000), ctx, D(80000)));
+    ok(sim.deposit('leverage', D(200), ctx, D(80000)));
 
     // SOL round trip: buy 10, sell 5 higher, sell all but dust lower; the dust stays held.
     at(t(1));
@@ -734,14 +736,10 @@ describe('computeStats against the real engine', () => {
     expect(s(whole.headline.netPnl)).toBe(s(acct.netPnl));
     expect(acct.netPnl.isZero()).toBe(false);
 
-    const coins = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
-    const sum = coins.reduce((acc, symbol) => acc.plus(computeStats(base, { ...ALL, symbol }).headline.netPnl), D(0));
+    const coin = (symbol: string) => computeStats(base, { ...ALL, symbol }).headline.netPnl;
+    // Each coin's own figure, so a stream counted under the wrong coin fails even when the sum holds.
+    expect([s(coin('BTCUSDT')), s(coin('ETHUSDT')), s(coin('SOLUSDT'))]).toEqual(['8.61495', '-150', '73.0271']);
+    const sum = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'].reduce((acc, symbol) => acc.plus(coin(symbol)), D(0));
     expect(s(sum.plus(whole.costs.uncovered))).toBe(s(acct.netPnl));
-
-    // The two markets of BTC add up to the coin.
-    const btc = computeStats(base, { ...ALL, symbol: 'BTCUSDT' }).headline.netPnl;
-    const btcPerp = computeStats(base, { ...ALL, symbol: 'BTCUSDT', market: 'leverage' }).headline.netPnl;
-    const btcSpot = computeStats(base, { ...ALL, symbol: 'BTCUSDT', market: 'spot' }).headline.netPnl;
-    expect(s(btcPerp.plus(btcSpot))).toBe(s(btc));
   });
 });

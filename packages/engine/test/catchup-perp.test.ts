@@ -46,7 +46,7 @@ function setup() {
   };
   const ledger = emptyLedger(['USDT', 'BTC']);
   const sim = new SimEngine(ledger, new SpotEngine(emptySpotState(ledger)), new PerpEngine(emptyPerpState(ledger)));
-  deposit(ledger, 'leverage', D('1000'), ctx);
+  deposit(ledger, 'leverage', D('1000'), ctx, D('100'));
   const lev = () => ledger.balances.leverage.USDT!;
   const stored = (id: string) => sim.perp.state.orders.get(id)!;
   const position = () => sim.perp.state.positions[SYMBOL];

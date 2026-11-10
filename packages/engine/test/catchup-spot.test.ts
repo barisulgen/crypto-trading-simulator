@@ -51,7 +51,7 @@ function setup(opts: { usdt?: string; btc?: string } = {}) {
   const ledger = emptyLedger(['USDT', 'BTC']);
   const sim = new SimEngine(ledger, new SpotEngine(emptySpotState(ledger)), new PerpEngine(emptyPerpState(ledger)));
   const usdt = D(opts.usdt ?? '100000');
-  if (usdt.gt(0)) deposit(ledger, 'spot', usdt, ctx);
+  if (usdt.gt(0)) deposit(ledger, 'spot', usdt, ctx, D('100'));
   seedCoins(sim.spot.state, 'BTC', D(opts.btc ?? '2'), D('60000'));
   const bal = (asset: string) => ledger.balances.spot[asset]!;
   const stored = (id: string) => sim.spot.state.orders.get(id)!;

@@ -96,7 +96,7 @@ function partialFillScenario() {
   const t = setup();
   const { engine, ctx, db, seasonId } = t;
   const events: EngineEvent[] = [];
-  events.push(...(deposit(engine.state.ledger, 'spot', D('1000'), ctx) as { events: EngineEvent[] }).events);
+  events.push(...(deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100')) as { events: EngineEvent[] }).events);
   const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
   events.push({ type: 'order_placed', time: ctx.now, order });
   events.push(...arrive(engine, order, ctx));
@@ -106,16 +106,16 @@ function partialFillScenario() {
 }
 
 describe('openDb', () => {
-  it('applies migrations once: user_version 5; a fresh database is not marked as test data', () => {
+  it('applies migrations once: user_version 6; a fresh database is not marked as test data', () => {
     const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(5);
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
     expect(db.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toBeUndefined();
     expect(currentSeasonId(db)).toBe(1);
     expect(currentSeasonId(db)).toBe(1);
     expect(db.prepare('SELECT name FROM seasons').all()).toEqual([{ name: 'Season 1' }]);
   });
 
-  it('a second open of the same file keeps version 5 and its data', async () => {
+  it('a second open of the same file keeps version 6 and its data', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -127,7 +127,7 @@ describe('openDb', () => {
       touchAlive(a, 123);
       a.close();
       const b = openDb(file);
-      expect(b.pragma('user_version', { simple: true })).toBe(5);
+      expect(b.pragma('user_version', { simple: true })).toBe(6);
       expect(b.prepare("SELECT value FROM meta WHERE key = 'test_data'").get()).toBeUndefined();
       expect(b.prepare("SELECT value FROM meta WHERE key = 'last_alive'").get()).toEqual({ value: '123' });
       touchAlive(b, 456);
@@ -138,7 +138,7 @@ describe('openDb', () => {
     }
   });
 
-  it('migrations 002 to 005 apply to a spot-only database (user_version 1): rows intact, test_data still set', async () => {
+  it('migrations 002 to 006 apply to a spot-only database (user_version 1): rows intact, test_data still set', async () => {
     const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -176,7 +176,7 @@ describe('openDb', () => {
       v1.close();
 
       db = openDb(file);
-      expect(db.pragma('user_version', { simple: true })).toBe(5);
+      expect(db.pragma('user_version', { simple: true })).toBe(6);
       // Every row as it was; meta gains only the liquidation alerts' marker (none recorded: 0).
       const [metaBefore, ...restBefore] = before;
       const [meta, ...rest] = dump(db);
@@ -229,7 +229,7 @@ describe('openDb', () => {
       v2.close();
 
       db = openDb(file);
-      expect(db.pragma('user_version', { simple: true })).toBe(5);
+      expect(db.pragma('user_version', { simple: true })).toBe(6);
       expect(db.prepare('SELECT * FROM trade_cursor ORDER BY season_id, symbol').all()).toEqual([
         { season_id: 1, market: 'spot', symbol: 'BTCUSDT', last_trade_id: 42 },
         { season_id: 1, market: 'spot', symbol: 'ETHUSDT', last_trade_id: 7 },
@@ -248,6 +248,54 @@ describe('openDb', () => {
       db.prepare("INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (1, 'perp', 'BTCUSDT', 5)").run();
       const state = loadSpotState(db, 1, loadLedger(db, 1, ASSETS));
       expect(state.lastTradeId).toEqual({ BTCUSDT: 42, ETHUSDT: 7 });
+    } finally {
+      db?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('migration 006 on a database at user_version 5 keeps every row; equity snapshots gain an empty BTC bid', async () => {
+    const { mkdtempSync, readdirSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { default: Database } = await import('better-sqlite3');
+    const dir = mkdtempSync(join(tmpdir(), 'sim-db-'));
+    const dump = (d: Db) => {
+      const tables = (d.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+      return Object.fromEntries(tables.map((t) => [t, d.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()]));
+    };
+    let db: Db | null = null;
+    try {
+      const file = join(dir, 'sim.sqlite');
+      const v5 = new Database(file);
+      const migrations = readdirSync(new URL('../src/db/migrations/', import.meta.url)).filter((m) => m < '006');
+      for (const m of migrations.sort()) v5.exec(readFileSync(new URL(`../src/db/migrations/${m}`, import.meta.url), 'utf8'));
+      v5.pragma('user_version = 5');
+      v5.exec(`
+        INSERT INTO meta (key, value) VALUES ('last_alive', '777');
+        INSERT INTO seasons (name, started_at) VALUES ('Season 1', 5);
+        INSERT INTO events (season_id, time, type, symbol, market, payload)
+          VALUES (1, 10, 'deposit', NULL, 'spot', '{"type":"deposit","time":10,"wallet":"spot","amount":"1000","totalDeposited":"1000"}');
+        INSERT INTO orders (id, season_id, symbol, market, status, created_at, updated_at, data)
+          VALUES ('o-1', 1, 'BTCUSDT', 'spot', 'open', 30, 30, '{"id":"o-1"}');
+        INSERT INTO balances (season_id, wallet, asset, free, locked) VALUES (1, 'spot', 'USDT', '900.5', '99.5');
+        INSERT INTO account (season_id, total_deposited) VALUES (1, '1000');
+        INSERT INTO trade_cursor (season_id, market, symbol, last_trade_id) VALUES (1, 'spot', 'BTCUSDT', 42);
+        INSERT INTO open_gaps (season_id, market, symbol, started_at, reason) VALUES (1, 'perp', 'ETHUSDT', 700, 'Disconnected');
+        INSERT INTO equity_snapshots (season_id, time, total, deposited, spot_value, leverage_value)
+          VALUES (1, 60000, '1000', '1000', '1000', '0'), (1, 120000, '1010.5', '1000', '1010.5', '0');
+      `);
+      const before = dump(v5 as unknown as Db);
+      v5.close();
+
+      db = openDb(file);
+      expect(db.pragma('user_version', { simple: true })).toBe(6);
+      const after = dump(db);
+      const { equity_snapshots: snapsBefore, ...restBefore } = before;
+      const { equity_snapshots: snaps, ...rest } = after;
+      expect(rest).toEqual(restBefore);
+      expect(snaps).toEqual((snapsBefore as Record<string, unknown>[]).map((r) => ({ ...r, btc_bid: null })));
+      expect(snaps).toHaveLength(2);
     } finally {
       db?.close();
       rmSync(dir, { recursive: true, force: true });
@@ -318,7 +366,7 @@ describe('persist and loadSpotState', () => {
 
   it('persist with no events still follows pending -> open', () => {
     const { engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
     persist(db, seasonId, simOf(engine), [{ type: 'order_placed', time: ctx.now, order }]);
     arrive(engine, order, ctx);
@@ -329,7 +377,7 @@ describe('persist and loadSpotState', () => {
 
   it('a cancel in flight is stored with the order and survives a reload; an older row without it loads as none', () => {
     const { engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
     arrive(engine, order, ctx);
     const other = placedOrder(engine.submit(limitBuy('99.40', '1'), ctx));
@@ -353,7 +401,7 @@ describe('persist and loadSpotState', () => {
 
   it('settleLateCancels answers the cancel of an order that finished while it was in flight, once, in one transaction', () => {
     const { engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     const filled = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
     arrive(engine, filled, ctx);
     const open = placedOrder(engine.submit(limitBuy('99.40', '1'), ctx));
@@ -395,7 +443,7 @@ describe('persist and loadSpotState', () => {
 
   it('terminal orders are stored but not loaded', () => {
     const { engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
     arrive(engine, order, ctx);
     persist(db, seasonId, simOf(engine), cancelNow(engine, order.id, ctx));
@@ -414,7 +462,7 @@ describe('persist and loadSpotState', () => {
 
   it('round trip: a deferred triggered order (arrivesAt null), an attached pair leg and lastTradeId survive', () => {
     const { market, engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     seedCoins(engine.state, 'BTC', D('2'));
     const events: EngineEvent[] = [];
     const stop = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'stop_loss', triggerPrice: '99', qty: '1' }, ctx));
@@ -483,7 +531,7 @@ describe('persist and loadSpotState', () => {
 
   it('a failure midway rolls back everything from that call', () => {
     const { engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     const depositEvent = { type: 'deposit', time: NOW, wallet: 'spot', amount: D('1000'), totalDeposited: D('1000') } as const;
     const dupFill = {
       type: 'fill',
@@ -665,17 +713,26 @@ describe('queryHistory', () => {
 });
 
 describe('equity snapshot and heartbeat', () => {
-  it('stores the account value as decimal strings', () => {
+  it('stores the account value as decimal strings, with the BTC bid when BTC spot was fresh and NULL when not', () => {
     const { db, seasonId } = setup();
     insertEquitySnapshot(
       db,
       seasonId,
       { total: D('1010.5'), totalDeposited: D('1000'), leverage: { value: D('10') } } as Parameters<typeof insertEquitySnapshot>[2],
       555,
+      D('67000.50'),
     );
-    expect(db.prepare('SELECT time, total, deposited, spot_value, leverage_value FROM equity_snapshots').get()).toEqual({
-      time: 555, total: '1010.5', deposited: '1000', spot_value: '1000.5', leverage_value: '10',
-    });
+    insertEquitySnapshot(
+      db,
+      seasonId,
+      { total: D('1010.5'), totalDeposited: D('1000'), leverage: { value: D('10') } } as Parameters<typeof insertEquitySnapshot>[2],
+      556,
+      null,
+    );
+    expect(db.prepare('SELECT time, total, deposited, spot_value, leverage_value, btc_bid FROM equity_snapshots ORDER BY time').all()).toEqual([
+      { time: 555, total: '1010.5', deposited: '1000', spot_value: '1000.5', leverage_value: '10', btc_bid: '67000.5' },
+      { time: 556, total: '1010.5', deposited: '1000', spot_value: '1000.5', leverage_value: '10', btc_bid: null },
+    ]);
   });
 });
 
@@ -718,7 +775,7 @@ describe('history cursor with time order different from id order', () => {
 describe('revived Decimals', () => {
   it('every Decimal field of a reloaded state is a Decimal instance', () => {
     const { engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     seedCoins(engine.state, 'BTC', D('2'));
     const buy = placedOrder(engine.submit(limitBuy('99.50', '1', { attach: { stopLoss: '95', takeProfit: '110' } }), ctx));
     const stop = placedOrder(engine.submit({ symbol: 'BTCUSDT', side: 'sell', type: 'stop_loss', triggerPrice: '99', qty: '0.5' }, ctx));
@@ -753,7 +810,7 @@ describe('revived Decimals', () => {
 
   it('an engine on the reloaded state cancels a reloaded open limit order and releases its lock', () => {
     const { engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
     arrive(engine, order, ctx);
     persist(db, seasonId, simOf(engine), []);
@@ -767,7 +824,7 @@ describe('revived Decimals', () => {
 
   it('a negative-zero Decimal is stored as "0" in order data and event payloads', () => {
     const { engine, ctx, db, seasonId } = setup();
-    deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+    deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
     const order = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
     const negZero = { ...order, filledQty: D('-0') };
     persist(db, seasonId, simOf(engine), [{ type: 'order_placed', time: ctx.now, order: negZero }]);
@@ -818,7 +875,7 @@ describe('persist writes what changed', () => {
   function twoResting() {
     const t = setup();
     const { engine, ctx, db, seasonId } = t;
-    const events: EngineEvent[] = [...(deposit(engine.state.ledger, 'spot', D('1000'), ctx) as { events: EngineEvent[] }).events];
+    const events: EngineEvent[] = [...(deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100')) as { events: EngineEvent[] }).events];
     const a = placedOrder(engine.submit(limitBuy('99.50', '1'), ctx));
     const b = placedOrder(engine.submit(limitBuy('99.00', '1'), ctx));
     events.push(...arrive(engine, a, ctx), ...arrive(engine, b, ctx));
@@ -990,7 +1047,7 @@ function perpScenario() {
   const t = perpSetup();
   const { ctx, sim, perp, db, seasonId } = t;
   const events: SimEvent[] = [];
-  const dep = sim.deposit('leverage', D('5000'), ctx);
+  const dep = sim.deposit('leverage', D('5000'), ctx, D('100'));
   if (!dep.ok) throw new Error(dep.reason);
   events.push(...dep.events);
   const lev = perp.setLeverage('BTCUSDT', 10, ctx);
@@ -1050,7 +1107,7 @@ describe('perps: persist and loadPerpState', () => {
 
   it('a resting order with one attached leg round-trips with the other leg null', () => {
     const { ctx, sim, perp, db, seasonId } = perpSetup();
-    sim.deposit('leverage', D('5000'), ctx);
+    sim.deposit('leverage', D('5000'), ctx, D('100'));
     const placed = perp.submit(perpLimit('buy', '79000', '0.05', { attach: { stopLoss: '77000' } }), ctx);
     const events = [...placed, ...perpArrive(perp, perpPlaced(placed), ctx)];
     persist(db, seasonId, sim, events);
@@ -1180,7 +1237,7 @@ describe('perps: persist and loadPerpState', () => {
 
   it('a failed write keeps the perp orders marked and the next persist writes them with the position', () => {
     const { ctx, sim, perp, db, seasonId } = perpSetup();
-    sim.deposit('leverage', D('5000'), ctx);
+    sim.deposit('leverage', D('5000'), ctx, D('100'));
     const open = perp.submit(perpMarketOrder('buy', '0.1'), ctx);
     const events = [...open, ...perpArrive(perp, perpPlaced(open), ctx)];
     db.exec("CREATE TEMP TRIGGER no_positions BEFORE INSERT ON positions BEGIN SELECT RAISE(ABORT, 'no'); END");
@@ -1231,7 +1288,7 @@ describe('perps: a perp state that was never loaded', () => {
     const ledger = loadLedger(first, seasonId, ASSETS);
     const sim = new SimEngine(ledger, new SpotEngine(loadSpotState(first, seasonId, ledger)), new PerpEngine(loadPerpState(first, seasonId, ledger)));
     const ctx = perpCtx(new FakePerpMarket(), { now: NOW });
-    sim.deposit('leverage', D('1000'), ctx);
+    sim.deposit('leverage', D('1000'), ctx, D('100'));
     const open = sim.perp.submit(perpMarketOrder('buy', '0.1'), ctx);
     persist(first, seasonId, sim, [...open, ...perpArrive(sim.perp, perpPlaced(open), ctx)]);
     first.close();
@@ -1277,7 +1334,7 @@ describe('perps: a perp state that was never loaded', () => {
 
   it('a database with no perp rows needs no load: a new season persists from an empty perp state', () => {
     const { ctx, sim, db, seasonId } = perpSetup();
-    sim.deposit('leverage', D('100'), ctx);
+    sim.deposit('leverage', D('100'), ctx, D('100'));
     expect(() => persist(db, seasonId, sim, [])).not.toThrow();
   });
 });
@@ -1309,7 +1366,7 @@ describe('fills and recent orders by market', () => {
   it('perp fills carry market, position id and uncovered; a capped close keeps bankruptcyCapped in its event', () => {
     const { ctx, sim, perp, db, seasonId } = perpSetup();
     const events: SimEvent[] = [];
-    const dep = sim.deposit('leverage', D('5000'), ctx);
+    const dep = sim.deposit('leverage', D('5000'), ctx, D('100'));
     if (!dep.ok) throw new Error(dep.reason);
     events.push(...dep.events);
     const open = perp.submit(perpMarketOrder('buy', '0.1'), ctx);

@@ -644,6 +644,96 @@ describe('EngineRunner', () => {
     expect(snaps()).toHaveLength(1);
   });
 
+  it('a deposit records the BTC spot best ask; while BTCUSDT spot is stale it is refused and nothing is recorded', () => {
+    const t = setup();
+    t.runner.start();
+    t.market.setBook('BTCUSDT', {
+      asks: [{ price: D('67012.34'), qty: D('1') }, { price: D('67020'), qty: D('1') }],
+      bids: [{ price: D('67000.5'), qty: D('1') }],
+    });
+    const deposits = () => t.db.prepare("SELECT payload FROM events WHERE type = 'deposit'").all() as { payload: string }[];
+
+    t.market.setFresh('BTCUSDT', false);
+    expect(() => t.runner.deposit('spot', D('1000'))).toThrow(
+      new RefusedError('Deposits wait for a live BTC price (the benchmark buys BTC with each deposit)'),
+    );
+    expect(deposits()).toEqual([]);
+    expect(t.sim.ledger.totalDeposited.toString()).toBe('0');
+    expect(t.sim.ledger.balances.spot.USDT!.free.toString()).toBe('0');
+
+    t.market.setFresh('BTCUSDT', true);
+    expect(t.runner.deposit('spot', D('1000')).ok).toBe(true);
+    expect(deposits().map((r) => JSON.parse(r.payload))).toEqual([
+      { type: 'deposit', time: T0, wallet: 'spot', amount: '1000', totalDeposited: '1000', btcAsk: '67012.34' },
+    ]);
+  });
+
+  it('a deposit right after a sleep handles the pause first, so the BTC book from before it is not read as live', () => {
+    const t = setup();
+    t.runner.start();
+    t.clock.advance(1000);
+    t.clock.now += 28_800_000; // asleep: no timer runs
+    let stallsAtRead: number[] | null = null;
+    const best = t.market.best.bind(t.market);
+    t.market.best = (symbol, side) => {
+      stallsAtRead ??= [...t.health.stalls];
+      return best(symbol, side);
+    };
+    expect(t.runner.deposit('spot', D('1000')).ok).toBe(true);
+    expect(stallsAtRead).toEqual([T0 + 1000 + 28_800_000]);
+  });
+
+  it('a deposit is refused while BTCUSDT spot is fresh but its book has no ask', () => {
+    const t = setup();
+    t.runner.start();
+    t.market.setBook('BTCUSDT', { asks: [], bids: [{ price: D('99.9'), qty: D('1') }] });
+    expect(() => t.runner.deposit('spot', D('1000'))).toThrow(
+      new RefusedError('Deposits wait for a live BTC price (the benchmark buys BTC with each deposit)'),
+    );
+    expect(t.db.prepare("SELECT count(*) AS n FROM events WHERE type = 'deposit'").get()).toEqual({ n: 0 });
+  });
+
+  it('an equity snapshot stores the BTC spot best bid while BTCUSDT spot is fresh, and NULL while it is stale', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000')); // no coin held: a stale BTC book prices nothing in the account
+    const snaps = () => t.db.prepare('SELECT time, btc_bid FROM equity_snapshots ORDER BY time').all();
+    t.clock.advance(60_000);
+    expect(snaps()).toEqual([{ time: T0 + 60_000, btc_bid: '99.9' }]);
+    // Stale after the last poll and before the snapshot that runs first in the same ms: no gap is open yet.
+    t.clock.advance(59_999);
+    t.market.setFresh('BTCUSDT', false);
+    t.clock.advance(1);
+    expect(snaps()).toEqual([
+      { time: T0 + 60_000, btc_bid: '99.9' },
+      { time: T0 + 120_000, btc_bid: null },
+    ]);
+  });
+
+  it('a deposit or transfer in the same ms as an equity snapshot taken before it is in that snapshot', () => {
+    const t = setup();
+    t.runner.start();
+    const snaps = () =>
+      t.db.prepare('SELECT time, total, deposited, spot_value, leverage_value FROM equity_snapshots ORDER BY time').all();
+    t.clock.advance(60_000); // the snapshot runs at T0 + 60 s, before the deposit below
+    expect(snaps()).toEqual([{ time: T0 + 60_000, total: '0', deposited: '0', spot_value: '0', leverage_value: '0' }]);
+    t.runner.deposit('spot', D('1000'));
+    expect(snaps()).toEqual([{ time: T0 + 60_000, total: '1000', deposited: '1000', spot_value: '1000', leverage_value: '0' }]);
+
+    t.clock.advance(60_000);
+    t.runner.transfer('spot', 'leverage', D('400'));
+    expect(snaps()).toEqual([
+      { time: T0 + 60_000, total: '1000', deposited: '1000', spot_value: '1000', leverage_value: '0' },
+      { time: T0 + 120_000, total: '1000', deposited: '1000', spot_value: '600', leverage_value: '400' },
+    ]);
+
+    // A deposit in a later ms leaves the earlier snapshot as it was.
+    t.clock.advance(1);
+    t.runner.deposit('spot', D('5'));
+    expect(snaps()).toHaveLength(2);
+    expect(snaps().at(-1)).toMatchObject({ time: T0 + 120_000, total: '1000' });
+  });
+
   it('no equity snapshot while any gap is open or any key catches up: the account may still change once it is caught up', async () => {
     const t = setup();
     t.runner.start();

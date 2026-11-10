@@ -1,12 +1,18 @@
 import { D } from '@sim/engine';
 import type { Decimal } from '@sim/engine';
+import { DEPOSIT_BTC_REFUSAL } from '../../src/runner.ts';
 import { waitFor } from './harness.ts';
 import type { ServerProcess } from './harness.ts';
 
 /** Owner actions through the HTTP API, as the web app sends them. */
 
+/** Sent again while the server refuses it for want of live BTC spot data (it has not arrived yet). */
 export async function deposit(server: ServerProcess, wallet: 'spot' | 'leverage', amount: string): Promise<void> {
-  await server.ok('/api/deposit', { wallet, amount });
+  const r = await waitFor('live BTC spot data for a deposit', async () => {
+    const res = await server.post<{ error?: string }>('/api/deposit', { wallet, amount });
+    return res.status === 503 && res.body.error === DEPOSIT_BTC_REFUSAL ? undefined : res;
+  });
+  if (r.status !== 200) throw new Error(`POST /api/deposit: ${r.status} ${JSON.stringify(r.body)}`);
 }
 
 export async function position(server: ServerProcess, symbol: string): Promise<any | null> {

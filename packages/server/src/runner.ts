@@ -60,6 +60,7 @@ import type { Db } from './db/db.ts';
 import {
   acknowledgeLiquidations,
   checkInvariants,
+  deleteEquitySnapshots,
   extendJob,
   insertEquitySnapshot,
   lastAlive,
@@ -96,6 +97,9 @@ export const MARGIN_STALE_REFUSAL = 'Live data interrupted; margin changes resum
  */
 export const GAP_NOT_APPLIED_REFUSAL = 'Live data just came back; trading resumes once the data gap is applied';
 const STOPPED_REFUSAL = 'Server stopped after an internal error; see server log';
+export const DEPOSIT_BTC_REFUSAL = 'Deposits wait for a live BTC price (the benchmark buys BTC with each deposit)';
+/** The coin each deposit is compared against: as if it had bought this at its spot best ask. */
+const BENCHMARK_SYMBOL = 'BTCUSDT';
 
 const HEALTH_POLL_MS = 1000;
 /** A health poll this long after the previous one means the process was paused (sleep, freeze) in between. */
@@ -312,6 +316,8 @@ export class EngineRunner implements FundingSim {
   private lastSettingsKey = '';
   /** When the trade cursor was last saved. */
   private cursorSavedAt: number;
+  /** When the last equity snapshot was taken; null before the first, or once it was dropped. */
+  private snapshotAt: number | null = null;
   /** The feed notices waiting to go out as one (see feedNotice); null when none waits. */
   private feedBatch: { kind: 'feed_gap' | 'feed_restored'; entries: FeedNoticeEntry[] } | null = null;
   /** Routine notices that came while a feed notice waited for its window: sent right after it, in order. */
@@ -393,9 +399,17 @@ export class EngineRunner implements FundingSim {
 
   // ---- actions (each persisted before it returns) ----
 
+  /**
+   * Records the BTC spot best ask with the deposit; refused while BTC spot data is not fresh (or
+   * has no ask), so that every deposit has the price the benchmark buys BTC at.
+   */
   deposit(wallet: Wallet, amount: Decimal): ActionResult {
     this.refuseTrading();
-    return this.apply((ctx) => this.d.sim.deposit(wallet, amount, ctx));
+    this.checkStall(this.d.now());
+    const market = this.d.spotMarket;
+    const btcAsk = market.isFresh(BENCHMARK_SYMBOL) ? market.best(BENCHMARK_SYMBOL, 'buy') : null;
+    if (btcAsk === null) throw new RefusedError(DEPOSIT_BTC_REFUSAL);
+    return this.inSnapshotMs(() => this.apply((ctx) => this.d.sim.deposit(wallet, amount, ctx, btcAsk)));
   }
 
   /**
@@ -414,7 +428,21 @@ export class EngineRunner implements FundingSim {
         if (this.gate(key) !== 'live') throw new RefusedError(LEVERAGE_TRANSFER_STALE_REFUSAL);
       }
     }
-    return this.apply((ctx) => this.d.sim.transfer(from, to, amount, ctx));
+    return this.inSnapshotMs(() => this.apply((ctx) => this.d.sim.transfer(from, to, amount, ctx)));
+  }
+
+  /**
+   * Runs a deposit or transfer. The stats read a snapshot's capital from every deposit and transfer
+   * up to its time, the same millisecond included, so a snapshot already taken in this millisecond
+   * (valued without the change) is dropped first and taken again after it.
+   */
+  private inSnapshotMs(change: () => ActionResult): ActionResult {
+    if (this.snapshotAt !== this.d.now()) return change();
+    deleteEquitySnapshots(this.d.db, this.d.seasonId, this.snapshotAt);
+    this.snapshotAt = null;
+    const result = change();
+    this.snapshotEquity();
+    return result;
   }
 
   submit(req: SpotOrderRequest): EngineEvent[] {
@@ -1428,14 +1456,19 @@ export class EngineRunner implements FundingSim {
   /**
    * Every minute while data is fresh; skipped when any held coin's price or position's mark is stale
    * or missing, when it is the first to run after a pause (the books are from before it), and while
-   * any gap is open or any key catches up (its catch-up may still change the account).
+   * any gap is open or any key catches up (its catch-up may still change the account). Kept with
+   * the BTC spot best bid while BTC spot data is fresh, else without one.
    */
   private snapshotEquity(): void {
     if (this.checkStall(this.d.now())) return;
     if (this.gaps.any() || this.catchUp.keys().length > 0) return;
     const value = this.value();
     if (value.coins.some((c) => !c.fresh) || value.leverage.positions.some((p) => !p.markFresh)) return;
-    insertEquitySnapshot(this.d.db, this.d.seasonId, value, this.d.now());
+    const market = this.d.spotMarket;
+    const btcBid = market.isFresh(BENCHMARK_SYMBOL) ? market.best(BENCHMARK_SYMBOL, 'sell') : null;
+    const now = this.d.now();
+    insertEquitySnapshot(this.d.db, this.d.seasonId, value, now, btcBid);
+    this.snapshotAt = now;
   }
 
   /**

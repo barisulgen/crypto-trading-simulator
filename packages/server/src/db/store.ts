@@ -978,12 +978,26 @@ export function acknowledgeLiquidations(db: Db, seasonId: number, id: number): b
 
 // ---- equity, heartbeat ----
 
-export function insertEquitySnapshot(db: Db, seasonId: number, v: AccountValue, now: number): void {
+/** The account value at `now`, with the BTC spot best bid (null when BTC spot data was not fresh). */
+export function insertEquitySnapshot(db: Db, seasonId: number, v: AccountValue, now: number, btcBid: Decimal | null): void {
   const leverageValue = v.leverage.value;
   const spotValue = v.total.minus(leverageValue);
   db.prepare(
-    'INSERT INTO equity_snapshots (season_id, time, total, deposited, spot_value, leverage_value) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(seasonId, now, v.total.toString(), v.totalDeposited.toString(), spotValue.toString(), leverageValue.toString());
+    'INSERT INTO equity_snapshots (season_id, time, total, deposited, spot_value, leverage_value, btc_bid) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(
+    seasonId,
+    now,
+    v.total.toString(),
+    v.totalDeposited.toString(),
+    spotValue.toString(),
+    leverageValue.toString(),
+    btcBid === null ? null : btcBid.toString(),
+  );
+}
+
+/** Removes the season's equity snapshots taken at `time`. */
+export function deleteEquitySnapshots(db: Db, seasonId: number, time: number): void {
+  db.prepare('DELETE FROM equity_snapshots WHERE season_id = ? AND time = ?').run(seasonId, time);
 }
 
 export function touchAlive(db: Db, now: number): void {
