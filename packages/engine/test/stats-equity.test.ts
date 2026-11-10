@@ -262,10 +262,11 @@ describe('account P&L series and drawdown', () => {
 });
 
 describe('wallet P&L series', () => {
-  // The deposit and the transfer out land together, so the spot wallet never holds 1000 at a moment.
+  // The deposit lands before the transfer out, so the spot wallet holds 1000 for a moment: its
+  // return divides by that highest capital, not by the 900 it holds at the end.
   const events = rows([
     deposit(t(0), 'spot', '1000', '1000'),
-    transfer(t(0), 'spot', 'leverage', '400'),
+    transfer(t(0) + 1, 'spot', 'leverage', '400'),
     transfer(t(3) - 1, 'leverage', 'spot', '300'),
   ]);
   const snapshots = [
@@ -302,9 +303,8 @@ describe('wallet P&L series', () => {
 
     const spot = rangePnl(pnlSeries(input, SPOT, null, null), events, SPOT, null, null);
     expect(spot.pnl.toString()).toBe('50');
-    expect(spot.capitalMax.toString()).toBe('900');
-    expect(spot.returnPct?.toFixed(4)).toBe('0.0556');
-    expect(spot.returnPct?.toString().startsWith('0.0555')).toBe(true);
+    expect(spot.capitalMax.toString()).toBe('1000');
+    expect(spot.returnPct?.toString()).toBe('0.05');
 
     const account = rangePnl(pnlSeries(input, ACCOUNT, null, null), events, ACCOUNT, null, null);
     expect(account.pnl.toString()).toBe('-30');
