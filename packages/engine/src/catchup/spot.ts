@@ -308,7 +308,7 @@ class SpotCatchUp {
     const base = this.rules.base;
     switch (e.type) {
       case 'fill': {
-        const what = `${label(e.order)} filled ${e.fill.qty} ${base} at ${grouped(e.fill.price)}`;
+        const what = `${label(e.order)} filled ${grouped(e.fill.qty)} ${base} at ${grouped(e.fill.price)}`;
         if (basis === 'aggtrade_replay') return line`${what} (replayed trade at ${hhmmss(e.time)}; estimated)`;
         if (basis === 'trigger_minute_worst_price') {
           return line`${what} (worst price of ${hhmm(minute)}, its trigger minute; estimated)`;
@@ -321,7 +321,7 @@ class SpotCatchUp {
         if (e.order.parentId !== null && e.order.type === 'take_profit') return null;
         return line`${label(e.order)} rejected at ${hhmmss(e.time)} (estimated): ${e.reason}`;
       case 'order_cancelled': {
-        const what = `${label(e.order)} ${e.cancelledQty} ${base}`;
+        const what = `${label(e.order)} ${grouped(e.cancelledQty)} ${base}`;
         if (e.reason === 'oco') return line`${what} cancelled: the other order of its pair triggered (estimated)`;
         if (e.reason === 'user') return line`Cancel of ${lower(what)} took effect at ${hhmmss(e.time)} (estimated)`;
         return line`${what} cancelled at ${hhmmss(e.time)} (${e.reason}; estimated)`;
@@ -335,7 +335,7 @@ class SpotCatchUp {
         const parent = e.order.parentId === null ? undefined : this.s.orders.get(e.order.parentId);
         const tp = parent?.attach ? ` / take-profit ${grouped(parent.attach.takeProfit)}` : '';
         const pair = `Attached stop-loss ${grouped(String(e.order.triggerPrice))}${tp}`;
-        return line`${pair} placed for ${e.order.qty} ${base} at ${hhmmss(e.time)} (estimated)`;
+        return line`${pair} placed for ${grouped(String(e.order.qty))} ${base} at ${hhmmss(e.time)} (estimated)`;
       }
       default:
         return null;

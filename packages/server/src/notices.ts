@@ -127,7 +127,7 @@ export function noticesFor(events: SimEvent[], lookup: NoticeLookup): Notice[] {
           out.push({
             kind: 'thin_book',
             level: 'warn',
-            text: `Book too thin: ${e.cancelledQty} ${baseOf(e.order.symbol, rules)} not filled and cancelled`,
+            text: `Book too thin: ${grouped(e.cancelledQty)} ${baseOf(e.order.symbol, rules)} not filled and cancelled`,
           });
         }
         break;
@@ -165,7 +165,7 @@ function liquidationNotice(e: LiquidationFigures, tick: number | null, eventId: 
     kind: 'liquidation',
     level: 'error',
     text:
-      `LIQUIDATED: ${e.symbol} ${p.side} ${p.qty} at mark ${atTick(e.markPrice, tick)}` +
+      `LIQUIDATED: ${e.symbol} ${p.side} ${grouped(p.qty)} at mark ${atTick(e.markPrice, tick)}` +
       ` — margin lost $${usdUp(e.marginLost)} (fee $${usdUp(e.liquidationFee)})${caught}`,
     liquidation: {
       ...(eventId !== undefined ? { eventId } : {}),
@@ -285,13 +285,13 @@ function marketsText(entries: FeedNoticeEntry[]): string {
 
 /**
  * `Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC` (price at tick decimals + 2, half
- * up; slippage rounded up; both grouped by thousands).
+ * up; slippage rounded up; the quantity and fee exact; every figure grouped by thousands).
  */
 function fillText(f: Fill, rules: SpotRules | null): string {
   const verb = f.side === 'buy' ? 'Bought' : 'Sold';
   const price = grouped(rules ? f.price.toFixed(rules.tickSize.decimalPlaces() + 2, Decimal.ROUND_HALF_UP) : f.price);
   const slippage = usdUp(f.slippageUsd);
-  return `${verb} ${f.qty} ${baseOf(f.symbol, rules)} @ ${price} · slippage $${slippage} · fee ${f.fee} ${f.feeAsset}`;
+  return `${verb} ${grouped(f.qty)} ${baseOf(f.symbol, rules)} @ ${price} · slippage $${slippage} · fee ${grouped(f.fee)} ${f.feeAsset}`;
 }
 
 /**
@@ -308,7 +308,7 @@ function perpFillText(f: PerpFill, events: SimEvent[], lookup: NoticeLookup): st
   const named = (type: 'position_opened' | 'position_closed') =>
     events.some((e) => isPerp(e) && e.type === type && e.position.id === f.positionId);
   const verb = opening ? (named('position_opened') ? 'Opened' : 'Increased') : named('position_closed') ? 'Closed' : 'Reduced';
-  const parts = [`${verb} ${side} ${f.qty} ${baseOf(f.symbol, rules)} @ ${atTick(f.price, tick)}`, `fee $${usdUp(f.fee)}`];
+  const parts = [`${verb} ${side} ${grouped(f.qty)} ${baseOf(f.symbol, rules)} @ ${atTick(f.price, tick)}`, `fee $${usdUp(f.fee)}`];
   if (!opening && f.realizedPnl !== null) parts.push(`P&L ${signedUsd(f.realizedPnl)}`);
   const liq = lookup.liquidationPrice(f.symbol);
   if (liq !== null && verb !== 'Closed') parts.push(`liq ${liqText(liq, side, tick)}`);

@@ -188,7 +188,7 @@ describe('history rows', () => {
       'Side: Buy',
       'Type: Limit',
       'Price: 78,000.00',
-      'Amount: 0.00020 BTC',
+      'Amount: 0.0002 BTC',
       'Attached: SL 70,000.00 / TP 90,000.50',
     ]);
     expect(tone(v, 'Side')).toBe('up');
@@ -227,7 +227,7 @@ describe('history rows', () => {
       'Side: Buy',
       'Type: Limit',
       'Price: 78,000.00',
-      'Amount: 0.00020 BTC',
+      'Amount: 0.0002 BTC',
       'Cancelled: by you',
       'Cancelled qty: 0.00015 BTC',
     ]);
@@ -249,7 +249,7 @@ describe('history rows', () => {
     expect(v.label).toBe('Cancel failed');
     expect(v.tone).toBe('down');
     expect(v.coin).toBe('BTC');
-    expect(lines(v)).toEqual(['Side: Buy', 'Type: Limit', 'Price: 78,000.00', 'Amount: 0.00020 BTC']);
+    expect(lines(v)).toEqual(['Side: Buy', 'Type: Limit', 'Price: 78,000.00', 'Amount: 0.0002 BTC']);
     expect(v.note).toEqual({ label: 'Reason', text: reason });
     expect(EVENT_TYPES.find((t) => t.type === 'cancel_rejected')?.label).toBe('Cancels failed');
     expect(parseFilters(new URLSearchParams('types=cancel_rejected,order_cancelled')).types).toEqual([
@@ -270,7 +270,7 @@ describe('history rows', () => {
     );
     expect(v.label).toBe('Order rejected');
     expect(v.tone).toBe('down');
-    expect(lines(v)).toEqual(['Side: Buy', 'Type: Post-only', 'Price: 81,400.00', 'Amount: 0.00020 BTC']);
+    expect(lines(v)).toEqual(['Side: Buy', 'Type: Post-only', 'Price: 81,400.00', 'Amount: 0.0002 BTC']);
     expect(v.note).toEqual({ label: 'Reason', text: reason });
 
     const expired = describeEvent(
@@ -651,7 +651,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       'Type: Limit, reduce-only',
       // As sent: never rounded onto the tick.
       'Price: 79,000.15',
-      'Amount: 0.100 BTC',
+      'Amount: 0.1 BTC',
       'Leverage: 20x',
       'Attached: SL 75,000.0',
     ]);
@@ -680,7 +680,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       perp('order_cancelled', { order: order({ type: 'limit', price: '79000', status: 'cancelled' }), reason: 'liquidation', cancelledQty: '0.05' }),
     );
     expect(lines(limit)).toContain('Cancelled: liquidation');
-    expect(lines(limit)).toContain('Cancelled qty: 0.050 BTC');
+    expect(lines(limit)).toContain('Cancelled qty: 0.05 BTC');
     const tp = describeEvent(
       perp('order_cancelled', {
         order: order({ side: 'sell', type: 'take_profit', qty: null, triggerPrice: '90000', closePosition: true, status: 'cancelled' }),
@@ -704,7 +704,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     expect(lines(v)).toEqual([
       'Side: Buy',
       'Type: Market',
-      'Qty: 0.100 BTC',
+      'Qty: 0.1 BTC',
       'Price: 80,000.000',
       'Best at the time: 80,000.0',
       'Slippage: $0.00',
@@ -788,7 +788,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     expect(v.coin).toBe('BTC');
     expect(lines(v)).toEqual([
       'Side: Long',
-      'Size: 0.100 BTC',
+      'Size: 0.1 BTC',
       'Leverage: 20x',
       'Margin mode: Isolated',
       'Entry price: 80,000.000',
@@ -913,7 +913,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     const v = funding();
     expect(v.label).toBe('Funding paid');
     expect(lines(v)).toEqual([
-      'Position: Long 0.100 BTC',
+      'Position: Long 0.1 BTC',
       'Rate: 0.0100%',
       'Mark price: 80,000.0',
       'Funding time: 18 Oct 2026 09:00:00',
@@ -954,7 +954,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
     expect(v.label).toBe('Liquidation');
     expect(v.tone).toBe('down');
     expect(lines(v)).toEqual([
-      'Position: Long 0.100 BTC',
+      'Position: Long 0.1 BTC',
       'Leverage: 20x',
       'Entry price: 80,000.000',
       'Mark price: 76,345.4',

@@ -2,7 +2,7 @@
 import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import type { LiquidationDetail } from '../lib/api.ts';
-import { fmtCost, fmtPrice, fmtQty } from '../lib/format.ts';
+import { fmtCost, fmtExact, fmtPrice } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
 import type { Notice } from '../lib/live.ts';
 import { Button } from './ui.tsx';
@@ -43,7 +43,7 @@ export function LiquidationAlertView({
       {detail ? (
         <dl className="flex flex-col gap-1.5 rounded-ctl border border-down/40 bg-down-soft px-3 py-2.5 text-sm">
           <Figure label="Coin">{`${base} perpetual`}</Figure>
-          <Figure label="Size">{`${fmtQty(detail.symbol, detail.qty, { market: 'perp' })} ${base} ${detail.side}`}</Figure>
+          <Figure label="Size">{`${fmtExact(detail.qty)} ${base} ${detail.side}`}</Figure>
           <Figure label="Mark price">{`${fmtPrice(detail.symbol, detail.markPrice, { market: 'perp' })} USDT`}</Figure>
           <Figure label="Margin lost">
             <span className="font-semibold">{fmtCost(detail.marginLost)}</span>

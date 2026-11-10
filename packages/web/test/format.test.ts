@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { grouped } from '@sim/engine';
-import { driftSign, fmtAvgPrice, fmtBalance, fmtCost, fmtProceeds, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
+import { driftSign, fmtAvgPrice, fmtExact, fmtBalance, fmtCost, fmtProceeds, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
 
 describe('tickDecimals', () => {
   it('counts the significant decimals of a tick or step size', () => {
@@ -17,6 +17,16 @@ describe("the server's grouping (notice texts) matches the screens'", () => {
     for (const [v, dp] of [['73596.0', 1], ['1234567.8912', 4], ['-1234.57', 2], ['999.99', 2], ['1000', 0], ['0.0012', 4]] as const) {
       expect(grouped(v)).toBe(fmtNum(v, dp));
     }
+  });
+});
+
+describe('fmtExact', () => {
+  it('groups a value by thousands exactly as it is: never rounded, never padded', () => {
+    expect(fmtExact('1234.5')).toBe('1,234.5');
+    expect(fmtExact('1500000')).toBe('1,500,000');
+    expect(fmtExact('0.00012345')).toBe('0.00012345');
+    expect(fmtExact('-1234.567891234')).toBe('-1,234.567891234');
+    expect(fmtExact(null)).toBe('-');
   });
 });
 

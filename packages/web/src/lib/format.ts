@@ -70,6 +70,18 @@ export function fmtNum(value: string, dp: number, opts: { group?: boolean } = {}
   return `${r.sign < 0 ? '-' : ''}${int}${dp > 0 ? '.' + r.frac : ''}`;
 }
 
+/**
+ * A decimal string exactly as it is, grouped by thousands: '1234.5' -> '1,234.5'. Nothing is
+ * rounded or padded, as the notices write coin quantities and fees, so the two read the same.
+ */
+export function fmtExact(value: Value): string {
+  if (value === null || value === undefined) return DASH;
+  const p = parse(value);
+  if (!p) return value;
+  const int = group(p.int.replace(/^0+(?=\d)/, ''));
+  return `${p.negative ? '-' : ''}${int}${p.frac === '' ? '' : `.${p.frac}`}`;
+}
+
 /** -1, 0 or 1: the sign of the value as shown with `dp` decimals (all decimals if omitted). */
 export function signOf(value: Value, dp?: number): -1 | 0 | 1 {
   if (value === null || value === undefined) return 0;

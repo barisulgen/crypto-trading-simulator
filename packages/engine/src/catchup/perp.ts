@@ -504,7 +504,7 @@ class PerpCatchUp {
     const base = this.base;
     switch (e.type) {
       case 'fill': {
-        const what = `${label(e.order)} filled ${e.fill.qty} ${base} at ${grouped(e.fill.price)}`;
+        const what = `${label(e.order)} filled ${grouped(e.fill.qty)} ${base} at ${grouped(e.fill.price)}`;
         if (basis === 'aggtrade_replay') return line`${what} (replayed trade at ${hhmmss(e.time)}; estimated)`;
         const of = basis === 'trigger_minute_worst_price' ? line`${hhmm(minute)}, its trigger minute` : line`${hhmm(minute)}`;
         const uncapped = e.fill.uncappedPrice;
@@ -518,7 +518,7 @@ class PerpCatchUp {
       }
       case 'funding': {
         const settled = `settled rate ${e.rate}, mark ${grouped(e.markPrice)}`;
-        const on = line`on ${e.qty} ${base} ${e.side} at ${hhmm(e.fundingTime)} (${settled})`;
+        const on = line`on ${grouped(e.qty)} ${base} ${e.side} at ${hhmm(e.fundingTime)} (${settled})`;
         const unpaid = e.uncollected ? `; ${grouped(e.uncollected)} USDT could not be collected` : '';
         return e.amount.isNegative()
           ? line`Funding paid ${grouped(e.amount.neg())} USDT ${on}${unpaid}`
@@ -526,7 +526,7 @@ class PerpCatchUp {
       }
       case 'liquidation': {
         const p = e.position;
-        const who = `${p.side === 'long' ? 'Long' : 'Short'} ${p.qty} ${base}`;
+        const who = `${p.side === 'long' ? 'Long' : 'Short'} ${grouped(p.qty)} ${base}`;
         const when = line`its liquidation price, when the mark reached it at ${hhmm(minute)}`;
         return line`${who} liquidated at ${grouped(e.markPrice)}, ${when}; margin lost ${grouped(e.marginLost)} USDT (estimated)`;
       }
@@ -539,7 +539,7 @@ class PerpCatchUp {
         return line`${label(e.order)} rejected at ${hhmmss(e.time)} (estimated): ${e.reason}`;
       case 'order_cancelled': {
         if (e.reason === 'catch_up_unavailable') return null;
-        const what = e.order.closePosition ? label(e.order) : `${label(e.order)} ${e.cancelledQty} ${base}`;
+        const what = e.order.closePosition ? label(e.order) : `${label(e.order)} ${grouped(e.cancelledQty)} ${base}`;
         if (e.reason === 'oco') return line`${what} cancelled: the other order of its pair triggered (estimated)`;
         if (e.reason === 'user') return line`Cancel of ${lower(what)} took effect at ${hhmmss(e.time)} (estimated)`;
         return line`${what} cancelled at ${hhmmss(e.time)} (${e.reason}; estimated)`;

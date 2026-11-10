@@ -14,11 +14,11 @@ import type { HistoryQuery, HistoryRow, Wire, WireFill, WireOrder, WirePerpOrder
 import {
   ORDER_TYPE_LABEL,
   driftSign,
+  fmtExact,
   fmtAvgPrice,
   fmtCost,
   fmtDrift,
   fmtPrice,
-  fmtQty,
   fmtNum,
   fmtUsd,
   fmtUsdFloor,
@@ -288,7 +288,7 @@ function orderFields(o: WireOrder): Field[] {
         : { label: 'Trigger', value: fmtPrice(o.symbol, o.triggerPrice, EXACT) };
   const amount =
     o.qty !== null
-      ? `${fmtQty(o.symbol, o.qty, EXACT)} ${baseOf(o.symbol)}`
+      ? `${fmtExact(o.qty)} ${baseOf(o.symbol)}`
       : o.quoteQty !== null
         ? fmtUsd(o.quoteQty, EXACT)
         : '-';
@@ -322,7 +322,7 @@ function perpOrderFields(o: WirePerpOrder): Field[] {
         : { label: 'Trigger', value: fmtPrice(o.symbol, o.triggerPrice, PERP_EXACT) };
   const amount =
     o.qty !== null
-      ? `${fmtQty(o.symbol, o.qty, PERP_EXACT)} ${baseOf(o.symbol)}`
+      ? `${fmtExact(o.qty)} ${baseOf(o.symbol)}`
       : o.quoteQty !== null
         ? fmtUsd(o.quoteQty, EXACT)
         : o.closePosition
@@ -344,12 +344,12 @@ function perpOrderFields(o: WirePerpOrder): Field[] {
 }
 
 function fillFields(f: WireFill, o: WireOrder): Field[] {
-  const fee = f.feeAsset === 'USDT' ? `${f.fee} USDT` : `${f.fee} ${f.feeAsset} ~${fmtCost(f.feeUsd)}`;
+  const fee = f.feeAsset === 'USDT' ? `${fmtExact(f.fee)} USDT` : `${fmtExact(f.fee)} ${f.feeAsset} ~${fmtCost(f.feeUsd)}`;
   const drift = driftSign(f.driftUsd);
   const fields: Field[] = [
     sideField(f.side),
     { label: 'Type', value: typeLabel(o.type) },
-    { label: 'Qty', value: `${fmtQty(f.symbol, f.qty)} ${baseOf(f.symbol)}` },
+    { label: 'Qty', value: `${fmtExact(f.qty)} ${baseOf(f.symbol)}` },
     { label: 'Price', value: fmtAvgPrice(f.symbol, f.price) },
     { label: 'Best at the time', value: fmtPrice(f.symbol, f.bestAtArrival) },
     // An unsigned cost (always >= 0), as in the preview and the fill notices.
@@ -376,13 +376,13 @@ function perpFillFields(f: PerpFillWire, o: WirePerpOrder): Field[] {
   const fields: Field[] = [
     sideField(f.side),
     { label: 'Type', value: typeLabel(o.type) },
-    { label: 'Qty', value: `${fmtQty(f.symbol, f.qty, PERP)} ${baseOf(f.symbol)}` },
+    { label: 'Qty', value: `${fmtExact(f.qty)} ${baseOf(f.symbol)}` },
     { label: 'Price', value: fmtAvgPrice(f.symbol, f.price, PERP) },
     { label: 'Best at the time', value: fmtPrice(f.symbol, f.bestAtArrival, PERP) },
     { label: 'Slippage', value: fmtCost(f.slippageUsd), tone: signOf(f.slippageUsd) === 0 ? 'muted' : undefined },
     { label: 'Delay drift', value: fmtDrift(f.driftUsd), tone: drift > 0 ? 'down' : drift < 0 ? 'up' : 'muted' },
     { label: 'Role', value: f.liquidity === 'maker' ? 'Maker' : 'Taker' },
-    { label: 'Fee', value: `${f.fee} ${f.feeAsset}` },
+    { label: 'Fee', value: `${fmtExact(f.fee)} ${f.feeAsset}` },
   ];
   // Money paid in, before the opening fee is taken from it: rounded up.
   if (f.marginIn !== null) fields.push({ label: 'Margin in (before fee)', value: fmtCost(f.marginIn) });
@@ -409,7 +409,7 @@ function cappedNote(
   if (!c.bankruptcyCapped) return null;
   const feeCut =
     fee !== null
-      ? `the fee was cut to the ${fee} USDT the margin had left`
+      ? `the fee was cut to the ${fmtExact(fee)} USDT the margin had left`
       : `the ${verb === 'closed' ? 'closing ' : ''}fee was cut to what the margin had left`;
   if (c.uncappedPrice === undefined || cmpDec(c.uncappedPrice, price) === 0) {
     return { label: 'Capped', text: `Held to the position margin: ${feeCut}` };
@@ -444,7 +444,7 @@ function liquidationParts(p: { marginLost: string; liquidationFee: string; remai
 
 /** 'Long 0.100 BTC': a position's side and size. */
 const positionText = (p: { symbol: string; side: 'long' | 'short'; qty: string }) =>
-  `${SIDE_WORD[p.side]} ${fmtQty(p.symbol, p.qty, PERP)} ${baseOf(p.symbol)}`;
+  `${SIDE_WORD[p.side]} ${fmtExact(p.qty)} ${baseOf(p.symbol)}`;
 
 const entryField = (p: PerpPosition): Field => ({ label: 'Entry price', value: fmtAvgPrice(p.symbol, p.entryPrice, PERP) });
 
@@ -556,7 +556,7 @@ function describeKnown(row: HistoryRow): EventView {
       ];
       // A close-position order has no quantity of its own: its amount already reads 'Whole position'.
       if (!(perp && (o as WirePerpOrder).closePosition)) {
-        fields.push({ label: 'Cancelled qty', value: `${fmtQty(o.symbol, p.cancelledQty, perp ? PERP : {})} ${baseOf(o.symbol)}` });
+        fields.push({ label: 'Cancelled qty', value: `${fmtExact(p.cancelledQty)} ${baseOf(o.symbol)}` });
       }
       return view('Order cancelled', 'muted', fields);
     }
@@ -617,7 +617,7 @@ function describeKnown(row: HistoryRow): EventView {
       const p = (row.payload as PerpPayload<'position_opened'>).position;
       return view('Position opened', 'plain', [
         positionSideField(p.side),
-        { label: 'Size', value: `${fmtQty(p.symbol, p.qty, PERP)} ${baseOf(p.symbol)}` },
+        { label: 'Size', value: `${fmtExact(p.qty)} ${baseOf(p.symbol)}` },
         { label: 'Leverage', value: `${p.leverage}x` },
         { label: 'Margin mode', value: 'Isolated' },
         entryField(p),
