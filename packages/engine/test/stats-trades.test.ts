@@ -60,7 +60,7 @@ function perpFill(positionId: string, time: number, over: Partial<PerpFill> = {}
   return { type: 'fill', market: 'perp', time, fill, order: {} as never };
 }
 
-function funding(positionId: string, time: number, amount: string): PerpEvent {
+function funding(positionId: string, time: number, amount: string, target: 'margin' | 'wallet' = 'margin'): PerpEvent {
   return {
     type: 'funding',
     market: 'perp',
@@ -73,7 +73,7 @@ function funding(positionId: string, time: number, amount: string): PerpEvent {
     qty: D('0.01'),
     side: 'long',
     amount: D(amount),
-    target: 'margin',
+    target,
     uncollected: null,
   };
 }
@@ -172,7 +172,7 @@ describe('buildTrades: perp', () => {
       { time: T0, event: opened(p) },
       { time: T0 + 3000, event: funding('p1', T0 + 3000, '-0.063') },
       { time: T0 + 4000, event: closed(p, T0 + 4000, '0', '0.857') },
-      { time: T0 + 14000, event: { ...funding('p1', T0 + 14000, '-0.01'), target: 'wallet' } },
+      { time: T0 + 14000, event: funding('p1', T0 + 14000, '-0.01', 'wallet') },
     ]);
     const { trades } = buildTrades(list);
     expect(trades).toHaveLength(1);
