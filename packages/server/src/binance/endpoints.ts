@@ -69,6 +69,23 @@ export function parseEndpoints(env: Record<string, string | undefined>): Binance
   return out;
 }
 
+/** Whether a host name is this computer: localhost, 127.0.0.0/8 or ::1. */
+function isLoopback(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+}
+
+/**
+ * The signed leverage-bracket request carries the API key to the futures REST address: with a key
+ * set, that address must be https, or plain http only on this computer. Refused by setting name,
+ * never by value.
+ */
+export function assertKeyTransport(e: Pick<BinanceEndpoints, 'futuresRest'>, keySet: boolean): void {
+  if (!keySet) return;
+  const url = new URL(e.futuresRest);
+  if (url.protocol === 'https:' || isLoopback(url.hostname)) return;
+  throw new Error(`${ENDPOINT_ENV.futuresRest} must be an https:// address (or http:// on this computer) while BINANCE_KEY is set`);
+}
+
 /** The endpoints that differ from live Binance, by setting name. */
 export function overriddenEndpoints(e: BinanceEndpoints): string[] {
   return (Object.keys(DEFAULT_ENDPOINTS) as (keyof BinanceEndpoints)[])

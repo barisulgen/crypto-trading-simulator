@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { D } from '@sim/engine';
 import type { FeeSchedule } from '@sim/engine';
-import { parseEndpoints } from './binance/endpoints.ts';
+import { assertKeyTransport, parseEndpoints } from './binance/endpoints.ts';
 import type { BinanceEndpoints } from './binance/endpoints.ts';
 
 export interface Config {
@@ -86,6 +86,7 @@ export function loadConfig(
     health: { silentMs: 15000, lagMs: 5000, noUpdateMs: 120000 },
     binance: parseEndpoints(merged),
   } as Config;
+  assertKeyTransport(config.binance, !!merged.BINANCE_KEY);
   Object.defineProperty(config, 'secrets', { value: secrets, enumerable: false });
   Object.defineProperty(config, 'appPassword', { value: appPassword, enumerable: false });
   const binanceCredentials =
