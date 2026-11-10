@@ -529,11 +529,14 @@ function describeKnown(row: HistoryRow): EventView {
   switch (row.type) {
     case 'deposit': {
       const p = row.payload as Payload<'deposit'>;
-      return view('Deposit', 'plain', [
+      const fields: Field[] = [
         { label: 'Amount', value: fmtUsd(p.amount) },
         { label: 'Wallet', value: WALLET[p.wallet] ?? p.wallet },
         { label: 'Total deposited', value: fmtUsd(p.totalDeposited) },
-      ]);
+      ];
+      // Deposits recorded before the BTC ask was kept have none.
+      if (p.btcAsk !== undefined) fields.push({ label: 'BTC ask at deposit', value: fmtPrice('BTCUSDT', p.btcAsk, EXACT) });
+      return view('Deposit', 'plain', fields);
     }
     case 'transfer': {
       const p = row.payload as Payload<'transfer'>;
