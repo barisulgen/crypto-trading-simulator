@@ -43,17 +43,17 @@ function spotFill(time: number, symbol: string, side: 'buy' | 'sell', realizedPn
     orderId: 'o1',
     symbol,
     side,
-    qty: D(1),
-    price: D(100),
-    quote: D(100),
+    qty: D('1'),
+    price: D('100'),
+    quote: D('100'),
     liquidity: 'taker',
     feeAsset: 'USDT',
     fee: D('0.1'),
     feeUsd: D('0.1'),
     bestAtArrival: null,
     bestAtSubmit: null,
-    slippageUsd: D(0),
-    driftUsd: D(0),
+    slippageUsd: D('0'),
+    driftUsd: D('0'),
     triggerPrice: null,
     realizedPnl: realizedPnl === null ? null : D(realizedPnl),
     roundTripId: 'rt1',
@@ -68,17 +68,17 @@ function perpFill(time: number, symbol: string, fee: string, realizedPnl: string
     orderId: 'o2',
     symbol,
     side: 'buy',
-    qty: D(1),
-    price: D(100),
-    quote: D(100),
+    qty: D('1'),
+    price: D('100'),
+    quote: D('100'),
     liquidity: 'taker',
     feeAsset: 'USDT',
     fee: D(fee),
     feeUsd: D(fee),
     bestAtArrival: null,
     bestAtSubmit: null,
-    slippageUsd: D(0),
-    driftUsd: D(0),
+    slippageUsd: D('0'),
+    driftUsd: D('0'),
     triggerPrice: null,
     realizedPnl: realizedPnl === null ? null : D(realizedPnl),
     time,
@@ -99,8 +99,8 @@ function funding(time: number, symbol: string, amount: string): PerpEvent {
     positionId: 'p1',
     fundingTime: time,
     rate: D('0.0001'),
-    markPrice: D(100),
-    qty: D(1),
+    markPrice: D('100'),
+    qty: D('1'),
     side: 'long',
     amount: D(amount),
     target: 'margin',
@@ -113,14 +113,14 @@ function liquidation(time: number, symbol: string, tradingLoss: string, remainde
     id: 'p1',
     symbol,
     side: 'long',
-    qty: D(1),
-    entryPrice: D(100),
+    qty: D('1'),
+    entryPrice: D('100'),
     leverage: 10,
-    margin: D(10),
+    margin: D('10'),
     openedAt: time - MIN,
-    realizedPnl: D(0),
-    fees: D(0),
-    funding: D(0),
+    realizedPnl: D('0'),
+    fees: D('0'),
+    funding: D('0'),
     warnLevel: 0,
   };
   return {
@@ -129,7 +129,7 @@ function liquidation(time: number, symbol: string, tradingLoss: string, remainde
     time,
     symbol,
     position,
-    markPrice: D(90),
+    markPrice: D('90'),
     marginLost: D(tradingLoss).plus(remainder).plus(fee),
     tradingLoss: D(tradingLoss),
     liquidationFee: D(fee),
@@ -157,8 +157,10 @@ describe('account P&L series and drawdown', () => {
 
   it('deposits cannot hide a drawdown', () => {
     const series = pnlSeries(input, ACCOUNT, null, null);
-    expect(series.map((p) => p.pnl.toString())).toEqual(['0', '250', '0', '-100', '400', '280']);
-    expect(series.map((p) => p.value.toString())).toEqual(['1000', '1250', '1000', '1900', '2400', '2280']);
+    // The series opens with a zero origin at the first deposit, valued at what was deposited.
+    expect(series.map((p) => p.time)).toEqual([t(0), ...snapshots.map((s) => s.time)]);
+    expect(series.map((p) => p.pnl.toString())).toEqual(['0', '0', '250', '0', '-100', '400', '280']);
+    expect(series.map((p) => p.value.toString())).toEqual(['1000', '1000', '1250', '1000', '1900', '2400', '2280']);
 
     const dd = drawdown(series);
     expect(dd.maxUsd.toString()).toBe('350');
@@ -170,8 +172,9 @@ describe('account P&L series and drawdown', () => {
     // A drawdown measured on the value would be 250 (1250 → 1000) and 20 %: the P&L one is deeper.
     expect(dd.maxUsd.toString()).not.toBe('250');
     expect(dd.maxPct?.toString()).not.toBe('0.2');
-    expect(dd.underwater.map((u) => u.usd.toString())).toEqual(['0', '0', '-250', '-350', '0', '-120']);
-    expect(dd.underwater.map((u) => u.time)).toEqual(snapshots.map((s) => s.time));
+    expect(dd.underwater.map((u) => u.usd.toString())).toEqual(['0', '0', '0', '-250', '-350', '0', '-120']);
+    expect(dd.underwater.map((u) => u.time)).toEqual([t(0), ...snapshots.map((s) => s.time)]);
+    expect(dd.underwater.some((u) => u.usd.isNeg() && u.usd.isZero())).toBe(false);
 
     const r = rangePnl(series, events, ACCOUNT, null, null);
     expect(r.pnl.toString()).toBe('280');
@@ -211,23 +214,44 @@ describe('account P&L series and drawdown', () => {
     expect(rangePnl(series, events, ACCOUNT, t(2) + 1, t(5) - 1).pnl.toString()).toBe('-350');
   });
 
-  it('a range before the first snapshot starts from a zero point at its start', () => {
+  it('a range before the first snapshot starts from a zero point at its start, valued at the capital', () => {
     const series = pnlSeries(input, ACCOUNT, t(0), t(2));
     expect(str(series)).toEqual([
-      { time: t(0), pnl: '0', value: '0' },
+      { time: t(0), pnl: '0', value: '1000' },
       { time: t(1), pnl: '0', value: '1000' },
       { time: t(2), pnl: '250', value: '1250' },
     ]);
   });
 
   it('appends the live point after the last snapshot, and only when the range reaches it', () => {
-    const live = { time: t(7), pnl: D(300), value: D(2300) };
+    const live = { time: t(7), pnl: D('300'), value: D('2300') };
     const open = pnlSeries({ ...input, live }, ACCOUNT, null, null);
     expect(str(open).at(-1)).toEqual({ time: t(7), pnl: '300', value: '2300' });
-    expect(open).toHaveLength(7);
+    expect(open).toHaveLength(8);
 
-    expect(pnlSeries({ ...input, live }, ACCOUNT, null, t(6))).toHaveLength(6);
-    expect(pnlSeries({ ...input, live }, ACCOUNT, null, t(7))).toHaveLength(7);
+    expect(pnlSeries({ ...input, live }, ACCOUNT, null, t(6))).toHaveLength(7);
+    expect(pnlSeries({ ...input, live }, ACCOUNT, null, t(7))).toHaveLength(8);
+  });
+
+  it('keeps a live point at the same time as the last snapshot', () => {
+    const live = { time: t(6), pnl: D('290'), value: D('2290') };
+    const series = pnlSeries({ ...input, live }, ACCOUNT, null, null);
+    expect(series).toHaveLength(8);
+    expect(str(series.slice(-2))).toEqual([
+      { time: t(6), pnl: '280', value: '2280' },
+      { time: t(6), pnl: '290', value: '2290' },
+    ]);
+  });
+
+  it('starts from zero when the first snapshot is already below the deposit', () => {
+    const evs = rows([deposit(t(0), 'spot', '1000', '1000')]);
+    const snaps = [snap(t(1), '950', '1000'), snap(t(2), '970', '1000')];
+    const series = pnlSeries({ events: evs, snapshots: snaps, live: null }, ACCOUNT, null, null);
+    expect(series.map((p) => p.pnl.toString())).toEqual(['0', '-50', '-30']);
+    expect(rangePnl(series, evs, ACCOUNT, null, null).pnl.toString()).toBe('-30');
+    const dd = drawdown(series);
+    expect(dd.maxUsd.toString()).toBe('50');
+    expect(dd.maxPct?.toString()).toBe('0.05');
   });
 
   it('a dip under 1 % of the value at its peak shows underwater but is not a period', () => {
@@ -239,11 +263,39 @@ describe('account P&L series and drawdown', () => {
       snap(t(4), '990', '1000'),
     ];
     const dd = drawdown(pnlSeries({ events: evs, snapshots: snaps, live: null }, ACCOUNT, null, null));
-    expect(dd.underwater.map((u) => u.usd.toString())).toEqual(['0', '-5', '0', '-10']);
+    expect(dd.underwater.map((u) => u.usd.toString())).toEqual(['0', '0', '-5', '0', '-10']);
     // 5 is 0.5 % of 1000: not shaded. 10 is exactly 1 %: shaded.
     expect(dd.periods).toHaveLength(1);
     expect(dd.periods[0]).toMatchObject({ start: t(3), trough: t(4), end: null });
     expect(dd.periods[0]?.depthPct?.toString()).toBe('0.01');
+  });
+
+  it('a point back at the peak becomes the peak the next dip is measured from', () => {
+    const series = [
+      { time: t(1), pnl: D('0'), value: D('1000') },
+      { time: t(2), pnl: D('-50'), value: D('950') },
+      { time: t(3), pnl: D('0'), value: D('2000') },
+      { time: t(4), pnl: D('-40'), value: D('1960') },
+    ];
+    const dd = drawdown(series);
+    expect(dd.periods.map((p) => ({ ...p, depthUsd: p.depthUsd.toString(), depthPct: p.depthPct?.toString() }))).toEqual([
+      { start: t(1), trough: t(2), end: t(3), depthUsd: '50', depthPct: '0.05' },
+      { start: t(3), trough: t(4), end: null, depthUsd: '40', depthPct: '0.02' },
+    ]);
+    expect(dd.underwater.map((u) => u.usd.toString())).toEqual(['0', '-50', '0', '-40']);
+  });
+
+  it('keeps any dip when the value at its peak is not above zero, with no percent', () => {
+    const series = [
+      { time: t(1), pnl: D('0'), value: D('0') },
+      { time: t(2), pnl: D('-5'), value: D('-5') },
+    ];
+    const dd = drawdown(series);
+    expect(dd.periods).toHaveLength(1);
+    expect(dd.periods[0]).toMatchObject({ start: t(1), trough: t(2), end: null, depthPct: null });
+    expect(dd.periods[0]?.depthUsd.toString()).toBe('5');
+    expect(dd.maxUsd.toString()).toBe('5');
+    expect(dd.maxPct).toBeNull();
   });
 
   it('is empty with no snapshots and no events', () => {
@@ -284,11 +336,19 @@ describe('wallet P&L series', () => {
     const spot = pnlSeries(input, SPOT, null, null);
     const lev = pnlSeries(input, LEVERAGE, null, null);
     const account = pnlSeries(input, ACCOUNT, null, null);
-    expect(spot.map((p) => p.pnl.toString())).toEqual(['0', '40', '50']);
-    expect(lev.map((p) => p.pnl.toString())).toEqual(['0', '-70', '-80']);
-    expect(lev.map((p) => p.value.toString())).toEqual(['400', '330', '20']);
-    expect(account.map((p) => p.pnl.toString())).toEqual(['0', '-30', '-30']);
-    spot.forEach((p, i) => expect(p.pnl.plus(lev[i]!.pnl).toString()).toBe(account[i]!.pnl.toString()));
+    // Each opens with a zero origin at its first capital event: spot at the deposit, leverage at the
+    // transfer in.
+    expect(str(spot.slice(0, 1))).toEqual([{ time: t(0), pnl: '0', value: '1000' }]);
+    expect(str(lev.slice(0, 1))).toEqual([{ time: t(0) + 1, pnl: '0', value: '400' }]);
+    expect(str(account.slice(0, 1))).toEqual([{ time: t(0), pnl: '0', value: '1000' }]);
+    expect(spot.map((p) => p.pnl.toString())).toEqual(['0', '0', '40', '50']);
+    expect(lev.map((p) => p.pnl.toString())).toEqual(['0', '0', '-70', '-80']);
+    expect(lev.map((p) => p.value.toString())).toEqual(['400', '400', '330', '20']);
+    expect(account.map((p) => p.pnl.toString())).toEqual(['0', '0', '-30', '-30']);
+    // At every snapshot the wallets add up to the account.
+    spot.slice(1).forEach((p, i) => {
+      expect(p.pnl.plus(lev[i + 1]!.pnl).toString()).toBe(account[i + 1]!.pnl.toString());
+    });
 
     const dd = drawdown(lev);
     expect(dd.maxUsd.toString()).toBe('80');
@@ -364,13 +424,13 @@ describe('coin P&L series', () => {
 
     const series = pnlSeries({ events, snapshots, live: null }, scope, t(1), null);
     expect(str(series)).toEqual([
-      { time: t(1), pnl: '0', value: '0' },
+      { time: t(1), pnl: '0', value: '1000' },
       { time: t(3), pnl: '48.95', value: '1048.95' },
       { time: t(4), pnl: '72.87705', value: '1072.87705' },
     ]);
 
     // Dust 0.01 SOL left at a bid of 105 with a remaining cost of 1.001.
-    const unrealised = D('0.01').mul(105).minus('1.001');
+    const unrealised = D('0.01').mul('105').minus('1.001');
     const live = { time: t(5), pnl: D('72.87705').plus(unrealised), value: D('1072.92605') };
     const withLive = pnlSeries({ events, snapshots, live }, scope, t(1), null);
     expect(withLive.map((p) => p.pnl.toString())).toEqual(['0', '48.95', '72.87705', '72.92605']);
@@ -390,6 +450,7 @@ describe('coin P&L series', () => {
 
     const both = pnlSeries(input, { kind: 'coin', symbol: 'SOLUSDT', market: null }, null, null);
     expect(str(both)).toEqual([
+      { time: t(0), pnl: '0', value: '500' },
       { time: t(1), pnl: '-0.3', value: '499.7' },
       { time: t(2), pnl: '-0.4', value: '499.6' },
       { time: t(3), pnl: '9.3', value: '509.3' },
@@ -398,12 +459,44 @@ describe('coin P&L series', () => {
     ]);
 
     const perp = pnlSeries(input, { kind: 'coin', symbol: 'SOLUSDT', market: 'perp' }, null, null);
-    expect(perp.map((p) => p.pnl.toString())).toEqual(['-0.3', '-0.4', '9.3', '2.8']);
+    expect(perp.map((p) => p.pnl.toString())).toEqual(['0', '-0.3', '-0.4', '9.3', '2.8']);
 
     const spot = pnlSeries(input, { kind: 'coin', symbol: 'SOLUSDT', market: 'spot' }, null, null);
-    expect(spot.map((p) => p.pnl.toString())).toEqual(['2']);
+    expect(spot.map((p) => p.pnl.toString())).toEqual(['0', '2']);
 
     expect(capitalAt(events, { kind: 'coin', symbol: 'SOLUSDT', market: null }, t(5)).toString()).toBe('500');
+  });
+});
+
+describe('coin P&L series from a loss', () => {
+  const events = rows([
+    deposit(t(1), 'spot', '1000', '1000'),
+    spotFill(t(6), 'SOLUSDT', 'sell', '-100'),
+    spotFill(t(7), 'SOLUSDT', 'sell', '20'),
+  ]);
+  const scope: Scope = { kind: 'coin', symbol: 'SOLUSDT', market: null };
+  const input = { events, snapshots: [], live: null };
+
+  it('counts a first realised loss against a zero origin at the first deposit', () => {
+    const series = pnlSeries(input, scope, null, null);
+    expect(str(series)).toEqual([
+      { time: t(1), pnl: '0', value: '1000' },
+      { time: t(6), pnl: '-100', value: '900' },
+      { time: t(7), pnl: '-80', value: '920' },
+    ]);
+    const r = rangePnl(series, events, scope, null, null);
+    expect(r.pnl.toString()).toBe('-80');
+    expect(r.returnPct?.toString()).toBe('-0.08');
+    const dd = drawdown(series);
+    expect(dd.maxUsd.toString()).toBe('100');
+    expect(dd.maxPct?.toString()).toBe('0.1');
+  });
+
+  it('values a range start with no point before it at the capital then', () => {
+    const series = pnlSeries(input, scope, t(5), null);
+    expect(str(series.slice(0, 1))).toEqual([{ time: t(5), pnl: '0', value: '1000' }]);
+    expect(rangePnl(series, events, scope, t(5), null).pnl.toString()).toBe('-80');
+    expect(drawdown(series).maxPct?.toString()).toBe('0.1');
   });
 });
 

@@ -158,8 +158,10 @@ function allPoints(events: StatsEvent[], snapshots: Snapshot[], scope: Scope): P
  * never moves it; a wallet's is its value minus its capital; a coin's is what its trades, funding
  * and liquidations realised, cumulatively, valued against the account's deposits.
  *
- * With `from` set the series starts at the last point at or before it (at that point's own time),
- * or at a zero point at `from` when there is none, and holds the points after `from` up to `to`.
+ * Without `from` the series starts at a zero origin, at the scope's first deposit or transfer (or
+ * its first point, whichever is earlier), valued at the capital then. With `from` set it starts at
+ * the last point at or before `from` (at that point's own time), or at a zero point at `from`
+ * valued at the capital then when there is none. Then come the points after `from` up to `to`.
  * The live point, when given, closes the series if the range reaches it.
  */
 export function pnlSeries(
@@ -170,10 +172,22 @@ export function pnlSeries(
 ): PnlPoint[] {
   const points = allPoints(input.events, input.snapshots, scope);
   const inRange = points.filter((p) => (from === null || p.time > from) && (to === null || p.time <= to));
+  const steps = capitalSteps(input.events, scope);
+  const capitalThen = (t: number) => capitalCursor(steps)(t);
   const series: PnlPoint[] = [];
   if (from !== null) {
     const before = points.filter((p) => p.time <= from).at(-1);
-    series.push(before ?? { time: from, pnl: D(0), value: D(0) });
+    series.push(before ?? { time: from, pnl: D(0), value: capitalThen(from) });
+  } else {
+    const starts: number[] = [];
+    const firstCapital = steps[0];
+    if (firstCapital && (to === null || firstCapital.time <= to)) starts.push(firstCapital.time);
+    const firstPoint = inRange[0];
+    if (firstPoint) starts.push(firstPoint.time);
+    if (starts.length > 0) {
+      const origin = Math.min(...starts);
+      series.push({ time: origin, pnl: D(0), value: capitalThen(origin) });
+    }
   }
   series.push(...inRange);
 
@@ -218,7 +232,7 @@ export function drawdown(series: PnlPoint[]): Drawdown {
       trough = p;
     }
     const usd = peak.pnl.minus(p.pnl);
-    underwater.push({ time: p.time, usd: usd.neg() });
+    underwater.push({ time: p.time, usd: p.pnl.minus(peak.pnl) });
     if (usd.gt(maxUsd)) maxUsd = usd;
     if (peak.value.gt(0)) {
       const pct = usd.div(peak.value);
