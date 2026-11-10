@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
@@ -24,6 +25,10 @@ import type { WebSocket } from 'ws';
  */
 
 export type FakeMarket = 'spot' | 'perp';
+
+/** The read-only key pair the e2e servers run with; signed requests must be made with it. */
+export const E2E_KEY = 'e2e-read-only-key';
+export const E2E_SECRET = 'e2e-read-only-secret';
 type Level = [string, string];
 
 const FIXTURES = new URL('../fixtures/', import.meta.url);
@@ -58,6 +63,12 @@ const MINUTE = 60_000;
 /** Each depth event spans this many update ids (U..u), as real futures events often span several. */
 const IDS_PER_EVENT = 10;
 const HEARTBEAT_MS = 500;
+const EIGHT_HOURS = 8 * 3_600_000;
+/**
+ * The next funding time the mark stream announces by default lies this far ahead, so a scenario
+ * never meets it; a test that wants a settlement sets its own, a few seconds ahead.
+ */
+const DEFAULT_FUNDING_AHEAD_MS = 30 * 24 * 3_600_000;
 const MARK_MS = 1000;
 
 interface Trade {
@@ -99,6 +110,8 @@ interface Conn {
   market: FakeMarket;
   kind: 'combined' | 'raw';
   streams: Set<string>;
+  /** Whether the endpoint the socket connected to serves a stream at all. */
+  carries: (stream: string) => boolean;
 }
 
 export interface MarkFields {
@@ -146,9 +159,13 @@ export class FakeBinance {
   private readonly startedAt = Date.now();
   private timers: NodeJS.Timeout[] = [];
   private dark = false;
+  /** The next 00/08/16 UTC funding time to publish (see settleDueFunding). */
+  private nextBoundary = nextEightHour(Date.now());
   private restDark = false;
   private historyHeld = false;
   private heldResponses: (() => void)[] = [];
+  /** Signed requests whose key, signature and timestamp all checked out. */
+  signedAccepted = 0;
   /** Every REST request answered or held, oldest first. */
   readonly requests: FakeRequest[] = [];
 
@@ -166,7 +183,7 @@ export class FakeBinance {
         markPrice: price,
         indexPrice: price,
         fundingRate: '0.00010000',
-        nextFundingTime: nextEightHour(Date.now()),
+        nextFundingTime: nextEightHour(Date.now()) + DEFAULT_FUNDING_AHEAD_MS,
         paused: false,
         samples: [{ t: Date.now(), p: price }],
       });
@@ -305,7 +322,10 @@ export class FakeBinance {
     return a;
   }
 
-  /** Changes the symbol's mark fields; with `push` (default) a markPriceUpdate goes out at once. */
+  /**
+   * Changes the symbol's mark fields; with `push` (default) a markPriceUpdate goes out at once,
+   * unless the mark stream is paused.
+   */
   setMark(symbol: string, fields: MarkFields, push = true): void {
     const m = this.marks.get(symbol)!;
     if (fields.markPrice !== undefined) m.markPrice = fields.markPrice;
@@ -314,6 +334,14 @@ export class FakeBinance {
     if (fields.nextFundingTime !== undefined) m.nextFundingTime = fields.nextFundingTime;
     m.samples.push({ t: Date.now(), p: m.markPrice });
     if (push) this.sendMark(symbol);
+  }
+
+  /**
+   * Sends one markPriceUpdate now, paused stream or not, stamped `eventLagMs` before now (as an
+   * update Binance sent that long ago and that arrives only now). The symbol's mark is left as it is.
+   */
+  sendMarkUpdate(symbol: string, markPrice: string, opts: { eventLagMs?: number } = {}): void {
+    this.sendMark(symbol, { markPrice, eventLagMs: opts.eventLagMs ?? 0, force: true });
   }
 
   /** The symbol's mark stream stops (or starts again); its mark history goes on being sampled. */
@@ -381,19 +409,36 @@ export class FakeBinance {
       if (m.samples.length > 20_000) m.samples.splice(0, m.samples.length - 20_000);
       this.sendMark(s);
     }
+    this.settleDueFunding(now);
   }
 
-  private sendMark(symbol: string): void {
+  /**
+   * Binance settles funding at 00:00, 08:00 and 16:00 UTC whatever the test does: each such time
+   * that passes while the fake runs is published with the symbol's rate and mark then, so a run
+   * that crosses one never waits for a settlement. (Funding times a test sets are its own to publish.)
+   */
+  private settleDueFunding(now: number): void {
+    while (now >= this.nextBoundary) {
+      for (const s of SYMBOLS) {
+        const m = this.marks.get(s)!;
+        this.publishFunding(s, { fundingTime: this.nextBoundary, rate: m.fundingRate, markPrice: m.markPrice });
+      }
+      this.nextBoundary += EIGHT_HOURS;
+    }
+  }
+
+  private sendMark(symbol: string, one?: { markPrice: string; eventLagMs: number; force: boolean }): void {
     const m = this.marks.get(symbol)!;
-    if (m.paused || this.dark) return;
-    const E = Date.now();
+    if (this.dark || (m.paused && !one?.force)) return;
+    const E = Date.now() - (one?.eventLagMs ?? 0);
+    const p = one?.markPrice ?? m.markPrice;
     this.send('perp', `${symbol.toLowerCase()}@markPrice@1s`, {
       e: 'markPriceUpdate',
       E,
       s: symbol,
-      p: m.markPrice,
-      ap: m.markPrice,
-      P: m.markPrice,
+      p,
+      ap: p,
+      P: p,
       i: m.indexPrice,
       r: m.fundingRate,
       T: m.nextFundingTime,
@@ -405,7 +450,7 @@ export class FakeBinance {
     if (this.dark) return;
     let combined: string | null = null;
     for (const c of this.conns) {
-      if (c.market !== market || c.kind !== 'combined' || !c.streams.has(stream)) continue;
+      if (c.market !== market || c.kind !== 'combined' || !c.streams.has(stream) || !c.carries(stream)) continue;
       combined ??= JSON.stringify({ stream, data });
       if (c.ws.readyState === c.ws.OPEN) c.ws.send(combined);
     }
@@ -419,7 +464,7 @@ export class FakeBinance {
       if (c.market !== market || c.kind !== 'raw') continue;
       for (const stream of c.streams) {
         const [sym, kind] = stream.split('@');
-        if (sym !== lower || !kind?.startsWith('kline_')) continue;
+        if (sym !== lower || !kind?.startsWith('kline_') || !c.carries(stream)) continue;
         const interval = kind.slice('kline_'.length);
         const len = INTERVAL_MS[interval];
         if (!len) continue;
@@ -474,9 +519,9 @@ export class FakeBinance {
     const first = Math.floor(this.startedAt / len) * len;
     const opens: number[] = [];
     if (q.startTime !== undefined) {
-      for (let t = Math.max(first, Math.floor(Number(q.startTime) / len) * len); t <= end && opens.length < limit; t += len) {
-        if (t >= Number(q.startTime) - len + 1) opens.push(t);
-      }
+      // Only candles opening at or after startTime, as Binance answers.
+      const from = Math.ceil(Number(q.startTime) / len) * len;
+      for (let t = Math.max(first, from); t <= end && opens.length < limit; t += len) opens.push(t);
     } else {
       for (let t = Math.floor(end / len) * len; t >= first && opens.length < limit; t -= len) opens.unshift(t);
     }
@@ -523,7 +568,7 @@ export class FakeBinance {
     }
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       const streams = route.kind === 'combined' ? new Set((url.searchParams.get('streams') ?? '').split('/').filter(Boolean)) : new Set<string>();
-      const conn: Conn = { ws, market: route.market, kind: route.kind, streams };
+      const conn: Conn = { ws, market: route.market, kind: route.kind, streams, carries: route.carries };
       this.conns.add(conn);
       ws.on('close', () => this.conns.delete(conn));
       ws.on('error', () => this.conns.delete(conn));
@@ -567,7 +612,7 @@ export class FakeBinance {
     if (this.restDark) return reply(503, { code: -1001, msg: 'Internal error; unable to process your request. Please try again.' });
     let body: unknown;
     try {
-      body = this.answer(url.pathname, query, req);
+      body = this.answer(url.pathname, query, req, url.search.slice(1));
     } catch (e) {
       if (e instanceof HttpError) return reply(e.status, e.body);
       return reply(500, { code: -1000, msg: (e as Error).message });
@@ -576,7 +621,7 @@ export class FakeBinance {
       // Answered when released, from the history as it is then.
       this.heldResponses.push(() => {
         try {
-          reply(200, this.answer(url.pathname, query, req));
+          reply(200, this.answer(url.pathname, query, req, url.search.slice(1)));
         } catch (e) {
           reply(500, { code: -1000, msg: (e as Error).message });
         }
@@ -586,7 +631,31 @@ export class FakeBinance {
     reply(200, body);
   }
 
-  private answer(path: string, q: Record<string, string>, req: IncomingMessage): unknown {
+  /**
+   * A signed request as Binance checks one: the e2e key in X-MBX-APIKEY, an HMAC-SHA256 of the query
+   * before `&signature=` with the e2e secret, and a timestamp no more than 1 s ahead of the server
+   * and no older than recvWindow (default 5000 ms).
+   */
+  private checkSigned(rawQuery: string, q: Record<string, string>, req: IncomingMessage): void {
+    const key = req.headers['x-mbx-apikey'];
+    if (!key) throw new HttpError(401, { code: -2014, msg: 'API-key format invalid.' });
+    if (key !== E2E_KEY) throw new HttpError(401, { code: -2015, msg: 'Invalid API-key, IP, or permissions for action.' });
+    const at = rawQuery.lastIndexOf('&signature=');
+    if (!q.timestamp || at < 0) throw new HttpError(400, { code: -1102, msg: 'Mandatory parameter was not sent.' });
+    const expected = createHmac('sha256', E2E_SECRET).update(rawQuery.slice(0, at)).digest('hex');
+    if (rawQuery.slice(at + '&signature='.length) !== expected) {
+      throw new HttpError(400, { code: -1022, msg: 'Signature for this request is not valid.' });
+    }
+    const now = Date.now();
+    const timestamp = Number(q.timestamp);
+    const recvWindow = Number(q.recvWindow ?? 5000);
+    if (!(timestamp < now + 1000 && now - timestamp <= recvWindow)) {
+      throw new HttpError(400, { code: -1021, msg: 'Timestamp for this request is outside of the recvWindow.' });
+    }
+    this.signedAccepted += 1;
+  }
+
+  private answer(path: string, q: Record<string, string>, req: IncomingMessage, rawQuery = ''): unknown {
     const now = Date.now();
     const symbol = q.symbol;
     const known = (s: string | undefined): string => {
@@ -663,12 +732,9 @@ export class FakeBinance {
           fundingIntervalHours: 8,
           disclaimer: false,
         }));
-      case '/fapi/v1/leverageBracket': {
-        // Signed: any key and signature are accepted, but they must be there.
-        if (!req.headers['x-mbx-apikey']) throw new HttpError(401, { code: -2014, msg: 'API-key format invalid.' });
-        if (!q.signature || !q.timestamp) throw new HttpError(400, { code: -1102, msg: 'Mandatory parameter was not sent.' });
+      case '/fapi/v1/leverageBracket':
+        this.checkSigned(rawQuery, q, req);
         return LEVERAGE_BRACKETS;
-      }
       // ---- web ----
       case '/bapi/futures/v1/friendly/future/common/brackets':
         return BAPI_BRACKETS;
@@ -687,12 +753,21 @@ class HttpError extends Error {
   }
 }
 
-const WS_ROUTES: Record<string, { market: FakeMarket; kind: 'combined' | 'raw' }> = {
-  '/spot-ws/stream': { market: 'spot', kind: 'combined' },
-  '/spot-ws/ws': { market: 'spot', kind: 'raw' },
-  '/futures-ws/public/stream': { market: 'perp', kind: 'combined' },
-  '/futures-ws/market/stream': { market: 'perp', kind: 'combined' },
-  '/futures-ws/market/ws': { market: 'perp', kind: 'raw' },
+/** Depth and book ticker streams: on futures, only the /public endpoint serves them. */
+const isPublicStream = (stream: string) => /@(depth|bookTicker)/.test(stream);
+
+/**
+ * The stream endpoints. Binance's futures streams are split: /public serves only depth and book
+ * tickers, /market everything else (trades, mark price, tickers, klines). A socket on the wrong
+ * endpoint is accepted, subscriptions included, and simply never receives those streams, as on
+ * Binance.
+ */
+const WS_ROUTES: Record<string, { market: FakeMarket; kind: 'combined' | 'raw'; carries: (stream: string) => boolean }> = {
+  '/spot-ws/stream': { market: 'spot', kind: 'combined', carries: () => true },
+  '/spot-ws/ws': { market: 'spot', kind: 'raw', carries: () => true },
+  '/futures-ws/public/stream': { market: 'perp', kind: 'combined', carries: isPublicStream },
+  '/futures-ws/market/stream': { market: 'perp', kind: 'combined', carries: (s) => !isPublicStream(s) },
+  '/futures-ws/market/ws': { market: 'perp', kind: 'raw', carries: (s) => !isPublicStream(s) },
 };
 
 /** A price as one canonical decimal string, so the same level is always the same key. */

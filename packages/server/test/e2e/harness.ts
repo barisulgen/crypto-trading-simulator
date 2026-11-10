@@ -8,16 +8,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
-import { FakeBinance, START_PRICES, SYMBOLS } from './fakeBinance.ts';
+import { E2E_KEY, E2E_SECRET, FakeBinance, START_PRICES, SYMBOLS } from './fakeBinance.ts';
+
+export { E2E_KEY, E2E_SECRET };
 
 /** The real server's entry point, run as its own process exactly as `npm start` runs it. */
 const MAIN = fileURLToPath(new URL('../../src/main.ts', import.meta.url));
 const require = createRequire(import.meta.url);
 /** tsx's ESM loader, resolved through its package exports. */
 export const TSX_LOADER = pathToFileURL(require.resolve('tsx/esm')).href;
-/** The read-only key pair the e2e servers run with; the fake checks signatures made with it. */
-export const E2E_KEY = 'e2e-read-only-key';
-export const E2E_SECRET = 'e2e-read-only-secret';
 /** How many times a server is started on a fresh port when the one it was given is taken. */
 const PORT_ATTEMPTS = 3;
 
@@ -141,7 +140,7 @@ export class ServerProcess {
     Object.assign(env, o.fake.env(), {
       PORT: String(port),
       DB_PATH: o.dbPath,
-      // Any key pair: the fake accepts every signature, so the signed leverage brackets are used.
+      // The fake checks the signed leverage-bracket request against this pair.
       BINANCE_KEY: E2E_KEY,
       BINANCE_SECRET: E2E_SECRET,
       ...o.env,
