@@ -144,9 +144,20 @@ function run(t: Setup, inp: CatchUpInput): SimEvent[] {
 type Perp<K extends PerpEvent['type']> = Extract<PerpEvent, { type: K }>;
 const ofType = <K extends PerpEvent['type']>(events: SimEvent[], type: K): Perp<K>[] =>
   events.filter((e) => e.type === type && 'market' in e && e.market === 'perp') as Perp<K>[];
+/**
+ * The run's summary, last of its events. Every one is checked here: its lines, read in UTC, are its
+ * `actions` word for word, and each time in them is data (a minute on its boundary, or a moment).
+ */
 const summary = (events: SimEvent[]) => {
   const last = events[events.length - 1];
   if (last?.type !== 'catch_up') throw new Error(`no catch_up summary last in ${events.map((e) => e.type)}`);
+  expect(last.lines).toBeDefined();
+  expect(last.lines!.map(utcText)).toEqual(last.actions);
+  for (const part of last.lines!.flat()) {
+    if (typeof part === 'string') continue;
+    expect(Number.isInteger(part.at)).toBe(true);
+    if (!part.seconds) expect(part.at % 60_000).toBe(0);
+  }
   return last;
 };
 const tag = (basis: string, from = FROM, to = TO) => ({ from, to, basis });
@@ -208,7 +219,6 @@ describe('perp catch-up: funding and mark-candle liquidation (long 0.1 @80000, m
         '; margin lost 395.21 USDT (estimated)',
       ],
     ]);
-    expect(summary(events).lines!.map(utcText)).toEqual(summary(events).actions);
     expectTaggedInOrder(events);
   });
 

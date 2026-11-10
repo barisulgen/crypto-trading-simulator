@@ -115,9 +115,20 @@ function run(t: Setup, inp: CatchUpInput): SimEvent[] {
 type Spot<K extends EngineEvent['type']> = Extract<EngineEvent, { type: K }>;
 const ofType = <K extends EngineEvent['type']>(events: SimEvent[], type: K): Spot<K>[] =>
   events.filter((e) => e.type === type) as Spot<K>[];
+/**
+ * The run's summary, last of its events. Every one is checked here: its lines, read in UTC, are its
+ * `actions` word for word, and each time in them is data (a minute on its boundary, or a moment).
+ */
 const summary = (events: SimEvent[]) => {
   const last = events[events.length - 1];
   if (last?.type !== 'catch_up') throw new Error(`no catch_up summary last in ${events.map((e) => e.type)}`);
+  expect(last.lines).toBeDefined();
+  expect(last.lines!.map(utcText)).toEqual(last.actions);
+  for (const part of last.lines!.flat()) {
+    if (typeof part === 'string') continue;
+    expect(Number.isInteger(part.at)).toBe(true);
+    if (!part.seconds) expect(part.at % 60_000).toBe(0);
+  }
   return last;
 };
 const tag = (basis: string) => ({ from: FROM, to: TO, basis });
@@ -193,7 +204,6 @@ describe('spot catch-up: stops from candles', () => {
       ['Stop-loss filled 0.5 BTC at 58,800 (worst price of ', { at: T(12, 4), seconds: false }, '; estimated)'],
       ['Take-profit 0.5 BTC cancelled: the other order of its pair triggered (estimated)'],
     ]);
-    expect(summary(events).lines!.map(utcText)).toEqual(summary(events).actions);
     const fills = ofType(events, 'fill');
     expect(fills.map((e) => [e.order.id, s(e.fill.price), s(e.fill.qty)])).toEqual([[sl!.id, '58800', '0.5']]);
     const cancelled = ofType(events, 'order_cancelled');
