@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "typecheck": "tsc -p tsconfig.json",
     "feed:smoke": "tsx scripts/feed-smoke.ts",
     "tiers:snapshot": "tsx scripts/update-tiers-snapshot.ts"

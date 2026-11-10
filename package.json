@@ -14,6 +14,7 @@
     "build": "npm run build -w @sim/web",
     "start": "npm run build && tsx packages/server/src/main.ts",
     "test": "npm test --workspaces --if-present",
+    "test:e2e": "npm run test:e2e -w @sim/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "start:server": "tsx packages/server/src/main.ts",
     "feed:smoke": "npm run feed:smoke -w @sim/server",
