@@ -1,5 +1,6 @@
 import type { Market } from '@sim/engine';
 import type { Logger } from '../log.ts';
+import { DEFAULT_ENDPOINTS, klineSocketUrl } from '../binance/endpoints.ts';
 import type { FuturesRest } from '../binance/futuresRest.ts';
 import type { BinanceRest } from '../binance/rest.ts';
 import { ControlQueue } from './controlQueue.ts';
@@ -30,16 +31,14 @@ export interface CandleServiceDeps {
   setTimer?: SetTimer;
   /** Shared by every Binance socket of this process; none when absent. */
   limiter?: ConnectLimiter;
+  /** The kline socket's address (default: live Binance's for the market). */
+  url?: string;
 }
 
 /** The newest page (no endTime) is re-fetched after this long; older pages never change. */
 export const NEWEST_PAGE_TTL_MS = 5000;
 /** Most series kept; the least recently used goes first. */
 const CACHE_MAX = 64;
-const KLINE_WS_URLS: Record<Market, string> = {
-  spot: 'wss://stream.binance.com:9443/ws',
-  perp: 'wss://fstream.binance.com/market/ws',
-};
 const WATCHDOG_MS = 30_000;
 const WATCHDOG_CHECK_MS = 5000;
 const BACKOFF_START_MS = 1000;
@@ -65,6 +64,7 @@ export class CandleService {
   private readonly now: () => number;
   private readonly setTimer: SetTimer;
   private readonly limiter: ConnectLimiter | null;
+  private readonly url: string;
   private readonly cache = new Map<string, { at: number; value: Promise<Candle[]> }>();
   private readonly subs = new Map<string, Set<(c: Candle) => void>>();
   private ws: WsLike | null = null;
@@ -84,6 +84,7 @@ export class CandleService {
     this.now = d.now ?? Date.now;
     this.setTimer = d.setTimer ?? defaultSetTimer;
     this.limiter = d.limiter ?? null;
+    this.url = d.url ?? klineSocketUrl(DEFAULT_ENDPOINTS, this.market);
   }
 
   async history(symbol: string, interval: string, endTime?: number): Promise<Candle[]> {
@@ -191,7 +192,7 @@ export class CandleService {
       }, wait);
       return;
     }
-    const ws = this.wsFactory(KLINE_WS_URLS[this.market]);
+    const ws = this.wsFactory(this.url);
     this.ws = ws;
     let dead = false;
     let lastFrame = this.now();

@@ -89,6 +89,8 @@ This builds the web app and starts the server at **http://127.0.0.1:8787**. Stop
 - `npm run tiers:snapshot`: refreshes the bundled leverage-tier snapshot (`packages/server/src/binance/tiers-snapshot.json`) from Binance's public endpoint. It needs no API key, and writes nothing unless every coin's tiers check out.
 - `npm run db:wipe`: deletes the local database (`data/sim.sqlite`, or `DB_PATH`) after you type `WIPE`. Stop the server first.
 
+**Binance addresses, for testing against a relay or a fake exchange.** `BINANCE_SPOT_REST_URL`, `BINANCE_FUTURES_REST_URL`, `BINANCE_WEB_URL`, `BINANCE_SPOT_WS_URL` and `BINANCE_FUTURES_WS_URL` point the server at hosts other than live Binance. Each is documented in `.env.example`, and the server logs a warning at start when any is set. Leave them empty for normal use.
+
 By default the server only listens on this computer. To use it from your phone on the same network, set `HOST` (for example `0.0.0.0`) **and** `APP_PASSWORD` in `.env.local`; the app then asks for that password.
 
 ## Testing

@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { Logger } from '../log.ts';
+import { DEFAULT_ENDPOINTS, spotStreamUrl } from '../binance/endpoints.ts';
 import type { BinanceRest } from '../binance/rest.ts';
 import { BookSync } from './bookSync.ts';
 import type { FeedHealth } from './feedHealth.ts';
@@ -12,7 +13,7 @@ import type { ConnectLimiter, SetTimer, WsFactory } from './ws.ts';
 
 export type { DepthLevels, Ticker } from './streamParse.ts';
 
-export const SPOT_STREAM_URL = 'wss://stream.binance.com:9443/stream?streams=';
+export const SPOT_STREAM_URL = spotStreamUrl(DEFAULT_ENDPOINTS);
 
 export interface SpotFeedDeps {
   symbols: string[];
@@ -27,6 +28,8 @@ export interface SpotFeedDeps {
   watchdogMs?: number;
   /** Shared by every Binance socket of this process; none when absent. */
   limiter?: ConnectLimiter;
+  /** The combined-stream address before the stream names (default SPOT_STREAM_URL). */
+  streamUrl?: string;
 }
 
 /**
@@ -38,6 +41,7 @@ export interface SpotFeedDeps {
  */
 export class SpotFeed extends EventEmitter {
   private readonly symbols: string[];
+  private readonly streamUrl: string;
   private readonly warn: LimitedWarn;
   private readonly sink: StreamSink;
   private readonly sync: BookSync;
@@ -47,6 +51,7 @@ export class SpotFeed extends EventEmitter {
   constructor(d: SpotFeedDeps) {
     super();
     this.symbols = d.symbols;
+    this.streamUrl = d.streamUrl ?? SPOT_STREAM_URL;
     const now = d.now ?? Date.now;
     const setTimer = d.setTimer ?? defaultSetTimer;
     this.warn = new LimitedWarn(d.logger, now);
@@ -101,7 +106,7 @@ export class SpotFeed extends EventEmitter {
       const l = s.toLowerCase();
       return [`${l}@depth@100ms`, `${l}@aggTrade`, `${l}@miniTicker`];
     });
-    return SPOT_STREAM_URL + parts.join('/');
+    return this.streamUrl + parts.join('/');
   }
 
   private onMessage(symbol: string, kind: string, data: any, now: number): void {

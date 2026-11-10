@@ -1,4 +1,5 @@
 import type { Logger } from '../log.ts';
+import { DEFAULT_ENDPOINTS } from './endpoints.ts';
 import { defaultSetTimer } from '../market/ws.ts';
 import type { SetTimer } from '../market/ws.ts';
 import { aggTradesQuery, PauseController, quietLogger, RestCore } from './restCore.ts';
@@ -8,8 +9,6 @@ import type { Lane } from './weightBudget.ts';
 
 export type { AggTradesQuery, RawJson } from './restCore.ts';
 
-const BASE = 'https://api.binance.com';
-
 export interface BinanceRestOptions {
   setTimer?: SetTimer;
   logger?: Logger;
@@ -17,6 +16,8 @@ export interface BinanceRestOptions {
   maxWaitMs?: number;
   /** The REST pause shared with the other Binance clients on this IP (default: a pause of its own). */
   pause?: PauseController;
+  /** The spot REST base address (default: live Binance). */
+  base?: string;
 }
 
 /**
@@ -30,7 +31,7 @@ export class BinanceRest {
     const logger = opts.logger ?? quietLogger;
     const weights = new WeightBudget({ now, setTimer: opts.setTimer ?? defaultSetTimer, logger, maxWaitMs: opts.maxWaitMs });
     this.core = new RestCore({
-      base: BASE,
+      base: opts.base ?? DEFAULT_ENDPOINTS.spotRest,
       host: 'Binance REST',
       weightLimit1m: WEIGHT_LIMIT_1M,
       fetchImpl,

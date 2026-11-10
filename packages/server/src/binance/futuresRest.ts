@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { redact } from '../log.ts';
 import type { Logger } from '../log.ts';
+import { DEFAULT_ENDPOINTS } from './endpoints.ts';
 import { defaultSetTimer } from '../market/ws.ts';
 import type { SetTimer } from '../market/ws.ts';
 import { aggTradesQuery, quietLogger, RestCore } from './restCore.ts';
@@ -8,7 +9,6 @@ import type { AggTradesQuery, PauseController, RawJson } from './restCore.ts';
 import { BUDGET_EXHAUSTED, BUDGET_MAX_WAIT_MS, CLIENT_CLOSED, WeightBudget } from './weightBudget.ts';
 import type { Lane } from './weightBudget.ts';
 
-const BASE = 'https://fapi.binance.com';
 /** Binance's USDⓈ-M futures REST limit: request weight per minute per IP. */
 export const FUTURES_WEIGHT_LIMIT_1M = 2400;
 /** We never go above 80 % of it. */
@@ -139,6 +139,8 @@ export interface FuturesRestOptions {
   maxWaitMs?: number;
   /** The REST pause shared with the other Binance clients on this IP: limits and bans are per IP. */
   pause: PauseController;
+  /** The futures REST base address (default: live Binance). */
+  base?: string;
 }
 
 export type { AggTradesQuery } from './restCore.ts';
@@ -180,7 +182,7 @@ export class FuturesRest {
       host: 'Binance futures REST',
     });
     this.core = new RestCore({
-      base: BASE,
+      base: opts.base ?? DEFAULT_ENDPOINTS.futuresRest,
       host: 'Binance futures REST',
       weightLimit1m: FUTURES_WEIGHT_LIMIT_1M,
       fetchImpl,

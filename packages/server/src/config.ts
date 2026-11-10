@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { D } from '@sim/engine';
 import type { FeeSchedule } from '@sim/engine';
+import { parseEndpoints } from './binance/endpoints.ts';
+import type { BinanceEndpoints } from './binance/endpoints.ts';
 
 export interface Config {
   host: string;
@@ -10,6 +12,8 @@ export interface Config {
   symbols: string[];
   fees: { spot: FeeSchedule; perp: FeeSchedule };
   health: { silentMs: number; lagMs: number; noUpdateMs: number };
+  /** The Binance hosts: live Binance unless overridden (for testing against a relay or a fake exchange). */
+  binance: BinanceEndpoints;
   /** Non-enumerable: never serialised or iterated. */
   readonly appPassword: string | null;
   /** Non-enumerable: never serialised or iterated. */
@@ -80,6 +84,7 @@ export function loadConfig(
       perp: { maker: D('0.0002'), taker: D('0.0005') },
     },
     health: { silentMs: 15000, lagMs: 5000, noUpdateMs: 120000 },
+    binance: parseEndpoints(merged),
   } as Config;
   Object.defineProperty(config, 'secrets', { value: secrets, enumerable: false });
   Object.defineProperty(config, 'appPassword', { value: appPassword, enumerable: false });

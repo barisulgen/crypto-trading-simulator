@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { D } from '@sim/engine';
 import type { Decimal } from '@sim/engine';
 import type { Logger } from '../log.ts';
+import { DEFAULT_ENDPOINTS, perpDepthStreamUrl, perpMarketStreamUrl } from '../binance/endpoints.ts';
 import type { FuturesRest } from '../binance/futuresRest.ts';
 import { BookSync } from './bookSync.ts';
 import { FeedHealth } from './feedHealth.ts';
@@ -14,9 +15,9 @@ import { defaultSetTimer, defaultWsFactory } from './ws.ts';
 import type { ConnectLimiter, SetTimer, WsFactory } from './ws.ts';
 
 /** USDⓈ-M futures depth streams are served only on the public endpoint. */
-export const PERP_DEPTH_URL = 'wss://fstream.binance.com/public/stream?streams=';
+export const PERP_DEPTH_URL = perpDepthStreamUrl(DEFAULT_ENDPOINTS);
 /** Trades, mark price and tickers are served only on the market endpoint. */
-export const PERP_MARKET_URL = 'wss://fstream.binance.com/market/stream?streams=';
+export const PERP_MARKET_URL = perpMarketStreamUrl(DEFAULT_ENDPOINTS);
 
 /** One markPriceUpdate: mark, index, the current funding rate and when it is next settled. */
 export interface MarkUpdate {
@@ -68,6 +69,9 @@ export interface PerpFeedDeps {
   watchdogMs?: number;
   /** Shared by every Binance socket of this process; none when absent. */
   limiter?: ConnectLimiter;
+  /** The depth and market combined-stream addresses before the stream names (default PERP_DEPTH_URL, PERP_MARKET_URL). */
+  depthUrl?: string;
+  marketUrl?: string;
 }
 
 /**
@@ -127,7 +131,7 @@ export class PerpFeed extends EventEmitter {
     this.depthSocket = new FeedSocket({
       ...common,
       name: 'perp depth feed',
-      url: PERP_DEPTH_URL + lower.map((l) => `${l}@depth@100ms`).join('/'),
+      url: (d.depthUrl ?? PERP_DEPTH_URL) + lower.map((l) => `${l}@depth@100ms`).join('/'),
       health: d.health.depth,
       onOpen: () => {
         this.syncedSinceConnect = new Set();
@@ -141,7 +145,7 @@ export class PerpFeed extends EventEmitter {
     this.marketSocket = new FeedSocket({
       ...common,
       name: 'perp market feed',
-      url: PERP_MARKET_URL + lower.flatMap((l) => [`${l}@aggTrade`, `${l}@markPrice@1s`, `${l}@miniTicker`]).join('/'),
+      url: (d.marketUrl ?? PERP_MARKET_URL) + lower.flatMap((l) => [`${l}@aggTrade`, `${l}@markPrice@1s`, `${l}@miniTicker`]).join('/'),
       health: d.health.market,
       onOpen: () => {
         this.markedSinceConnect = new Set();

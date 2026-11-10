@@ -5,6 +5,14 @@ import type { FastifyInstance } from 'fastify';
 import { PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import { buildApp } from './api/http.ts';
 import { ClientHub } from './api/ws.ts';
+import {
+  klineSocketUrl,
+  overriddenEndpoints,
+  perpDepthStreamUrl,
+  perpMarketStreamUrl,
+  spotStreamUrl,
+  unofficialBracketsUrl,
+} from './binance/endpoints.ts';
 import { FuturesRest } from './binance/futuresRest.ts';
 import { BinanceRest } from './binance/rest.ts';
 import { PauseController } from './binance/restCore.ts';
@@ -30,6 +38,9 @@ const WEB_DIST = fileURLToPath(new URL('../../web/dist/', import.meta.url));
 
 const config = loadConfig();
 const logger = createLogger(config.secrets);
+const endpoints = config.binance;
+const overridden = overriddenEndpoints(endpoints);
+if (overridden.length > 0) logger.warn(`Binance endpoints overridden, not live Binance: ${overridden.join(', ')}`);
 const db = openDb(config.dbPath);
 const seasonId = currentSeasonId(db);
 const ledger = loadLedger(db, seasonId, ['USDT', ...config.coins]);
@@ -43,25 +54,42 @@ const sim = new SimEngine(
 // connection limiter for every client.
 const pause = new PauseController(Date.now, logger);
 const limiter = new ConnectLimiter();
-const rest = new BinanceRest(fetch, Date.now, { logger, pause });
-const futuresRest = new FuturesRest(fetch, Date.now, { logger, pause });
+const rest = new BinanceRest(fetch, Date.now, { logger, pause, base: endpoints.spotRest });
+const futuresRest = new FuturesRest(fetch, Date.now, { logger, pause, base: endpoints.futuresRest });
 const health = new FeedHealth(config.symbols, config.health);
 const books = new Map(config.symbols.map((s) => [s, new LocalBook()]));
-const feed = new SpotFeed({ symbols: config.symbols, rest, health, books, logger, limiter });
+const feed = new SpotFeed({
+  symbols: config.symbols,
+  rest,
+  health,
+  books,
+  logger,
+  limiter,
+  streamUrl: spotStreamUrl(endpoints),
+});
 const market = new MarketData({ symbols: config.symbols, feed, books, health, rest, logger });
 const candles = {
-  spot: new CandleService({ rest, logger, limiter }),
-  perp: new CandleService({ market: 'perp', rest: futuresRest, logger, limiter }),
+  spot: new CandleService({ rest, logger, limiter, url: klineSocketUrl(endpoints, 'spot') }),
+  perp: new CandleService({ market: 'perp', rest: futuresRest, logger, limiter, url: klineSocketUrl(endpoints, 'perp') }),
 };
 
 const perpHealths = perpHealth(config.symbols, config.health);
 const perpBooks = new Map(config.symbols.map((s) => [s, new LocalBook({ mode: 'futures' })]));
-const perpFeed = new PerpFeed({ symbols: config.symbols, rest: futuresRest, health: perpHealths, books: perpBooks, logger, limiter });
+const perpFeed = new PerpFeed({
+  symbols: config.symbols,
+  rest: futuresRest,
+  health: perpHealths,
+  books: perpBooks,
+  logger,
+  limiter,
+  depthUrl: perpDepthStreamUrl(endpoints),
+  marketUrl: perpMarketStreamUrl(endpoints),
+});
 const tiers = new TierLoader({
   symbols: config.symbols,
   rest: futuresRest,
   credentials: config.binanceCredentials,
-  unofficial: () => fetchUnofficialBrackets(fetch, pause),
+  unofficial: () => fetchUnofficialBrackets(fetch, pause, unofficialBracketsUrl(endpoints)),
   logger,
 });
 const perpMarket = new PerpMarketData({

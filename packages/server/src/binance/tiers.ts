@@ -3,10 +3,11 @@ import { D } from '@sim/engine';
 import type { Bracket, Decimal, TierSet } from '@sim/engine';
 import { redact } from '../log.ts';
 import type { Logger } from '../log.ts';
+import { DEFAULT_ENDPOINTS, unofficialBracketsUrl } from './endpoints.ts';
 import type { PauseController, RawJson } from './restCore.ts';
 
 /** Binance's public (unofficial, unsigned) leverage-bracket endpoint used by its web site. */
-export const UNOFFICIAL_BRACKETS_URL = 'https://www.binance.com/bapi/futures/v1/friendly/future/common/brackets';
+export const UNOFFICIAL_BRACKETS_URL = unofficialBracketsUrl(DEFAULT_ENDPOINTS);
 const UNOFFICIAL_TIMEOUT_MS = 15_000;
 const SNAPSHOT_URL = new URL('./tiers-snapshot.json', import.meta.url);
 
@@ -143,13 +144,17 @@ export function toSnapshot(set: Pick<TierSet, 'brackets' | 'fetchedAt'>, source:
 }
 
 /**
- * GETs the public brackets endpoint (no key). It honours the shared REST pause, and a 429/418 from
- * it pauses the Binance REST clients too: the limits are per IP.
+ * GETs the public brackets endpoint (no key) at `url` (default: live Binance's). It honours the
+ * shared REST pause, and a 429/418 from it pauses the Binance REST clients too: the limits are per IP.
  */
-export async function fetchUnofficialBrackets(fetchImpl: typeof fetch, pause: PauseController): Promise<RawJson> {
+export async function fetchUnofficialBrackets(
+  fetchImpl: typeof fetch,
+  pause: PauseController,
+  url: string = UNOFFICIAL_BRACKETS_URL,
+): Promise<RawJson> {
   pause.assertNotPaused();
   const sentAt = pause.now();
-  const res = await fetchImpl(UNOFFICIAL_BRACKETS_URL, { signal: AbortSignal.timeout(UNOFFICIAL_TIMEOUT_MS) });
+  const res = await fetchImpl(url, { signal: AbortSignal.timeout(UNOFFICIAL_TIMEOUT_MS) });
   if (res.status === 429 || res.status === 418) {
     pause.rateLimited(res.status, res, sentAt, 'Binance web API', 'no weight figures for this host');
   }
