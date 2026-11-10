@@ -138,7 +138,8 @@ export interface RequestOptions {
 
 /**
  * Sends GET requests for one Binance REST host: reserves weight, honours the shared pause,
- * reconciles with X-MBX-USED-WEIGHT-1M, and reports 429/418 to the pause. Nothing here retries.
+ * reconciles with X-MBX-USED-WEIGHT-1M, and reports 429/418 to the pause. Nothing here retries, and
+ * no redirect is followed.
  * Error messages name the path only, never the query (which may carry a signature).
  */
 export class RestCore {
@@ -185,7 +186,8 @@ export class RestCore {
     const q = typeof query === 'function' ? query() : query;
     const sentAt = this.d.now();
     if (ticket !== null) this.d.weights.markSent(ticket);
-    const init: RequestInit = { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
+    // A redirect is refused, never followed: the API key header must reach only the configured host.
+    const init: RequestInit = { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), redirect: 'error' };
     if (opts.headers) init.headers = opts.headers;
     const res = await this.d.fetchImpl(`${this.d.base}${path}${q ? `?${q}` : ''}`, init);
     const used = Number(res.headers?.get?.('x-mbx-used-weight-1m') ?? Number.NaN);
