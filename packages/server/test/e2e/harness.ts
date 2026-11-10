@@ -156,9 +156,13 @@ export class ServerProcess {
       if (/EADDRINUSE|Could not listen on/.test(output)) throw new PortTaken(output);
       throw new Error(`server exited with ${code} while starting:\n${output}`);
     });
-    // Each probe gives up after a second: whatever holds the port may accept and never answer.
+    // Ready only once this process says it listens on this port: another server that took the port
+    // first may answer the probe too. Each probe then gives up after a second, as whatever holds a
+    // port may accept and never answer.
+    const listeningLine = `listening on http://127.0.0.1:${port} `;
     const listening = waitFor('the server to listen', async () => {
       if (!starting) return true;
+      if (!server.logs.some((l) => l.includes(listeningLine))) return false;
       const res = await fetch(`${server.url}/api/meta`, { signal: AbortSignal.timeout(1000) });
       return res.ok && child.exitCode === null;
     }, 30_000, 100);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -87,6 +88,28 @@ describe('the e2e harness leaves nothing behind', () => {
       await fake.stop();
       tmp.remove();
       blocker.close();
+    }
+  });
+
+  it('a port taken by another server that answers is not mistaken for this server being ready', async () => {
+    // Another scenario's server, say, took the port first and answers /api/meta.
+    const impostor = createHttpServer((_req, res) => res.writeHead(200, { 'content-type': 'application/json' }).end('{}'));
+    await new Promise<void>((r) => impostor.listen(0, '127.0.0.1', r));
+    const taken = (impostor.address() as AddressInfo).port;
+    const fake = new FakeBinance();
+    await fake.start();
+    const tmp = tempDir();
+    let server: ServerProcess | null = null;
+    try {
+      server = await ServerProcess.start({ fake, dir: tmp.dir, dbPath: tmp.dbPath, port: taken });
+      expect(server.port).not.toBe(taken);
+      expect(server.logs.some((l) => l.includes(`listening on http://127.0.0.1:${server!.port} `))).toBe(true);
+      expect(((await (await fetch(`${server.url}/api/meta`)).json()) as any).symbols).toHaveLength(10);
+    } finally {
+      await server?.kill();
+      await fake.stop();
+      tmp.remove();
+      impostor.close();
     }
   });
 
