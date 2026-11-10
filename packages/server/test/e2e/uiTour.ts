@@ -3,9 +3,10 @@
 // outage and restart, the estimated history rows), and has a screenshot tool capture each at a
 // desktop and a phone width. A report-only check: it asserts nothing beyond reaching each state.
 //
-// usage: npx tsx packages/server/test/e2e/uiTour.ts <out-dir> <cdp-shot.mjs>
-//   (build the web app first: npm run build). The screenshot tool is called as
-//   `node <cdp-shot.mjs> <url> <out-dir> <shots.json>` with shots [{ name, w, h, mobile?, url, tab? }].
+// usage: npx tsx packages/server/test/e2e/uiTour.ts <out-dir> <shot-tool>
+//   (build the web app first: npm run build). For each state the screenshot tool is called as
+//   `node <shot-tool> <url> <out-dir> <shots.json>`, where shots.json lists
+//   { name, w, h, mobile?, url, tab?, wait? }, and is expected to save <out-dir>/<name>.png for each.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -16,10 +17,10 @@ import { FakeBinance, START_PRICES, SYMBOLS } from './fakeBinance.ts';
 import { allFresh, printOpeningTrades, ServerProcess, tempDir, waitFor } from './harness.ts';
 import { deposit, longMarkAtRatio, openPosition, position, waitOrderStatus } from './ops.ts';
 
-const [outArg, cdpArg] = process.argv.slice(2);
-if (!outArg || !cdpArg) throw new Error('usage: uiTour.ts <out-dir> <cdp-shot.mjs>');
+const [outArg, toolArg] = process.argv.slice(2);
+if (!outArg || !toolArg) throw new Error('usage: uiTour.ts <out-dir> <shot-tool>');
 const out: string = outArg;
-const cdpShot: string = cdpArg;
+const shotTool: string = toolArg;
 if (!existsSync(fileURLToPath(new URL('../../../web/dist/index.html', import.meta.url)))) throw new Error('Build the web app first (npm run build)');
 mkdirSync(out, { recursive: true });
 
@@ -36,7 +37,7 @@ async function shoot(server: ServerProcess, name: string, route: string, opts: {
   ];
   const spec = join(out, `${name}.json`);
   writeFileSync(spec, JSON.stringify(shots));
-  console.log((await run(process.execPath, [cdpShot, url, out, spec], { encoding: 'utf8' })).stdout.trim());
+  console.log((await run(process.execPath, [shotTool, url, out, spec], { encoding: 'utf8' })).stdout.trim());
 }
 
 const fake = new FakeBinance();
