@@ -103,6 +103,8 @@ npm run typecheck
 
 The end-to-end scenarios start the real server from its entry point, on a throwaway database, against a fake Binance served locally (`packages/server/test/e2e/`), and drive it through its HTTP and WebSocket API as the web app does. They need no network access. They cover a liquidation on the mark price with its warnings, a funding settlement, a limit order filling only on a trade-through, a restart during an outage followed by catch-up, and a stale mark price that liquidates nothing.
 
+For a visual check of the same states, `npx tsx packages/server/test/e2e/uiTour.ts <out-dir> <shot-tool>` (after `npm run build`) drives the server and the built web app against the fake and, for each state, runs `node <shot-tool> <url> <out-dir> <shots.json>`, where `shots.json` lists `{ name, w, h, mobile?, url, tab?, wait? }` and the tool is expected to save `<out-dir>/<name>.png` for each entry.
+
 The trading engine is covered by worked-example tests. For example: this market order on this order book fills at exactly this average price, with this slippage and this fee. The tests cover:
 
 - book walking and thin books;
