@@ -14,7 +14,7 @@ import { loadJobs } from '../src/db/store.ts';
 import { FUNDING_POLL_MS, FundingService } from '../src/funding/fundingService.ts';
 import type { FundingRateQuery } from '../src/binance/futuresRest.ts';
 import { marketKey } from '../src/market/marketKey.ts';
-import { GAP_NOT_APPLIED_REFUSAL, submittedOrder } from '../src/runner.ts';
+import { FEED_NOTICE_WINDOW_MS, GAP_NOT_APPLIED_REFUSAL, submittedOrder } from '../src/runner.ts';
 import { FakeClock, FakeHistory, runnerHarness, settle } from './helpers.ts';
 
 /** 2026-10-24 12:00:00 UTC, a minute boundary. */
@@ -172,6 +172,7 @@ describe('catch-up: spot', () => {
     // One summary event, and one notice from it.
     const line = 'Stop-loss filled 0.5 BTC at 98.8 (worst price of 12:04 UTC; estimated)';
     expect(t.eventsOf('catch_up').map((e) => [e.symbol, e.payload.actions])).toEqual([[SYMBOL, [line]]]);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS); // the summary waits behind the "restored" notice
     expect(t.notices()).toContain(`Caught up BTCUSDT after the data gap 11:59–12:10 UTC: ${line}`);
     // The times as data, in the event and in the notice, for the browser to show in local time.
     const minute = { at: T + 4 * MIN, seconds: false };
@@ -545,6 +546,7 @@ describe('catch-up: perps', () => {
     expect(b.eventsOf('liquidation').map((e) => [e.time, e.payload.markPrice])).toEqual([[T + 20 * HOUR, '76353.31325301']]);
     expect(b.sim.perp.state.positions.BTCUSDT).toBeUndefined();
     expect(b.jobs()).toEqual([expect.objectContaining({ market: 'perp', status: 'done', startedAt: from, endedAt: T + 50 * HOUR })]);
+    b.clock.advance(FEED_NOTICE_WINDOW_MS); // the summary waits behind the "restored" notice
     const notice = b.notices().find((n) => n.startsWith('Caught up BTCUSDT perp'))!;
     expect(notice).toContain('Futures trade history covers only 2 days; open limit orders were cancelled');
     expect(notice).toContain('Long 0.1 BTC liquidated at 76,353.31325301');
@@ -599,6 +601,7 @@ describe('catch-up: perps', () => {
     });
     expect(liq!.payload.catchUp).toBeUndefined();
     expect(t.sim.perp.state.positions.BTCUSDT).toBeUndefined();
+    t.clock.advance(FEED_NOTICE_WINDOW_MS); // the alert waits behind the "restored" notice
     expect(t.notices().some((n) => n.startsWith('LIQUIDATED: BTCUSDT long 0.1 at mark 76,345.4'))).toBe(true);
   });
 

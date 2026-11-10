@@ -307,6 +307,8 @@ export class EngineRunner implements FundingSim {
   private cursorSavedAt: number;
   /** The feed notices waiting to go out as one (see feedNotice); null when none waits. */
   private feedBatch: { kind: 'feed_gap' | 'feed_restored'; entries: FeedNoticeEntry[] } | null = null;
+  /** Notices that came while a feed notice waited for its window: sent right after it, in order. */
+  private readonly heldNotices: Notice[] = [];
   private readonly spotTradeListener = (symbol: string, trade: AggTrade) =>
     this.background(() => this.onTrade('spot', symbol, trade));
   private readonly perpTradeListener = (symbol: string, trade: AggTrade) =>
@@ -365,7 +367,7 @@ export class EngineRunner implements FundingSim {
   }
 
   /**
-   * Sends the feed notice still waiting for its window; stops trades, marks, timers and pending
+   * Sends the feed notice still waiting for its window, then the notices held behind it; stops trades, marks, timers and pending
    * arrival timers; and records every gap still open as a feed_gap ending now, with the trade
    * cursors and, for a gap that needs catching up, its job (after a fatal error nothing more is
    * written).
@@ -1429,8 +1431,14 @@ export class EngineRunner implements FundingSim {
     insertEquitySnapshot(this.d.db, this.d.seasonId, value, this.d.now());
   }
 
+  /**
+   * Sends a notice to the owner. While a feed notice waits for its window, every other notice waits
+   * behind it and goes out right after it, in the order they came: the owner never reads a fill,
+   * a catch-up or a rejection before the data interruption or restore that came first.
+   */
   private notice(n: Notice): void {
-    this.d.onBroadcast({ type: 'notice', ...n });
+    if (this.feedBatch !== null) this.heldNotices.push(n);
+    else this.d.onBroadcast({ type: 'notice', ...n });
   }
 
   /**
@@ -1455,11 +1463,12 @@ export class EngineRunner implements FundingSim {
     this.feedBatch.entries.push({ ...splitKey(key), ...(reason !== undefined ? { reason } : {}) });
   }
 
-  /** The feed notices waiting for their window, sent now as one. */
+  /** The feed notices waiting for their window, sent now as one, then the notices held behind them, in order. */
   private flushFeedNotices(): void {
     const batch = this.feedBatch;
     this.feedBatch = null;
     if (batch !== null && batch.entries.length > 0) this.notice(feedNotice(batch.kind, batch.entries));
+    for (const n of this.heldNotices.splice(0)) this.notice(n);
   }
 
   private noticeLookup(): NoticeLookup {

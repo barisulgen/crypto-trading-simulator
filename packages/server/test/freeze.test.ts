@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { D } from '@sim/engine';
 import type { SpotOrderRequest } from '@sim/engine';
 import type { Db } from '../src/db/db.ts';
-import { submittedOrder } from '../src/runner.ts';
+import { FEED_NOTICE_WINDOW_MS, submittedOrder } from '../src/runner.ts';
 import { liveStack, settle } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
@@ -59,6 +59,7 @@ describe('after a freeze', () => {
     t.clock.advance(1000); // the next health poll sees fresh data; the stop was open across the gap: catch-up first
     await settle();
     expect(t.status()).toBe('filled');
+    t.clock.advance(FEED_NOTICE_WINDOW_MS); // the fill's notice waits behind the "restored" one
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([
       expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /),
     ]);
@@ -83,6 +84,7 @@ describe('after a freeze', () => {
     t.clock.advance(1000);
     await settle();
     expect(t.status()).toBe('filled');
+    t.clock.advance(FEED_NOTICE_WINDOW_MS); // the fill's notice waits behind the "restored" one
     expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([
       expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /),
     ]);
@@ -136,8 +138,9 @@ describe('after a stall shorter than the silence limit', () => {
     t.clock.advance(1000); // the next health poll sees fresh data; the stop was open across the gap: catch-up first
     await settle();
     expect(t.status()).toBe('filled');
-    expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /)]);
     expect(gaps(t.db)).toEqual([{ startedAt: lastPoll, endedAt: t.clock.now, reason: PAUSED, lastTradeIdBefore: 2 }]);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS); // the fill's notice waits behind the "restored" one
+    expect(t.notices().filter((n) => n.startsWith('Sold'))).toEqual([expect.stringMatching(/^Sold 0\.5 BTC @ 95\.0000 /)]);
     expect(openGaps(t.db)).toEqual([]);
   });
 

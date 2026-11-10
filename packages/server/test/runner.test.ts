@@ -208,6 +208,7 @@ describe('EngineRunner', () => {
     t.market.setFresh('BTCUSDT', false);
     const events = t.runner.attachOco({ symbol: 'BTCUSDT', qty: '0.5', stopLoss: '95', takeProfit: '110' });
     expect(events.filter((e) => e.type === 'order_rejected')).toHaveLength(2);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS); // the rejection waits behind the "interrupted" notice
     expect(t.sent.filter((m) => m.type === 'notice' && m.kind === 'rejected').map((m) => m.text)).toEqual([
       'Live data interrupted for BTCUSDT',
     ]);
@@ -1140,6 +1141,73 @@ describe('feed notices', () => {
     expect(feedNotices(t)).toEqual(['Live data restored for BTCUSDT']);
     t.clock.advance(FEED_NOTICE_WINDOW_MS);
     expect(feedNotices(t)).toEqual(['Live data restored for BTCUSDT', 'Live data interrupted for ETHUSDT: Disconnected']);
+  });
+
+  it('a fill right after a restore is held behind the grouped "restored" notice and sent right after it', () => {
+    const t = twoCoins();
+    t.runner.deposit('spot', D('1000'));
+    setFresh(t, ['spot:BTCUSDT', 'spot:ETHUSDT'], false);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    t.sent.length = 0;
+    setFresh(t, ['spot:BTCUSDT', 'spot:ETHUSDT'], true);
+    t.clock.advance(1000); // restored: the notice waits for its window
+    t.runner.submit(marketBuy('1'));
+    t.clock.advance(100); // the fill
+    expect(t.eventsOf('fill')).toHaveLength(1);
+    expect(t.notices()).toEqual([]);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS - 100); // never later than the window
+    expect(t.notices()).toEqual(['Live data restored for 2 markets: BTC, ETH (spot)', 'Bought 1 BTC @ 100.0500 · slippage $0.05 · fee 0.001 BTC']);
+  });
+
+  it('a catch-up summary right after a restore is sent after the "restored" notice', async () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    t.runner.submit(limitBuy('99.50', '1'));
+    t.clock.advance(100); // open: the gap will need catching up
+    t.market.setFresh('BTCUSDT', false);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    t.sent.length = 0;
+    t.market.setFresh('BTCUSDT', true);
+    t.clock.advance(1000); // restored, and catching up
+    await settle();
+    expect(t.eventsOf('catch_up')).toHaveLength(1);
+    expect(t.notices()).toEqual([]);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    expect(t.notices()).toEqual(['Live data restored for BTCUSDT', expect.stringMatching(/^Caught up BTCUSDT after the data gap /)]);
+  });
+
+  it('a rejection on stale data right after an interruption is sent after the "interrupted" notice', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    t.clock.advance(1000);
+    t.market.setFresh('BTCUSDT', false);
+    t.clock.advance(1000); // interrupted: the notice waits for its window
+    expect(submittedOrder(t.runner.submit(marketBuy('1'))).rejectReason).toBe('Live data interrupted for BTCUSDT');
+    expect(t.notices()).toEqual([]);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    expect(t.notices()).toEqual(['Live data interrupted for BTCUSDT: Disconnected', 'Live data interrupted for BTCUSDT']);
+  });
+
+  it('with no feed notice waiting, every other notice goes out at once', () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('spot', D('1000'));
+    t.runner.submit(marketBuy('1'));
+    t.clock.advance(100);
+    expect(t.notices()).toEqual(['Bought 1 BTC @ 100.0500 · slippage $0.05 · fee 0.001 BTC']);
+  });
+
+  it('stop() sends the waiting feed notice first, then the notices held behind it, in order', () => {
+    const t = twoCoins();
+    t.runner.deposit('spot', D('1000'));
+    setFresh(t, ['spot:ETHUSDT'], false);
+    t.clock.advance(1000); // ETH interrupted, waiting
+    t.runner.submit(marketBuy('1'));
+    t.clock.advance(100); // the BTC fill, held
+    t.runner.stop();
+    expect(t.notices()).toEqual(['Live data interrupted for ETHUSDT: Disconnected', 'Bought 1 BTC @ 100.0500 · slippage $0.05 · fee 0.001 BTC']);
   });
 
   it('a failure sending the notice when its window ends is fatal, like any runner timer, never an uncaught exception', () => {
