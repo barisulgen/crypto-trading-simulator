@@ -11,7 +11,7 @@ import { WarningBanner } from '../components/WarningBanner.tsx';
 import type { Slot } from '../components/Panel.tsx';
 import { fmtPrice } from '../lib/format.ts';
 import { useLive } from '../lib/live.ts';
-import { replaceRoute, selectionFromParams, selectionParams, useRoute } from '../lib/route.ts';
+import { replaceSelection, selectionFromParams, useRoute } from '../lib/route.ts';
 
 /** Phone tabs, in order. On desktop every slot is visible in the grid (see .trade-grid). */
 const TABS: { slot: Slot; label: string }[] = [
@@ -53,15 +53,19 @@ function useSelectionInHash(): void {
   const route = useRoute();
   const symbols = useLive((s) => s.meta?.symbols) ?? FALLBACK_SYMBOLS;
   const { symbol, market } = useLive((s) => s.selected);
+  const onTrade = route.path === '/';
   const hash = route.params.toString();
   useEffect(() => {
+    // Another page's parameters (History's ?symbol=) are not a selection.
+    if (!onTrade) return;
     const { selected, select } = useLive.getState();
     const want = selectionFromParams(new URLSearchParams(hash), symbols, selected);
     if (want.symbol !== selected.symbol || want.market !== selected.market) select(want.symbol, want.market);
-  }, [hash, symbols]);
+  }, [onTrade, hash, symbols]);
   useEffect(() => {
     // Read the store, not this render's values: the effect above may have just changed them.
-    replaceRoute('/', selectionParams(useLive.getState().selected));
+    // Skipped once the address has left the trade route, so a navigation away is not undone.
+    replaceSelection(useLive.getState().selected);
   }, [symbol, market, hash]);
 }
 
