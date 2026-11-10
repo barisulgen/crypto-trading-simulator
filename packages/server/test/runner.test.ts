@@ -1142,6 +1142,20 @@ describe('feed notices', () => {
     expect(feedNotices(t)).toEqual(['Live data restored for BTCUSDT', 'Live data interrupted for ETHUSDT: Disconnected']);
   });
 
+  it('a failure sending the notice when its window ends is fatal, like any runner timer, never an uncaught exception', () => {
+    const t = twoCoins();
+    setFresh(t, ['spot:BTCUSDT'], false);
+    t.clock.advance(1000); // the interruption waits for its window
+    const push = t.sent.push.bind(t.sent);
+    t.sent.push = (...m) => {
+      if (m.some((x) => x.type === 'notice')) throw new Error('socket write failed');
+      return push(...m);
+    };
+    expect(() => t.clock.advance(FEED_NOTICE_WINDOW_MS)).not.toThrow();
+    expect(t.fatal).toHaveLength(1);
+    expect(t.logs.some((l) => l.includes('background task failed') && l.includes('socket write failed'))).toBe(true);
+  });
+
   it('stop() sends the notice still waiting for its window', () => {
     const t = twoCoins();
     setFresh(t, ALL, false);

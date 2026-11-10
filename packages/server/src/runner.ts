@@ -1444,9 +1444,13 @@ export class EngineRunner implements FundingSim {
     if (this.feedBatch === null) {
       const batch: { kind: typeof kind; entries: FeedNoticeEntry[] } = { kind, entries: [] };
       this.feedBatch = batch;
-      this.timer(() => {
-        if (this.feedBatch === batch) this.flushFeedNotices();
-      }, FEED_NOTICE_WINDOW_MS);
+      this.timer(
+        () =>
+          this.background(() => {
+            if (this.feedBatch === batch) this.flushFeedNotices();
+          }),
+        FEED_NOTICE_WINDOW_MS,
+      );
     }
     this.feedBatch.entries.push({ ...splitKey(key), ...(reason !== undefined ? { reason } : {}) });
   }
