@@ -18,6 +18,7 @@ import type { Candle } from '../src/market/candles.ts';
 import {
   CATCHING_UP_REFUSAL,
   EngineRunner,
+  FEED_NOTICE_WINDOW_MS,
   GAP_NOT_APPLIED_REFUSAL,
   LEVERAGE_TRANSFER_REFUSAL,
   LEVERAGE_TRANSFER_STALE_REFUSAL,
@@ -921,6 +922,27 @@ describe('perp REST', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(liquidations(third.msgs)).toEqual([]);
     third.ws.terminate();
+  });
+
+  it('a liquidation while a "restored" notice collects reaches the socket at once, ahead of it', async () => {
+    const t = await perpApp();
+    await openLong(t);
+    const { ws, msgs } = await t.connect();
+    await waitFor(() => msgs.find((m) => m.type === 'positions'));
+    t.market.setFresh('BTCUSDT', false);
+    t.clock.advance(2000 + FEED_NOTICE_WINDOW_MS); // interrupted, and its notice sent
+    await waitFor(() => msgs.find((m) => m.type === 'notice' && m.kind === 'feed_gap'));
+    t.market.setFresh('BTCUSDT', true);
+    const seen = msgs.length;
+    t.clock.advance(1000); // spot BTC restored: its notice collects for the window
+    t.perpMarket.mark('BTCUSDT', '76000');
+    await waitFor(() => msgs.slice(seen).find((m) => m.type === 'notice' && m.kind === 'liquidation'));
+    const kinds = () => msgs.slice(seen).filter((m) => m.type === 'notice').map((m) => m.kind);
+    expect(kinds()).toEqual(['liquidation']);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    await waitFor(() => (kinds().length === 2 ? true : undefined));
+    expect(kinds()).toEqual(['liquidation', 'feed_restored']);
+    ws.terminate();
   });
 
   it('a live liquidation notice carries its event id, the same one a later connect would replay', async () => {

@@ -6,6 +6,7 @@ import type { Db } from '../src/db/db.ts';
 import { openGap, toJson, touchAlive } from '../src/db/store.ts';
 import {
   FEED_NOTICE_WINDOW_MS,
+  URGENT_NOTICES,
   INTEGRITY_REFUSAL,
   LEVERAGE_TRANSFER_STALE_REFUSAL,
   MARGIN_STALE_REFUSAL,
@@ -1141,6 +1142,46 @@ describe('feed notices', () => {
     expect(feedNotices(t)).toEqual(['Live data restored for BTCUSDT']);
     t.clock.advance(FEED_NOTICE_WINDOW_MS);
     expect(feedNotices(t)).toEqual(['Live data restored for BTCUSDT', 'Live data interrupted for ETHUSDT: Disconnected']);
+  });
+
+  /** Spot BTC restored and its notice collecting, with a long 0.1 BTC perp at 80000, 20x (liquidation 76345.4). */
+  function longWhileRestoring() {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('leverage', D('1000'));
+    t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.1' });
+    t.clock.advance(100);
+    t.market.setFresh('BTCUSDT', false);
+    t.clock.advance(1000 + FEED_NOTICE_WINDOW_MS);
+    t.sent.length = 0;
+    t.market.setFresh('BTCUSDT', true);
+    t.clock.advance(1000); // restored: its notice collects for the window
+    expect(t.notices()).toEqual([]);
+    return t;
+  }
+
+  it('a margin warning during a collecting group goes out at once, ahead of it', () => {
+    expect([...URGENT_NOTICES].sort()).toEqual(['liquidation', 'margin_warning']);
+    const t = longWhileRestoring();
+    t.perp.mark('BTCUSDT', '76600');
+    const kinds = () => t.sent.filter((m) => m.type === 'notice').map((m) => m.kind);
+    expect(kinds()).toEqual(['margin_warning']);
+    expect(t.notices()[0]).toMatch(/^Margin ratio [\d.]+% on BTCUSDT long — liquidation at 76,345\.4$/);
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    expect(kinds()).toEqual(['margin_warning', 'feed_restored']);
+  });
+
+  it('a liquidation during a collecting group goes out at once, ahead of it, with its alert data', () => {
+    const t = longWhileRestoring();
+    t.perp.mark('BTCUSDT', '76340');
+    const sent = t.sent.filter((m) => m.type === 'notice');
+    expect(sent.map((m) => m.kind)).toEqual(['liquidation']);
+    expect(sent[0]!.liquidation).toMatchObject({ symbol: 'BTCUSDT', side: 'long', qty: '0.1', markPrice: '76340' });
+    t.clock.advance(FEED_NOTICE_WINDOW_MS);
+    expect(t.notices()).toEqual([
+      'LIQUIDATED: BTCUSDT long 0.1 at mark 76,340.0 — margin lost $396.00 (fee $30.00)',
+      'Live data restored for BTCUSDT',
+    ]);
   });
 
   it('a fill right after a restore is held behind the grouped "restored" notice and sent right after it', () => {

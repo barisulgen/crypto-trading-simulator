@@ -112,6 +112,11 @@ export const CURSOR_FLUSH_MS = 5000;
  * go out as one, when it ends: an outage or a pause interrupts, then restores, every market at once.
  */
 export const FEED_NOTICE_WINDOW_MS = 2000;
+/**
+ * Notices that never wait behind a feed notice collecting for its window: a position close to
+ * liquidation, or liquidated, is told at once. Every other notice waits behind it (see notice).
+ */
+export const URGENT_NOTICES: ReadonlySet<Notice['kind']> = new Set(['margin_warning', 'liquidation']);
 
 /** An action the runner will not perform in its current state (integrity failure, stopped after an error). */
 export class RefusedError extends Error {
@@ -309,7 +314,7 @@ export class EngineRunner implements FundingSim {
   private cursorSavedAt: number;
   /** The feed notices waiting to go out as one (see feedNotice); null when none waits. */
   private feedBatch: { kind: 'feed_gap' | 'feed_restored'; entries: FeedNoticeEntry[] } | null = null;
-  /** Notices that came while a feed notice waited for its window: sent right after it, in order. */
+  /** Routine notices that came while a feed notice waited for its window: sent right after it, in order. */
   private readonly heldNotices: Notice[] = [];
   private readonly spotTradeListener = (symbol: string, trade: AggTrade) =>
     this.background(() => this.onTrade('spot', symbol, trade));
@@ -1434,12 +1439,14 @@ export class EngineRunner implements FundingSim {
   }
 
   /**
-   * Sends a notice to the owner. While a feed notice waits for its window, every other notice waits
-   * behind it and goes out right after it, in the order they came: the owner never reads a fill,
-   * a catch-up or a rejection before the data interruption or restore that came first.
+   * Sends a notice to the owner. While a feed notice waits for its window, a routine notice (a
+   * fill, a trigger, funding, a rejection, a catch-up summary) waits behind it and goes out right
+   * after it, in the order they came: the owner never reads one before the data interruption or
+   * restore that came first. An urgent one (URGENT_NOTICES: a margin warning, a liquidation, live
+   * or applied by catch-up) goes out at once, whatever waits.
    */
   private notice(n: Notice): void {
-    if (this.feedBatch !== null) this.heldNotices.push(n);
+    if (this.feedBatch !== null && !URGENT_NOTICES.has(n.kind)) this.heldNotices.push(n);
     else this.d.onBroadcast({ type: 'notice', ...n });
   }
 
