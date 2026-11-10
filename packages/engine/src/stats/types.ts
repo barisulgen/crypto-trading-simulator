@@ -49,3 +49,26 @@ export interface BuiltTrades {
   trades: Trade[];
   open: OpenTrade[];
 }
+
+/** Win rate, averages, profit factor, expectancy, extremes and streaks of a set of closed trades. */
+export interface TradeQuality {
+  count: number;
+  wins: number;
+  losses: number;
+  breakEven: number;
+  /** A fraction: 0.5 is 50 %. Null with no trades. */
+  winRate: Decimal | null;
+  avgWin: Decimal | null;
+  /** Negative. */
+  avgLoss: Decimal | null;
+  /** Gross wins over the size of gross losses. Null when there is no losing trade. */
+  profitFactor: Decimal | null;
+  /** True when there are trades and none lost. */
+  noLosses: boolean;
+  /** Mean result per trade. */
+  expectancy: Decimal | null;
+  best: Trade | null;
+  worst: Trade | null;
+  longestWinStreak: number;
+  longestLossStreak: number;
+}
