@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 import { FakeBinance, START_PRICES, SYMBOLS } from './fakeBinance.ts';
@@ -13,7 +13,43 @@ import { FakeBinance, START_PRICES, SYMBOLS } from './fakeBinance.ts';
 /** The real server's entry point, run as its own process exactly as `npm start` runs it. */
 const MAIN = fileURLToPath(new URL('../../src/main.ts', import.meta.url));
 const require = createRequire(import.meta.url);
-const TSX_LOADER = pathToFileURL(join(dirname(require.resolve('tsx/package.json')), 'dist', 'esm', 'index.mjs')).href;
+/** tsx's ESM loader, resolved through its package exports. */
+export const TSX_LOADER = pathToFileURL(require.resolve('tsx/esm')).href;
+/** The read-only key pair the e2e servers run with; the fake checks signatures made with it. */
+export const E2E_KEY = 'e2e-read-only-key';
+export const E2E_SECRET = 'e2e-read-only-secret';
+/** How many times a server is started on a fresh port when the one it was given is taken. */
+const PORT_ATTEMPTS = 3;
+
+/** Server processes started and not yet exited. */
+const liveServers = new Set<ChildProcess>();
+
+/**
+ * Every server still running dies with the test process, however it ends: normally, on an
+ * uncaught error, or on Ctrl+C / a kill signal.
+ */
+function killAll(): void {
+  for (const c of liveServers) {
+    try {
+      c.kill('SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+  liveServers.clear();
+}
+process.on('exit', killAll);
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
+  process.on(signal, () => {
+    killAll();
+    process.exit(code);
+  });
+}
+
+/** How many server processes are running now. */
+export function liveServerCount(): number {
+  return liveServers.size;
+}
 
 /** Polls `check` until it returns a value other than undefined/false, or fails after `timeoutMs` saying `what`. */
 export async function waitFor<T>(what: string, check: () => T | undefined | false | Promise<T | undefined | false>, timeoutMs = 15_000, everyMs = 50): Promise<T> {
@@ -57,15 +93,22 @@ export interface ServerOptions {
   /** The scenario's directory: the server runs in it (no settings file there) with its database. */
   dir: string;
   dbPath: string;
+  /** Extra settings for the server, over the ones pointing it at the fake. */
+  env?: Record<string, string>;
+  /** The port to try first (default: a free one). */
+  port?: number;
 }
+
+/** The server could not listen: its port was taken. */
+class PortTaken extends Error {}
 
 /** The simulator server, spawned from its entry point against the fake Binance. */
 export class ServerProcess {
   readonly logs: string[] = [];
-  private exited: Promise<number | null>;
+  private readonly exited: Promise<number | null>;
 
   private constructor(
-    private readonly child: ChildProcess,
+    readonly child: ChildProcess,
     readonly port: number,
   ) {
     const onData = (chunk: Buffer) => {
@@ -76,8 +119,22 @@ export class ServerProcess {
     this.exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
   }
 
+  /**
+   * Spawns the server and resolves once it answers. A server that exits first rejects at once with
+   * its output; one whose port was taken meanwhile is started again on another.
+   */
   static async start(o: ServerOptions): Promise<ServerProcess> {
-    const port = await freePort();
+    for (let attempt = 1; ; attempt++) {
+      const port = attempt === 1 && o.port !== undefined ? o.port : await freePort();
+      try {
+        return await ServerProcess.startOn(o, port);
+      } catch (e) {
+        if (!(e instanceof PortTaken) || attempt >= PORT_ATTEMPTS) throw e;
+      }
+    }
+  }
+
+  private static async startOn(o: ServerOptions, port: number): Promise<ServerProcess> {
     const env: NodeJS.ProcessEnv = { ...process.env };
     // Nothing from the developer's own settings reaches the server under test.
     for (const k of Object.keys(env)) if (/^(BINANCE_|APP_PASSWORD$|HOST$|PORT$|DB_PATH$)/.test(k)) delete env[k];
@@ -85,19 +142,36 @@ export class ServerProcess {
       PORT: String(port),
       DB_PATH: o.dbPath,
       // Any key pair: the fake accepts every signature, so the signed leverage brackets are used.
-      BINANCE_KEY: 'e2e-read-only-key',
-      BINANCE_SECRET: 'e2e-read-only-secret',
+      BINANCE_KEY: E2E_KEY,
+      BINANCE_SECRET: E2E_SECRET,
+      ...o.env,
     });
     const child = spawn(process.execPath, ['--import', TSX_LOADER, MAIN], { cwd: o.dir, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    liveServers.add(child);
+    child.once('exit', () => liveServers.delete(child));
     const server = new ServerProcess(child, port);
+    let starting = true;
+    const exited = server.exited.then((code) => {
+      if (!starting) return;
+      const output = server.logs.join('\n');
+      if (/EADDRINUSE|Could not listen on/.test(output)) throw new PortTaken(output);
+      throw new Error(`server exited with ${code} while starting:\n${output}`);
+    });
+    // Each probe gives up after a second: whatever holds the port may accept and never answer.
+    const listening = waitFor('the server to listen', async () => {
+      if (!starting) return true;
+      const res = await fetch(`${server.url}/api/meta`, { signal: AbortSignal.timeout(1000) });
+      return res.ok && child.exitCode === null;
+    }, 30_000, 100);
     try {
-      await waitFor('the server to listen', async () => {
-        if (child.exitCode !== null) throw new Error(`server exited with ${child.exitCode}:\n${server.logs.join('\n')}`);
-        return (await fetch(`${server.url}/api/meta`)).ok;
-      }, 30_000, 100);
+      await Promise.race([listening, exited]);
     } catch (e) {
       await server.kill();
       throw e;
+    } finally {
+      starting = false;
+      listening.catch(() => {});
+      exited.catch(() => {});
     }
     return server;
   }
@@ -205,7 +279,7 @@ export class LiveClient {
 
 /**
  * One trade at the starting price on every symbol of both markets (orders need a last price), and
- * waits until the server has seen them (the recent trades sent on a subscribe include them).
+ * waits until the server has seen them all (the recent trades sent on a subscribe include them).
  */
 export async function printOpeningTrades(fake: FakeBinance, server: ServerProcess): Promise<void> {
   const ids = new Map<string, number>();
@@ -213,11 +287,13 @@ export async function printOpeningTrades(fake: FakeBinance, server: ServerProces
     for (const market of ['spot', 'perp'] as const) ids.set(`${market}:${s}`, fake.trade(market, s, START_PRICES[s]!, '0.5', { sellerInitiated: false }));
   }
   const probe = await server.client();
+  const last = SYMBOLS.at(-1)!;
   try {
+    // Sent in order on one socket per market: the last symbol's trade seen means all were.
     for (const market of ['spot', 'perp'] as const) {
       const from = probe.messages.length;
-      probe.subscribe(market, 'BTCUSDT');
-      await probe.waitForMessage('trades', (m) => m.market === market && m.trades.some((t: any) => t.id === ids.get(`${market}:BTCUSDT`)), 5000, from);
+      probe.subscribe(market, last);
+      await probe.waitForMessage('trades', (m) => m.market === market && m.symbol === last && m.trades.some((t: any) => t.id === ids.get(`${market}:${last}`)), 5000, from);
     }
   } finally {
     probe.close();
@@ -233,24 +309,65 @@ export function allFresh(health: any, keys: string[]): boolean {
  * A fake Binance and the server against it on a fresh database, with one live client, once the
  * given market keys are fresh. `cleanup` stops everything and deletes the temporary directory.
  */
-export async function startScenario(freshKeys: string[] = ['spot:BTCUSDT', 'perp:BTCUSDT']) {
+export interface ScenarioOptions {
+  /** The market keys that must be fresh before the scenario starts (default BTCUSDT spot and perp). */
+  freshKeys?: string[];
+  freshTimeoutMs?: number;
+  /** Told of each part as it is made, so a test can check what a failed setup left behind. */
+  observe?: (part: { fake?: FakeBinance; server?: ServerProcess; dir?: string }) => void;
+}
+
+export async function startScenario(opts: ScenarioOptions | string[] = {}) {
+  const o: ScenarioOptions = Array.isArray(opts) ? { freshKeys: opts } : opts;
+  const freshKeys = o.freshKeys ?? ['spot:BTCUSDT', 'perp:BTCUSDT'];
   const fake = new FakeBinance();
   await fake.start();
-  const tmp = tempDir();
-  const server = await ServerProcess.start({ fake, dir: tmp.dir, dbPath: tmp.dbPath });
-  const client = await server.client();
-  await client.waitForMessage('health', (h) => allFresh(h, freshKeys), 20_000);
-  await printOpeningTrades(fake, server);
+  o.observe?.({ fake });
+  let tmp: ReturnType<typeof tempDir> | null = null;
+  let server: ServerProcess | null = null;
+  let client: LiveClient | null = null;
+  // Whatever fails from here, nothing is left running or on disk.
+  const teardown = async () => {
+    client?.close();
+    await server?.kill();
+    await fake.stop();
+    tmp?.remove();
+  };
+  try {
+    tmp = tempDir();
+    o.observe?.({ dir: tmp.dir });
+    server = await ServerProcess.start({ fake, dir: tmp.dir, dbPath: tmp.dbPath });
+    o.observe?.({ server });
+    client = await server.client();
+    const live = client;
+    await live.waitForMessage('health', (h) => allFresh(h, freshKeys), o.freshTimeoutMs ?? 20_000);
+    await printOpeningTrades(fake, server);
+    assertLogHygiene(server);
+  } catch (e) {
+    await teardown();
+    throw e;
+  }
+  const running = server;
   return {
     fake,
-    server,
+    server: running,
     client,
     tmp,
     async cleanup() {
-      client.close();
-      await server.kill();
-      await fake.stop();
-      tmp.remove();
+      try {
+        assertLogHygiene(running);
+      } finally {
+        await teardown();
+      }
     },
   };
+}
+
+/** The server warned that it is not on live Binance, and never logged the key or the secret. */
+export function assertLogHygiene(server: ServerProcess): void {
+  const log = server.logs.join('\n');
+  if (!/Binance endpoints overridden, not live Binance: BINANCE_SPOT_REST_URL \(http:\/\/127\.0\.0\.1:\d+\)/.test(log)) {
+    throw new Error(`no endpoint override warning in the server log:\n${log}`);
+  }
+  for (const secret of [E2E_KEY, E2E_SECRET]) if (log.includes(secret)) throw new Error('the server log contains the API key or secret');
 }
