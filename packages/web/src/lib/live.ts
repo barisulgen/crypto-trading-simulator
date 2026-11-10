@@ -12,6 +12,7 @@ import type {
   Meta,
   NoticeMessage,
   PerpMark,
+  PerpSetting,
   ServerMessage,
   Ticker,
   WireAggTrade,
@@ -84,6 +85,11 @@ export interface LiveData {
   marks: Record<string, PerpMark>;
   /** Open perp positions; null until the server has sent them. */
   positions: WirePosition[] | null;
+  /**
+   * Each symbol's perp settings as the server last pushed them (on connect, and on every change made
+   * anywhere); empty until then. Ahead of the ones /api/meta loaded (see perpSettingOf).
+   */
+  perpSettings: Record<string, PerpSetting>;
   account: AccountSnapshot | null;
   /** Open spot orders, newest first. */
   orders: WireOrder[];
@@ -152,6 +158,7 @@ export function initialLiveData(): LiveData {
     catchingUp: [],
     marks: {},
     positions: null,
+    perpSettings: {},
     account: null,
     orders: [],
     perpOrders: [],
@@ -348,6 +355,18 @@ export function leverageTransferBlock(
   return null;
 }
 
+/**
+ * A symbol's perp settings (leverage, margin mode) as the server last said: pushed over the socket,
+ * or else as /api/meta loaded them; undefined while neither has. The leverage chip, the order
+ * form's estimate and the dialogs all read it, so a change made elsewhere shows without a reload.
+ */
+export function perpSettingOf(s: Pick<LiveState, 'meta' | 'perpSettings'>, symbol: string): PerpSetting | undefined {
+  const pushed = s.perpSettings[symbol];
+  if (pushed) return pushed;
+  const loaded = s.meta?.perp?.[symbol];
+  return loaded ? { leverage: loaded.leverage, marginMode: loaded.marginMode } : undefined;
+}
+
 /** Whether a book, trades or kline message is for the market and coin shown (no market means spot). */
 function isSelected(s: LiveData, msg: { market?: Market; symbol: string }): boolean {
   return msg.symbol === s.selected.symbol && (msg.market ?? 'spot') === s.selected.market;
@@ -364,6 +383,8 @@ export function reduce(s: LiveData, msg: ServerMessage, now: number): Partial<Li
       return { marks: msg.marks };
     case 'positions':
       return { positions: msg.positions };
+    case 'perpSettings':
+      return { perpSettings: msg.settings };
     case 'account': {
       const moved = s.account !== null && balancesKey(s.account) !== balancesKey(msg.account);
       return moved ? { account: msg.account, fillSeq: s.fillSeq + 1 } : { account: msg.account };

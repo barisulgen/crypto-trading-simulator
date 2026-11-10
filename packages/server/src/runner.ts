@@ -174,10 +174,14 @@ export interface AccountSnapshot extends AccountValue {
   basis: Record<string, { qty: Decimal; cost: Decimal }>;
 }
 
+/** Every symbol's perp settings: its leverage (the default, capped at the maximum, until one is set) and margin mode. */
+export type PerpSettingsMap = Record<string, { leverage: number; marginMode: 'isolated' }>;
+
 export type RunnerMessage =
   | { type: 'account'; account: AccountSnapshot }
   | { type: 'orders'; orders: SpotOrder[]; perpOrders: PerpOrder[] }
   | { type: 'positions'; positions: PositionView[] }
+  | { type: 'perpSettings'; settings: PerpSettingsMap }
   | ({ type: 'notice' } & Notice)
   | ({ type: 'health' } & HealthMessage);
 
@@ -297,6 +301,8 @@ export class EngineRunner implements FundingSim {
   private dead = false;
   private started = false;
   private lastStateKey = '';
+  /** The perp settings last broadcast, as JSON. */
+  private lastSettingsKey = '';
   /** When the trade cursor was last saved. */
   private cursorSavedAt: number;
   /** The feed notices waiting to go out as one (see feedNotice); null when none waits. */
@@ -692,6 +698,11 @@ export class EngineRunner implements FundingSim {
     return { leverage: leverageFor(this.d.sim.perp.state, symbol, this.bracketsOf(symbol)), marginMode: 'isolated' };
   }
 
+  /** Every symbol's perp settings (see perpSetting). */
+  perpSettings(): PerpSettingsMap {
+    return Object.fromEntries(this.d.symbols.map((s) => [s, this.perpSetting(s)]));
+  }
+
   get state(): SpotState {
     return this.d.sim.spot.state;
   }
@@ -830,6 +841,7 @@ export class EngineRunner implements FundingSim {
       }
     }
     this.publishState(events.length > 0);
+    this.publishSettings();
     const lookup = { ...this.noticeLookup(), eventId: (e: SimEvent) => eventIds.get(e) };
     for (const n of [...noticesFor(events, lookup), ...extra()]) this.notice(n);
   }
@@ -971,6 +983,19 @@ export class EngineRunner implements FundingSim {
     this.d.onBroadcast({ type: 'account', account: this.account() });
     this.d.onBroadcast({ type: 'orders', orders, perpOrders });
     this.d.onBroadcast({ type: 'positions', positions: this.positions() });
+  }
+
+  /**
+   * Every symbol's perp settings, after an engine call that changed any: a leverage set here, by
+   * another browser or through the API, or a default that follows the leverage tiers once they load.
+   * So every open page shows the leverage the next order will use without reloading.
+   */
+  private publishSettings(): void {
+    const settings = this.perpSettings();
+    const key = JSON.stringify(settings);
+    if (key === this.lastSettingsKey) return;
+    this.lastSettingsKey = key;
+    this.d.onBroadcast({ type: 'perpSettings', settings });
   }
 
   /**

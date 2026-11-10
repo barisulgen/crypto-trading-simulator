@@ -48,7 +48,13 @@ function setup() {
     },
   };
   const candles = { spot: service, perp: service };
-  const runner = { account: () => ({}) as any, openOrders: () => [], openPerpOrders: () => [], positions: () => [] };
+  const runner = {
+    account: () => ({}) as any,
+    openOrders: () => [],
+    openPerpOrders: () => [],
+    positions: () => [],
+    perpSettings: () => ({ BTCUSDT: { leverage: 20, marginMode: 'isolated' as const } }),
+  };
   const health = () => ({ health: market.healthSnapshot(), markets: {}, catchingUp: [] });
   const hub = new ClientHub({ market, perpMarket, candles, runner, symbols: ['BTCUSDT'], setTimer: clock.setTimer, logger: silent, health });
   hub.start();
@@ -70,15 +76,16 @@ describe('ClientHub backpressure', () => {
     const s = new FakeSocket();
     s.bufferedAmount = 2 * MB;
     t.hub.add(s);
-    expect(s.sent.map((m) => m.type)).toEqual(['tickers', 'health', 'account', 'orders', 'marks', 'positions']);
+    expect(s.sent.map((m) => m.type)).toEqual(['tickers', 'health', 'account', 'orders', 'marks', 'positions', 'perpSettings']);
+    expect(s.sent.at(-1)).toEqual({ type: 'perpSettings', settings: { BTCUSDT: { leverage: 20, marginMode: 'isolated' } } });
 
     t.hub.broadcast(notice);
-    expect(s.sent).toHaveLength(6); // skipped
+    expect(s.sent).toHaveLength(7); // skipped
     expect(s.terminated).toBe(false);
 
     s.bufferedAmount = MB; // at the threshold: still sent
     t.hub.broadcast(notice);
-    expect(s.sent).toHaveLength(7);
+    expect(s.sent).toHaveLength(8);
   });
 
   it('terminates a client whose buffer exceeds 4 MB and releases its kline subscription', () => {

@@ -644,6 +644,27 @@ describe('perp REST', () => {
     expect((await t.call('GET', '/api/positions')).body.positions[0].leverage).toBe(10);
   });
 
+  it('a leverage change reaches every open socket at once; a socket that connects later has it in its snapshot', async () => {
+    const t = await perpApp();
+    const a = await t.connect();
+    const b = await t.connect();
+    const snapshot = await waitFor(() => a.msgs.find((m) => m.type === 'perpSettings'));
+    // Every symbol's setting, the default until one is set.
+    expect(Object.keys(snapshot.settings).sort()).toEqual([...config.symbols].sort());
+    expect(snapshot.settings.BTCUSDT).toEqual({ leverage: 20, marginMode: 'isolated' });
+    const seen = [a.msgs.length, b.msgs.length];
+
+    expect((await t.call('POST', '/api/perp/leverage', { symbol: 'BTCUSDT', leverage: 7 })).status).toBe(200);
+    for (const [i, c] of [a, b].entries()) {
+      const pushed = await waitFor(() => c.msgs.slice(seen[i]).find((m) => m.type === 'perpSettings'));
+      expect(pushed.settings.BTCUSDT).toEqual({ leverage: 7, marginMode: 'isolated' });
+      expect(pushed.settings.ETHUSDT).toEqual({ leverage: 20, marginMode: 'isolated' });
+    }
+    const late = await t.connect();
+    expect((await waitFor(() => late.msgs.find((m) => m.type === 'perpSettings'))).settings.BTCUSDT.leverage).toBe(7);
+    for (const c of [a, b, late]) c.ws.terminate();
+  });
+
   it('engine refusals that are temporary (tiers not loaded, no fresh mark) are 503s, like missing rules', async () => {
     const t = await perpApp();
     await openLong(t);

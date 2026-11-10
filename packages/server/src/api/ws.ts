@@ -8,7 +8,7 @@ import type { MarketKey } from '../market/marketKey.ts';
 import type { PerpMark } from '../market/perpMarketData.ts';
 import type { Ticker } from '../market/spotFeed.ts';
 import type { SetTimer } from '../market/ws.ts';
-import type { AccountSnapshot, HealthMap, PositionView } from '../runner.ts';
+import type { AccountSnapshot, HealthMap, PerpSettingsMap, PositionView } from '../runner.ts';
 import { SESSION_EXPIRED } from './auth.ts';
 
 const TICKER_MS = 1000;
@@ -85,6 +85,8 @@ export interface HubDeps {
     openOrders(): SpotOrder[];
     openPerpOrders(): PerpOrder[];
     positions(): PositionView[];
+    /** Every symbol's perp settings (leverage, margin mode). */
+    perpSettings(): PerpSettingsMap;
     /** The liquidation notices whose alert has not been acknowledged, oldest first (absent: none). */
     unacknowledgedLiquidations?(): object[];
   };
@@ -108,7 +110,7 @@ interface Client {
 /**
  * The browser clients. Every client gets both markets' tickers, the revalued account, the perp
  * marks (with the index price) and the positions (each once a second), health (every 5 s and on
- * change) and the runner's account / orders / positions / notice messages; a client that sent
+ * change) and the runner's account / orders / positions / perp settings / notice messages; a client that sent
  * `{ type: 'subscribe', market, symbol, interval }` (market defaults to spot) also gets that
  * symbol's klines, book (top 20, at most 4/s)
  * and trades from that market only: a perp subscription never carries spot data, nor the reverse,
@@ -162,8 +164,8 @@ export class ClientHub {
   }
 
   /**
-   * A new connection: snapshot first (tickers, health, account, orders, marks, positions, then the
-   * liquidation notices not acknowledged yet), then live messages.
+   * A new connection: snapshot first (tickers, health, account, orders, marks, positions, every
+   * symbol's perp settings, then the liquidation notices not acknowledged yet), then live messages.
    */
   add(socket: HubSocket, session: HubSession | null = null): void {
     const client: Client = { key: null, unsubscribeKline: null, alive: true, session };
@@ -181,6 +183,7 @@ export class ClientHub {
     this.sendTo(socket, { type: 'orders', orders: this.d.runner.openOrders(), perpOrders: this.d.runner.openPerpOrders() }, true);
     this.sendTo(socket, { type: 'marks', marks: this.d.perpMarket.marks() }, true);
     this.sendTo(socket, { type: 'positions', positions: this.d.runner.positions() }, true);
+    this.sendTo(socket, { type: 'perpSettings', settings: this.d.runner.perpSettings() }, true);
     for (const n of this.d.runner.unacknowledgedLiquidations?.() ?? []) this.sendTo(socket, { type: 'notice', ...n }, true);
   }
 

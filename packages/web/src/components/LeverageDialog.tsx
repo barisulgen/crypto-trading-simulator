@@ -3,17 +3,13 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, ApiError } from '../lib/api.ts';
 import { fmtUsd } from '../lib/format.ts';
-import { catchingUpBlock, useLive } from '../lib/live.ts';
+import { catchingUpBlock, perpSettingOf, useLive } from '../lib/live.ts';
 import { maxPositionAt } from '../lib/perpForm.ts';
 import { Button, Dialog, ErrorText, TextField } from './ui.tsx';
 
-/** The store's copy of a symbol's leverage setting, after the server confirmed a change. */
+/** The store's copy of a symbol's leverage setting, after the server confirmed a change (its push follows). */
 function storeLeverage(symbol: string, leverage: number): void {
-  useLive.setState((s) => {
-    const perp = s.meta?.perp?.[symbol];
-    if (!s.meta || !perp) return {};
-    return { meta: { ...s.meta, perp: { ...s.meta.perp, [symbol]: { ...perp, leverage } } } };
-  });
+  useLive.setState((s) => ({ perpSettings: { ...s.perpSettings, [symbol]: { leverage, marginMode: 'isolated' } } }));
 }
 
 /** A whole number from 1 to max as typed, or null. */
@@ -32,6 +28,7 @@ function wholeIn(input: string, max: number): number | null {
  */
 export function LeverageDialog({ open, symbol, onClose }: { open: boolean; symbol: string; onClose(): void }) {
   const perp = useLive((s) => s.meta?.perp?.[symbol]);
+  const leverage = useLive((s) => perpSettingOf(s, symbol)?.leverage);
   const pushNotice = useLive((s) => s.pushNotice);
   const blocked = useLive((s) => catchingUpBlock(s, 'perp', symbol));
   const max = perp?.maxLeverage ?? null;
@@ -42,7 +39,7 @@ export function LeverageDialog({ open, symbol, onClose }: { open: boolean; symbo
 
   useEffect(() => {
     if (open) {
-      setValue(String(perp?.leverage ?? ''));
+      setValue(String(leverage ?? ''));
       setError('');
     }
     // Only when the dialog opens: the field is the owner's while it is open.
@@ -95,7 +92,7 @@ export function LeverageDialog({ open, symbol, onClose }: { open: boolean; symbo
               min={1}
               max={max}
               step={1}
-              value={chosen ?? perp?.leverage ?? 1}
+              value={chosen ?? leverage ?? 1}
               onChange={(e) => {
                 setValue(e.target.value);
                 setError('');

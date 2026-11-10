@@ -5,7 +5,7 @@ import type { Side } from '@sim/engine';
 import { api, ApiError } from '../lib/api.ts';
 import type { WirePerpPreview } from '../lib/api.ts';
 import { fmtCost, fmtFloor, fmtNum, fmtPrice, fmtQty, fmtUsd, signOf, tickDecimals } from '../lib/format.ts';
-import { feedOf, feedStatus, useLive } from '../lib/live.ts';
+import { feedOf, feedStatus, perpSettingOf, useLive } from '../lib/live.ts';
 import { liqPriceAtTick } from '../lib/market.ts';
 import { CATCHING_UP_REASON, hasPrice, submitBlock } from '../lib/orderForm.ts';
 import {
@@ -297,8 +297,10 @@ export function PerpOrderForm() {
   const priceClick = useLive((s) => s.priceClick);
   const base = rules?.base ?? symbol.replace(/USDT$/, '');
   const quote = rules?.quote ?? 'USDT';
-  const leverage = perp?.leverage;
-  const marginMode = perp ? MARGIN_MODE_LABEL[perp.marginMode] : '-';
+  // As the server last said (pushed on every change, here or elsewhere), not only as the page loaded it.
+  const leverage = useLive((s) => perpSettingOf(s, symbol)?.leverage);
+  const mode = useLive((s) => perpSettingOf(s, symbol)?.marginMode);
+  const marginMode = mode ? MARGIN_MODE_LABEL[mode] : '-';
   // Never a live-looking estimate on data that is not live.
   // A catch-up still applying a data gap: the server refuses orders on the symbol until it is done.
   const catchingUp = useLive((s) => feedStatus(s, 'perp', symbol).state === 'catching_up');

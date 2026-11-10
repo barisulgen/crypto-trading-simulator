@@ -190,6 +190,12 @@ export interface PerpMeta {
   marginMode: 'isolated';
 }
 
+/** A symbol's perp settings: the leverage the next order uses and the margin mode. */
+export interface PerpSetting {
+  leverage: number;
+  marginMode: 'isolated';
+}
+
 /** Messages the server sends on /ws. */
 export type ServerMessage =
   | { type: 'tickers'; tickers: Record<string, Ticker>; perpTickers?: Record<string, Ticker> }
@@ -198,6 +204,8 @@ export type ServerMessage =
   | { type: 'orders'; orders: WireOrder[]; perpOrders?: WirePerpOrder[] }
   | { type: 'marks'; marks: Record<string, PerpMark> }
   | { type: 'positions'; positions: WirePosition[] }
+  // Every symbol's perp settings: on connect, and whenever any changes (here, in another browser or through the API).
+  | { type: 'perpSettings'; settings: Record<string, PerpSetting> }
   | ({ type: 'notice' } & NoticeMessage)
   // Book, trades and klines carry their market (absent means spot).
   | { type: 'book'; market?: Market; symbol: string; bids: WireLevel[]; asks: WireLevel[] }

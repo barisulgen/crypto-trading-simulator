@@ -1409,6 +1409,22 @@ describe('perps through the runner', () => {
     expect(t.sim.perp.state.positions.BTCUSDT?.qty.toString()).toBe('0.1');
   }
 
+  it("a leverage change broadcasts every symbol's perp settings once; calls that change none send none", () => {
+    const t = setup();
+    t.runner.start();
+    t.runner.deposit('leverage', D('1000'));
+    expect(t.runner.perpSettings()).toEqual({ BTCUSDT: { leverage: 20, marginMode: 'isolated' } });
+    t.sent.length = 0;
+    expect(t.runner.setLeverage('BTCUSDT', 25).ok).toBe(true);
+    expect(t.sent.filter((m) => m.type === 'perpSettings')).toEqual([
+      { type: 'perpSettings', settings: { BTCUSDT: { leverage: 25, marginMode: 'isolated' } } },
+    ]);
+    t.runner.deposit('leverage', D('1'));
+    expect(t.runner.setMarginMode('BTCUSDT', 'isolated').ok).toBe(true);
+    expect(t.sent.filter((m) => m.type === 'perpSettings')).toHaveLength(1);
+    expect(t.runner.perpSettings()).toEqual({ BTCUSDT: { leverage: 25, marginMode: 'isolated' } });
+  });
+
   it('a perp market order persists, then broadcasts the account (with the position) and the orders', () => {
     const t = setup();
     t.runner.start();
