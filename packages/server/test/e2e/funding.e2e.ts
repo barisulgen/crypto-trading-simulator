@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { D, Decimal } from '@sim/engine';
-import { startScenario, waitFor } from './harness.ts';
+import { allFresh, ServerProcess, startScenario, waitFor } from './harness.ts';
 import { deposit, openPosition, position } from './ops.ts';
 
 const RATE = '0.00012345';
@@ -8,10 +8,12 @@ const SETTLED = { BTCUSDT: '80123.45678', ETHUSDT: '3001.2345' };
 
 describe('e2e: a funding settlement on positions open across the funding time', () => {
   let s: Awaited<ReturnType<typeof startScenario>>;
+  let restarted: ServerProcess | null = null;
   beforeAll(async () => {
     s = await startScenario(['perp:BTCUSDT', 'perp:ETHUSDT']);
   });
   afterAll(async () => {
+    await restarted?.kill();
     await s?.cleanup();
   });
 
@@ -66,8 +68,27 @@ describe('e2e: a funding settlement on positions open across the funding time', 
     expect(D(eth.funding).eq(receivedAmount)).toBe(true);
     const freeAfter = D((await server.get('/api/account')).balances.leverage.USDT.free);
     expect(freeAfter.eq(freeBefore.plus(receivedAmount))).toBe(true);
-    // Settled once: no second poll applies it again.
-    expect(fake.requests.filter((r) => r.path === '/fapi/v1/fundingRate').length).toBeGreaterThanOrEqual(2);
-    expect((await server.history({ market: 'perp', types: 'funding' })).length).toBe(2);
+
+    // Settled once, even across a restart: the restarted server reloads the applied funding time,
+    // and the catch-up of the gap the restart left (the positions are still open, and the
+    // settlement is in the funding history it reads) applies nothing again.
+    await server.stop();
+    restarted = await ServerProcess.start({ fake, dir: s.tmp.dir, dbPath: s.tmp.dbPath });
+    const again = await restarted.client();
+    try {
+      const server2 = restarted;
+      const caughtUp = await waitFor('both perps to catch up', async () => {
+        const rows = await server2.history({ types: 'catch_up' });
+        return rows.length >= 2 ? rows : undefined;
+      }, 30_000, 200);
+      expect(caughtUp.map((r) => r.symbol).sort()).toEqual(['BTCUSDT', 'ETHUSDT']);
+      await again.waitForMessage('health', (h) => allFresh(h, ['perp:BTCUSDT', 'perp:ETHUSDT']), 15_000);
+      for (const r of caughtUp) expect(r.payload.actions).toEqual([]);
+      expect((await restarted.history({ market: 'perp', types: 'funding' })).length).toBe(2);
+      expect(D((await position(restarted, 'BTCUSDT')).funding).eq(paidAmount.neg())).toBe(true);
+      expect(D((await position(restarted, 'ETHUSDT')).funding).eq(receivedAmount)).toBe(true);
+    } finally {
+      again.close();
+    }
   });
 });

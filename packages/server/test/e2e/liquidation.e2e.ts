@@ -30,6 +30,13 @@ describe('e2e: the mark price falls through a long’s liquidation price', () =>
     const mmr = D(bracket.mmr);
     expect(D(bracket.cum).isZero()).toBe(true);
     const liq = D(pos.liquidationPrice);
+    // Closed form for an isolated long with no maintenance amount: (qE − M) ÷ (q(1 − mmr)).
+    const q = D(pos.qty);
+    const closed = q.mul(pos.entryPrice).minus(pos.margin).div(q.mul(D(1).minus(mmr)));
+    expect(liq.eq(closed)).toBe(true);
+    // Shown rounded towards the mark: up, for a long.
+    const shownLiq = closed.toDecimalPlaces(1, Decimal.ROUND_UP);
+    expect(shownLiq.gt(closed)).toBe(true);
 
     // A mark one tick past each level (rounded down, so the ratio is at or past it).
     const markFor = (ratio: string) => longMarkAtRatio(pos, D(ratio), mmr).toDecimalPlaces(1, Decimal.ROUND_DOWN);
@@ -48,7 +55,7 @@ describe('e2e: the mark price falls through a long’s liquidation price', () =>
       const shown = D(/Margin ratio ([\d.]+)% on BTCUSDT long/.exec(n.text)![1]!);
       expect(shown.gte(D(step.ratio).mul(100))).toBe(true);
       expect(shown.lt(D(step.ratio).mul(100).plus(1))).toBe(true);
-      expect(n.text).toContain(`liquidation at ${liq.toDecimalPlaces(1, Decimal.ROUND_UP).toFixed(1)}`);
+      expect(n.text).toContain(`liquidation at ${shownLiq.toFixed(1)}`);
     }
     const warnings = client.notices('margin_warning');
     expect(warnings.map((w) => w.level)).toEqual(['warn', 'error', 'error']);
@@ -58,8 +65,18 @@ describe('e2e: the mark price falls through a long’s liquidation price', () =>
     expect(client.notices('liquidation')).toHaveLength(0);
     expect(await position(server, SYMBOL)).not.toBeNull();
 
-    // Through the liquidation price.
-    const crash = liq.minus(TICK.mul(50)).toDecimalPlaces(1, Decimal.ROUND_DOWN);
+    // The first tick above the liquidation price: still held.
+    const above = client.messages.length;
+    fake.setMark(SYMBOL, { markPrice: shownLiq.toString() });
+    await client.waitForMessage('positions', (m) => m.positions.some((p: any) => p.symbol === SYMBOL && D(p.markPrice).eq(shownLiq)), 5000, above);
+    expect(client.notices('liquidation')).toHaveLength(0);
+    const nearly = await position(server, SYMBOL);
+    expect(nearly).not.toBeNull();
+    expect(D(nearly.marginRatio).lt(1)).toBe(true);
+
+    // One tick lower, below the liquidation price.
+    const crash = shownLiq.minus(TICK);
+    expect(crash.lt(closed)).toBe(true);
     fake.setMark(SYMBOL, { markPrice: crash.toString() });
     const notice = await client.waitForMessage('notice', (m) => m.kind === 'liquidation');
     const detail = notice.liquidation;
@@ -104,8 +121,8 @@ describe('e2e: the mark price falls through a long’s liquidation price', () =>
     // Acknowledged: the next browser is not alerted again.
     await server.ok('/api/liquidations/ack', { eventId: detail.eventId });
     const after = await server.client();
-    await after.waitForMessage('positions');
-    await new Promise((r) => setTimeout(r, 300));
+    // The connect snapshot (with any alert) is sent at once; the next once-a-second tickers follow it.
+    await waitFor('a tickers broadcast after the snapshot', () => after.ofType('tickers').length >= 2, 5000);
     expect(after.notices('liquidation')).toHaveLength(0);
     after.close();
   });

@@ -106,6 +106,9 @@ describe('e2e: an outage, and a restart during it', () => {
     expect(sf.time).toBeLessThan(spotX.minute + MINUTE_MS);
     expect(spotSummary.text).toContain(`Stop-loss filled 0.04 BTC at ${spotX.price.toString()} (worst price of ${hhmm(spotX.minute)} UTC; estimated)`);
     const proceeds = spotX.price.mul('0.04');
+    // The taker fee, 0.1 %, in the USDT received.
+    expect(sf.payload.fill.feeAsset).toBe('USDT');
+    expect(D(sf.payload.fill.fee).eq(proceeds.mul('0.001'))).toBe(true);
     const usdtAfter = D((await restarted.get('/api/account')).balances.spot.USDT.free);
     expect(usdtAfter.eq(usdtBefore.plus(proceeds).minus(D(sf.payload.fill.fee)))).toBe(true);
 

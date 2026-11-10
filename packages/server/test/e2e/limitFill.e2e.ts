@@ -29,9 +29,9 @@ describe('e2e: a perp limit buy fills only on a trade through its price', () => 
     const fromTouch = client.messages.length;
     for (let i = 0; i < 4; i++) fake.trade('perp', SYMBOL, LIMIT, '0.05', { sellerInitiated: true });
     // A buyer lifting an offer below the price is no trade-through for a buy either.
-    fake.trade('perp', SYMBOL, '79899.0', '0.05', { sellerInitiated: false });
-    await client.waitForMessage('trades', (m) => m.market === 'perp' && m.trades.some((t: any) => t.price === '79899'), 5000, fromTouch);
-    await new Promise((r) => setTimeout(r, 500));
+    const last = fake.trade('perp', SYMBOL, '79899.0', '0.05', { sellerInitiated: false });
+    // The server handles a trade before relaying it: once the last is relayed, all were handled.
+    await client.waitForMessage('trades', (m) => m.market === 'perp' && m.trades.some((t: any) => t.id === last), 5000, fromTouch);
     const resting = await findOrder(server, 'perp', order.id);
     expect(resting.status).toBe('open');
     expect(D(resting.filledQty).isZero()).toBe(true);
