@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { FuturesRest } from '../src/binance/futuresRest.ts';
 import { BinanceRest } from '../src/binance/rest.ts';
 import { PauseController } from '../src/binance/restCore.ts';
+import { fetchUnofficialBrackets } from '../src/binance/tiers.ts';
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
   const server = createServer(handler);
@@ -48,5 +49,24 @@ describe('REST requests and redirects', () => {
     await new FuturesRest(fetchImpl, Date.now, { pause }).leverageBracket('k', 's');
     expect(inits.length).toBe(3);
     for (const init of inits) expect(init.redirect).toBe('error');
+  });
+
+  it('the public brackets fetch refuses a redirect too, so a configured web address is the only host it reaches', async () => {
+    const elsewhere: IncomingMessage[] = [];
+    const other = await listen((req, res) => {
+      elsewhere.push(req);
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ code: '000000', data: { brackets: [] } }));
+    });
+    const relay = await listen((req, res) => {
+      res.writeHead(302, { location: `${other.url}${req.url}` }).end();
+    });
+    try {
+      const pause = new PauseController(Date.now);
+      await expect(fetchUnofficialBrackets(fetch, pause, `${relay.url}/bapi/futures/v1/friendly/future/common/brackets`)).rejects.toThrow();
+      expect(elsewhere).toHaveLength(0);
+    } finally {
+      await close(relay.server);
+      await close(other.server);
+    }
   });
 });

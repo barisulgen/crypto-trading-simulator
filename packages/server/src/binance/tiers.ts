@@ -154,7 +154,8 @@ export async function fetchUnofficialBrackets(
 ): Promise<RawJson> {
   pause.assertNotPaused();
   const sentAt = pause.now();
-  const res = await fetchImpl(url, { signal: AbortSignal.timeout(UNOFFICIAL_TIMEOUT_MS) });
+  // A redirect is refused, never followed: only the configured web address is ever reached.
+  const res = await fetchImpl(url, { signal: AbortSignal.timeout(UNOFFICIAL_TIMEOUT_MS), redirect: 'error' });
   if (res.status === 429 || res.status === 418) {
     pause.rateLimited(res.status, res, sentAt, 'Binance web API', 'no weight figures for this host');
   }
