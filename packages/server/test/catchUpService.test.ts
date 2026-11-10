@@ -540,7 +540,7 @@ describe('catch-up: perps', () => {
     expect(b.jobs()).toEqual([expect.objectContaining({ market: 'perp', status: 'done', startedAt: from, endedAt: T + 50 * HOUR })]);
     const notice = b.notices().find((n) => n.startsWith('Caught up BTCUSDT perp'))!;
     expect(notice).toContain('Futures trade history covers only 2 days; open limit orders were cancelled');
-    expect(notice).toContain('Long 0.1 BTC liquidated at 76353.31325301');
+    expect(notice).toContain('Long 0.1 BTC liquidated at 76,353.31325301');
     expect(b.runner.gate(PERP)).toBe('live');
     expect(b.fatal).toEqual([]);
   });
@@ -592,7 +592,7 @@ describe('catch-up: perps', () => {
     });
     expect(liq!.payload.catchUp).toBeUndefined();
     expect(t.sim.perp.state.positions.BTCUSDT).toBeUndefined();
-    expect(t.notices().some((n) => n.startsWith('LIQUIDATED: BTCUSDT long 0.1 at mark 76345.4'))).toBe(true);
+    expect(t.notices().some((n) => n.startsWith('LIQUIDATED: BTCUSDT long 0.1 at mark 76,345.4'))).toBe(true);
   });
 
   it('weight: a 30-min gap with one limit touched in 3 minutes makes exactly 3 aggTrades calls (60 weight), all in the gap', async () => {

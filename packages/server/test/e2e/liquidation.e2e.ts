@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { D, Decimal } from '@sim/engine';
+import { D, Decimal, grouped } from '@sim/engine';
 import { startScenario, waitFor } from './harness.ts';
 import { deposit, longMarkAtRatio, openPosition, position } from './ops.ts';
 
@@ -55,7 +55,7 @@ describe('e2e: the mark price falls through a long’s liquidation price', () =>
       const shown = D(/Margin ratio ([\d.]+)% on BTCUSDT long/.exec(n.text)![1]!);
       expect(shown.gte(D(step.ratio).mul(100))).toBe(true);
       expect(shown.lt(D(step.ratio).mul(100).plus(1))).toBe(true);
-      expect(n.text).toContain(`liquidation at ${shownLiq.toFixed(1)}`);
+      expect(n.text).toContain(`liquidation at ${grouped(shownLiq.toFixed(1))}`);
     }
     const warnings = client.notices('margin_warning');
     expect(warnings.map((w) => w.level)).toEqual(['warn', 'error', 'error']);
@@ -84,7 +84,7 @@ describe('e2e: the mark price falls through a long’s liquidation price', () =>
     expect(typeof detail.eventId).toBe('number');
     expect(D(detail.marginLost).eq(pos.margin)).toBe(true);
     expect(notice.text).toBe(
-      `LIQUIDATED: BTCUSDT long 0.01 at mark ${crash.toFixed(1)} — margin lost $${D(pos.margin).toFixed(2, Decimal.ROUND_UP)} (fee $${D(detail.liquidationFee).toFixed(2, Decimal.ROUND_UP)})`,
+      `LIQUIDATED: BTCUSDT long 0.01 at mark ${grouped(crash.toFixed(1))} — margin lost $${grouped(D(pos.margin).toFixed(2, Decimal.ROUND_UP))} (fee $${grouped(D(detail.liquidationFee).toFixed(2, Decimal.ROUND_UP))})`,
     );
     // The warnings came first, in order, and none after the liquidation.
     const kinds = client.notices().map((n) => n.kind).filter((k) => k === 'margin_warning' || k === 'liquidation');

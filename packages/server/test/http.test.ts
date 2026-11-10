@@ -871,7 +871,7 @@ describe('perp REST', () => {
     await waitFor(() => liquidations(first.msgs)[0]);
     const [alert] = liquidations(first.msgs);
     expect(alert.level).toBe('error');
-    expect(alert.text).toMatch(/^LIQUIDATED: BTCUSDT long 0\.01 at mark 76345\.4/);
+    expect(alert.text).toMatch(/^LIQUIDATED: BTCUSDT long 0\.01 at mark 76,345\.4/);
     expect(alert.liquidation).toEqual({
       eventId: expect.any(Number),
       symbol: 'BTCUSDT',

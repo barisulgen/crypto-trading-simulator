@@ -1441,7 +1441,7 @@ describe('perps through the runner', () => {
     ]);
     expect(account.marksPaused).toEqual([]);
     expect(t.sent.filter((m) => m.type === 'orders').at(-1)!.perpOrders).toEqual([]);
-    expect(t.notices()).toEqual(['Opened long 0.1 BTC @ 80000.0 · fee $4.00 · liq 76345.4']);
+    expect(t.notices()).toEqual(['Opened long 0.1 BTC @ 80,000.0 · fee $4.00 · liq 76,345.4']);
     expect(t.perp.consumed.map((c) => [c.symbol, c.side, c.levels.map((l) => [`${l.price}`, `${l.qty}`])])).toEqual([
       ['BTCUSDT', 'buy', [['80000', '0.1']]],
     ]);
@@ -1457,8 +1457,8 @@ describe('perps through the runner', () => {
     t.runner.submitPerp({ symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.05', reduceOnly: true });
     t.clock.advance(100);
     expect(t.notices().slice(1)).toEqual([
-      'Reduced long 0.05 BTC @ 79990.0 · fee $2.00 · P&L -$0.50 · liq 76345.4',
-      'Closed long 0.05 BTC @ 79990.0 · fee $2.00 · P&L -$0.50',
+      'Reduced long 0.05 BTC @ 79,990.0 · fee $2.00 · P&L -$0.50 · liq 76,345.4',
+      'Closed long 0.05 BTC @ 79,990.0 · fee $2.00 · P&L -$0.50',
     ]);
   });
 
@@ -1469,9 +1469,9 @@ describe('perps through the runner', () => {
     t.sent.length = 0;
     for (const price of ['78000', '76600', '76600', '76400', '76370', '76370']) t.perp.mark('BTCUSDT', price);
     expect(t.sent.filter((m) => m.type === 'notice').map((m) => [m.kind, m.level, m.text])).toEqual([
-      ['margin_warning', 'warn', 'Margin ratio 54.8% on BTCUSDT long — liquidation at 76345.4'],
-      ['margin_warning', 'error', 'Margin ratio 84.9% on BTCUSDT long — liquidation at 76345.4'],
-      ['margin_warning', 'error', 'Margin ratio 92.6% on BTCUSDT long — liquidation at 76345.4'],
+      ['margin_warning', 'warn', 'Margin ratio 54.8% on BTCUSDT long — liquidation at 76,345.4'],
+      ['margin_warning', 'error', 'Margin ratio 84.9% on BTCUSDT long — liquidation at 76,345.4'],
+      ['margin_warning', 'error', 'Margin ratio 92.6% on BTCUSDT long — liquidation at 76,345.4'],
     ]);
     // The warning level given is saved, so a restart does not repeat it.
     const row = t.db.prepare('SELECT data FROM positions').get() as { data: string };
@@ -1514,7 +1514,7 @@ describe('perps through the runner', () => {
     expect(t.eventsOf('position_closed').map((e) => e.payload.reason)).toEqual(['liquidated']);
     expect(t.db.prepare('SELECT count(*) AS n FROM positions').get()).toEqual({ n: 0 });
     expect(t.sent.filter((m) => m.type === 'notice').map((m) => [m.kind, m.level, m.text])).toEqual([
-      ['liquidation', 'error', 'LIQUIDATED: BTCUSDT long 0.1 at mark 76340.0 — margin lost $396.00 (fee $30.00)'],
+      ['liquidation', 'error', 'LIQUIDATED: BTCUSDT long 0.1 at mark 76,340.0 — margin lost $396.00 (fee $30.00)'],
     ]);
     // The same figures as data, for the owner's alert: exact decimal strings, rounded only for display.
     expect(t.sent.filter((m) => m.type === 'notice')[0]!.liquidation).toEqual({

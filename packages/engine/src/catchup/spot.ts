@@ -1,4 +1,4 @@
-import { floorToStep } from '../decimal.ts';
+import { floorToStep, grouped } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
 import { finishSpot } from '../spot/engine.ts';
 import type { SpotEngine } from '../spot/engine.ts';
@@ -305,7 +305,7 @@ class SpotCatchUp {
     const base = this.rules.base;
     switch (e.type) {
       case 'fill': {
-        const what = `${label(e.order)} filled ${e.fill.qty} ${base} at ${e.fill.price}`;
+        const what = `${label(e.order)} filled ${e.fill.qty} ${base} at ${grouped(e.fill.price)}`;
         if (basis === 'aggtrade_replay') return `${what} (replayed trade at ${hhmmss(e.time)}; estimated)`;
         if (basis === 'trigger_minute_worst_price') {
           return `${what} (worst price of ${hhmm(minute)}, its trigger minute; estimated)`;
@@ -330,8 +330,8 @@ class SpotCatchUp {
       case 'order_placed': {
         if (e.order.type !== 'stop_loss') return null;
         const parent = e.order.parentId === null ? undefined : this.s.orders.get(e.order.parentId);
-        const tp = parent?.attach ? ` / take-profit ${parent.attach.takeProfit}` : '';
-        const pair = `Attached stop-loss ${e.order.triggerPrice}${tp}`;
+        const tp = parent?.attach ? ` / take-profit ${grouped(parent.attach.takeProfit)}` : '';
+        const pair = `Attached stop-loss ${grouped(String(e.order.triggerPrice))}${tp}`;
         return `${pair} placed for ${e.order.qty} ${base} at ${hhmmss(e.time)} (estimated)`;
       }
       default:

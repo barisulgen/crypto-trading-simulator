@@ -1,4 +1,4 @@
-import { D, Decimal } from '@sim/engine';
+import { D, Decimal, grouped } from '@sim/engine';
 import type { Fill, MarginWarning, Market, PerpEvent, PerpFill, PerpRules, PositionSide, SimEvent, SpotRules } from '@sim/engine';
 
 export interface Notice {
@@ -130,7 +130,7 @@ interface LiquidationFigures {
 }
 
 /**
- * `LIQUIDATED: BTCUSDT long 0.1 at mark 76340.0 — margin lost $396.00 (fee $30.00)`, with the same
+ * `LIQUIDATED: BTCUSDT long 0.1 at mark 76,340.0 — margin lost $396.00 (fee $30.00)`, with the same
  * figures as data (exact decimal strings) and the event's id. One a catch-up applied says so.
  */
 function liquidationNotice(e: LiquidationFigures, tick: number | null, eventId: number | undefined): Notice {
@@ -255,16 +255,19 @@ function marketsText(entries: FeedNoticeEntry[]): string {
     .join(', ');
 }
 
-/** `Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC` (price at tick decimals + 2, half up; slippage rounded up). */
+/**
+ * `Bought 1.2 BTC @ 100.0583 · slippage $0.07 · fee 0.0012 BTC` (price at tick decimals + 2, half
+ * up; slippage rounded up; both grouped by thousands).
+ */
 function fillText(f: Fill, rules: SpotRules | null): string {
   const verb = f.side === 'buy' ? 'Bought' : 'Sold';
-  const price = rules ? f.price.toFixed(rules.tickSize.decimalPlaces() + 2, Decimal.ROUND_HALF_UP) : f.price.toString();
-  const slippage = f.slippageUsd.toFixed(2, Decimal.ROUND_UP);
+  const price = grouped(rules ? f.price.toFixed(rules.tickSize.decimalPlaces() + 2, Decimal.ROUND_HALF_UP) : f.price);
+  const slippage = usdUp(f.slippageUsd);
   return `${verb} ${f.qty} ${baseOf(f.symbol, rules)} @ ${price} · slippage $${slippage} · fee ${f.fee} ${f.feeAsset}`;
 }
 
 /**
- * `Opened long 0.1 BTC @ 80000.0 · fee $4.00 · liq 76345.4`: an opening fill opens or increases the
+ * `Opened long 0.1 BTC @ 80,000.0 · fee $4.00 · liq 76,345.4`: an opening fill opens or increases the
  * position; a reducing fill reduces or closes it and shows its realised P&L. Prices at tick
  * decimals; the fee rounded up, the P&L rounded against the owner; the liquidation price of the
  * position as it is after the call (none once it is closed).
@@ -284,10 +287,13 @@ function perpFillText(f: PerpFill, events: SimEvent[], lookup: NoticeLookup): st
   return parts.join(' · ');
 }
 
-/** `Funding paid $0.80 on BTCUSDT long (rate 0.0100%)`: a payment rounded up, a receipt down; the rate half up, as the web shows it. */
+/**
+ * `Funding paid $0.80 on BTCUSDT long (rate 0.0100%)`: a payment rounded up, a receipt down, grouped
+ * by thousands; the rate half up, as the web shows it.
+ */
 function fundingText(e: Extract<PerpEvent, { type: 'funding' }>): string {
   const paid = e.amount.isNegative();
-  const amount = e.amount.abs().toFixed(2, paid ? Decimal.ROUND_UP : Decimal.ROUND_DOWN);
+  const amount = grouped(e.amount.abs().toFixed(2, paid ? Decimal.ROUND_UP : Decimal.ROUND_DOWN));
   const rate = e.rate.mul(100).toFixed(4, Decimal.ROUND_HALF_UP);
   const uncollected = e.uncollected === null ? '' : ` · $${usdUp(e.uncollected)} of it could not be collected`;
   return `Funding ${paid ? 'paid' : 'received'} $${amount} on ${e.symbol} ${e.side} (rate ${rate}%)${uncollected}`;
@@ -300,26 +306,27 @@ function tickOf(rules: { tickSize: Decimal } | null): number | null {
 /**
  * A price at tick decimals, rounded half up (away from zero), as the web app rounds every price it
  * shows: the engine's own rounding mode is half-even, which would make a notice and the history
- * disagree on a price ending in 5.
+ * disagree on a price ending in 5. Grouped by thousands, as the web app shows it: `73,596.0`.
  */
 function atTick(price: Decimal, tick: number | null): string {
-  return tick === null ? price.toString() : price.toFixed(tick, Decimal.ROUND_HALF_UP);
+  return grouped(tick === null ? price : price.toFixed(tick, Decimal.ROUND_HALF_UP));
 }
 
-/** A liquidation price at tick decimals, rounded towards the mark: up for a long, down for a short. */
+/** A liquidation price at tick decimals, rounded towards the mark (up for a long, down for a short), grouped by thousands. */
 function liqText(price: Decimal, side: PositionSide, tick: number | null): string {
-  if (tick === null) return price.toString();
-  return price.toFixed(tick, side === 'long' ? Decimal.ROUND_UP : Decimal.ROUND_DOWN);
+  if (tick === null) return grouped(price);
+  return grouped(price.toFixed(tick, side === 'long' ? Decimal.ROUND_UP : Decimal.ROUND_DOWN));
 }
 
+/** A cost in dollars, rounded up to the cent and grouped by thousands: `1,234.57` (the `$` is the caller's). */
 function usdUp(amount: Decimal): string {
-  return amount.toFixed(2, Decimal.ROUND_UP);
+  return grouped(amount.toFixed(2, Decimal.ROUND_UP));
 }
 
-/** `+$1.23` / `-$0.50`, rounded against the owner: a loss away from zero, a gain towards it. */
+/** `+$1.23` / `-$1,234.57`, rounded against the owner (a loss away from zero, a gain towards it), grouped by thousands. */
 function signedUsd(amount: Decimal): string {
   const negative = amount.isNegative();
-  const abs = amount.abs().toFixed(2, negative ? Decimal.ROUND_UP : Decimal.ROUND_DOWN);
+  const abs = grouped(amount.abs().toFixed(2, negative ? Decimal.ROUND_UP : Decimal.ROUND_DOWN));
   return `${negative ? '-' : '+'}$${abs}`;
 }
 

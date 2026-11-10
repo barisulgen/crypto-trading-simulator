@@ -194,8 +194,8 @@ describe('perp catch-up: funding and mark-candle liquidation (long 0.1 @80000, m
     expect(s(t.lev().free)).toBe('600');
     expect(summary(events)).toMatchObject({ type: 'catch_up', market: 'perp', symbol: SYMBOL, from: FROM, to: TO });
     expect(summary(events).actions).toEqual([
-      'Funding paid 0.79 USDT on 0.1 BTC long at 08:00 UTC (settled rate 0.0001, mark 79000)',
-      'Long 0.1 BTC liquidated at 76353.31325301, its liquidation price, when the mark reached it at 09:13 UTC; ' +
+      'Funding paid 0.79 USDT on 0.1 BTC long at 08:00 UTC (settled rate 0.0001, mark 79,000)',
+      'Long 0.1 BTC liquidated at 76,353.31325301, its liquidation price, when the mark reached it at 09:13 UTC; ' +
         'margin lost 395.21 USDT (estimated)',
     ]);
     expectTaggedInOrder(events);
@@ -241,7 +241,7 @@ describe('perp catch-up: funding and mark-candle liquidation (long 0.1 @80000, m
     expect(cancelled[0]!.catchUp).toEqual(tag('mark_candle'));
     expect(t.stored(sl!.id).status).toBe('cancelled');
     expect(summary(events).actions).toEqual([
-      'Long 0.1 BTC liquidated at 76345.3815261, its liquidation price, when the mark reached it at 09:13 UTC; ' +
+      'Long 0.1 BTC liquidated at 76,345.3815261, its liquidation price, when the mark reached it at 09:13 UTC; ' +
         'margin lost 396 USDT (estimated)',
       'Stop-loss cancelled at 09:13:00 UTC (liquidation; estimated)',
     ]);
@@ -417,7 +417,7 @@ describe('perp catch-up: close-position stops from last-price candles', () => {
     // 396 margin − 220 − 3.89 back to the wallet.
     expect(s(t.lev().free)).toBe('772.11');
     expect(summary(events).actions).toEqual([
-      'Stop-loss filled 0.1 BTC at 77800 (worst price of 10:02 UTC; estimated)',
+      'Stop-loss filled 0.1 BTC at 77,800 (worst price of 10:02 UTC; estimated)',
     ]);
     expectTaggedInOrder(events);
   });
@@ -455,7 +455,7 @@ describe('perp catch-up: close-position stops from last-price candles', () => {
     expect(s(t.lev().free)).toBe('600');
     expect(s(t.lev().locked)).toBe('0');
     expect(summary(events).actions).toEqual([
-      'Stop-loss filled 0.1 BTC at 76040, the bankruptcy price (worst price of 10:02 UTC was 70000; estimated)',
+      'Stop-loss filled 0.1 BTC at 76,040, the bankruptcy price (worst price of 10:02 UTC was 70,000; estimated)',
     ]);
     expectTaggedInOrder(events);
   });
@@ -489,7 +489,7 @@ describe('perp catch-up: close-position stops from last-price candles', () => {
     expect(ofType(events, 'fill').map((e) => [e.order.id, s(e.fill.price)])).toEqual([[sl!.id, '77800']]);
     expect(ofType(events, 'order_cancelled').map((e) => [e.order.id, e.reason])).toEqual([[tp!.id, 'oco']]);
     expect(summary(events).actions).toEqual([
-      'Stop-loss filled 0.1 BTC at 77800 (worst price of 10:02 UTC; estimated)',
+      'Stop-loss filled 0.1 BTC at 77,800 (worst price of 10:02 UTC; estimated)',
       'Take-profit cancelled: the other order of its pair triggered (estimated)',
     ]);
     expectTaggedInOrder(events);
@@ -653,8 +653,8 @@ describe('perp catch-up: limit orders', () => {
     expect(s(liq!.liquidationFee)).toBe('30.14690763');
     expect(t.sim.perp.state.lastTradeId[SYMBOL]).toBe(101);
     expect(summary(events).actions).toEqual([
-      'Limit buy filled 0.1 BTC at 79000 (replayed trade at 10:30:20 UTC; estimated)',
-      'Long 0.1 BTC liquidated at 75367.2690763, its liquidation price, when the mark reached it at 10:31 UTC; ' +
+      'Limit buy filled 0.1 BTC at 79,000 (replayed trade at 10:30:20 UTC; estimated)',
+      'Long 0.1 BTC liquidated at 75,367.2690763, its liquidation price, when the mark reached it at 10:31 UTC; ' +
         'margin lost 393.42 USDT (estimated)',
     ]);
     expectTaggedInOrder(events);
@@ -697,9 +697,9 @@ describe('perp catch-up: limit orders', () => {
     expect(fills[1]!.order.parentId).toBe(o.id);
     expect(t.position()).toBeUndefined();
     expect(summary(events).actions).toEqual([
-      'Limit buy filled 0.1 BTC at 79000 (replayed trade at 10:30:20 UTC; estimated)',
-      'Attached stop-loss 78500 placed at 10:30:20 UTC (estimated)',
-      'Stop-loss filled 0.1 BTC at 78400 (worst price of 10:30 UTC; estimated)',
+      'Limit buy filled 0.1 BTC at 79,000 (replayed trade at 10:30:20 UTC; estimated)',
+      'Attached stop-loss 78,500 placed at 10:30:20 UTC (estimated)',
+      'Stop-loss filled 0.1 BTC at 78,400 (worst price of 10:30 UTC; estimated)',
     ]);
     expectTaggedInOrder(events);
   });

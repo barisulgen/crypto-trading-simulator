@@ -20,6 +20,18 @@ export function isMultipleOf(x: Decimal, step: Decimal): boolean {
   return x.mod(step).isZero();
 }
 
+/**
+ * A number as text with its whole part grouped by thousands with commas, as the web app shows
+ * every price and amount: '73596.0' -> '73,596.0', a Decimal as its exact digits. Nothing is
+ * rounded; text that is not a plain decimal comes back as it is.
+ */
+export function grouped(x: Decimal | string): string {
+  const text = x.toString();
+  const m = /^(-?)(\d+)(\.\d+)?$/.exec(text);
+  if (!m) return text;
+  return `${m[1]}${m[2]!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${m[3] ?? ''}`;
+}
+
 /** Round up (away from zero for positives) to 8 decimal places. */
 export function roundUp8(x: Decimal): Decimal {
   return x.toDecimalPlaces(8, Decimal.ROUND_UP);

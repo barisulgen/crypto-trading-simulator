@@ -1091,7 +1091,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       perpRules: () => btcPerpRules,
       liquidationPrice: () => null,
     };
-    const engineLiquidation = (markPrice: string) => ({
+    const engineLiquidation = (markPrice: string, money = { marginLost: '396', tradingLoss: '365.462', liquidationFee: '25.4318', remainder: '5.1062' }) => ({
       type: 'liquidation' as const,
       market: 'perp' as const,
       time: T,
@@ -1111,25 +1111,35 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
         warnLevel: 0 as const,
       },
       markPrice: D(markPrice),
-      marginLost: D('396'),
-      tradingLoss: D('365.462'),
-      liquidationFee: D('25.4318'),
-      remainder: D('5.1062'),
+      marginLost: D(money.marginLost),
+      tradingLoss: D(money.tradingLoss),
+      liquidationFee: D(money.liquidationFee),
+      remainder: D(money.remainder),
       feeRateKnown: true,
       cancelledOrderIds: [],
     });
     const wire = (e: object) => JSON.parse(JSON.stringify(e)) as Record<string, unknown>;
-    const plain = (v: string | undefined) => (v ?? '').replace(/,/g, '');
 
-    it('a liquidation mark ending in 5 is rounded half up in both', () => {
+    it('a liquidation mark ending in 5 is rounded half up in both, grouped by thousands in both', () => {
       const e = engineLiquidation('76345.25');
       const [notice] = noticesFor([e], lookup);
       const v = describeEvent(perp('liquidation', wire(e)));
       const mark = v.fields.find((f) => f.label === 'Mark price')?.value;
       expect(mark).toBe('76,345.3');
-      expect(notice!.text).toContain(`at mark ${plain(mark)} `);
+      expect(notice!.text).toContain(`at mark ${mark} `);
       expect(notice!.text).toContain(`margin lost ${v.fields.find((f) => f.label === 'Margin lost')?.value}`);
       expect(notice!.text).toContain(`(fee ${v.fields.find((f) => f.label === 'Liquidation fee')?.value})`);
+    });
+
+    it('a margin lost and a fee of $1,000 or more read the same, grouped, in both', () => {
+      const money = { marginLost: '8000', tradingLoss: '6765.439', liquidationFee: '1234.561', remainder: '0' };
+      const e = engineLiquidation('76345.25', money);
+      const [notice] = noticesFor([e], lookup);
+      const v = describeEvent(perp('liquidation', wire(e)));
+      const lost = v.fields.find((f) => f.label === 'Margin lost')?.value;
+      const fee = v.fields.find((f) => f.label === 'Liquidation fee')?.value;
+      expect([lost, fee]).toEqual(['$8,000.00', '$1,234.57']);
+      expect(notice!.text).toBe(`LIQUIDATED: BTCUSDT long 0.1 at mark 76,345.3 — margin lost ${lost} (fee ${fee})`);
     });
 
     it('a funding rate on a half is rounded half up in both', () => {
@@ -1154,6 +1164,28 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       expect(rate).toBe('0.0123%');
       expect(notice!.text).toContain(`(rate ${rate})`);
       expect(notice!.text).toContain(`paid ${v.fields.find((f) => f.label === 'Amount')?.value.replace('-', '')}`);
+    });
+
+    it('a funding payment of $1,000 or more, rounded up and grouped in both', () => {
+      const e = {
+        type: 'funding' as const,
+        market: 'perp' as const,
+        time: T,
+        symbol: 'BTCUSDT',
+        positionId: 'pos1',
+        fundingTime: T,
+        rate: D('0.01'),
+        markPrice: D('80000'),
+        qty: D('1.5'),
+        side: 'long' as const,
+        amount: D('-1234.561'),
+        target: 'margin' as const,
+        uncollected: null,
+      };
+      const [notice] = noticesFor([e], lookup);
+      const amount = describeEvent(perp('funding', wire(e))).fields.find((f) => f.label === 'Amount')?.value;
+      expect(amount).toBe('-$1,234.57');
+      expect(notice!.text).toContain(`paid ${amount!.replace('-', '')} on`);
     });
   });
 

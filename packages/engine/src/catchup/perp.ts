@@ -1,3 +1,4 @@
+import { grouped } from '../decimal.ts';
 import type { Decimal } from '../decimal.ts';
 import type { PerpEngine } from '../perp/engine.ts';
 import { FUNDING_WINDOW_MS, neverSettled } from '../perp/funding.ts';
@@ -500,31 +501,31 @@ class PerpCatchUp {
     const base = this.base;
     switch (e.type) {
       case 'fill': {
-        const what = `${label(e.order)} filled ${e.fill.qty} ${base} at ${e.fill.price}`;
+        const what = `${label(e.order)} filled ${e.fill.qty} ${base} at ${grouped(e.fill.price)}`;
         if (basis === 'aggtrade_replay') return `${what} (replayed trade at ${hhmmss(e.time)}; estimated)`;
         const of = basis === 'trigger_minute_worst_price' ? `${hhmm(minute)}, its trigger minute` : hhmm(minute);
         const uncapped = e.fill.uncappedPrice;
         if (e.fill.bankruptcyCapped && uncapped && !uncapped.eq(e.fill.price)) {
-          return `${what}, the bankruptcy price (worst price of ${of} was ${uncapped}; estimated)`;
+          return `${what}, the bankruptcy price (worst price of ${of} was ${grouped(uncapped)}; estimated)`;
         }
         if (e.fill.bankruptcyCapped) {
-          return `${what} (worst price of ${of}; fee cut to the ${e.fill.fee} USDT the margin had left; estimated)`;
+          return `${what} (worst price of ${of}; fee cut to the ${grouped(e.fill.fee)} USDT the margin had left; estimated)`;
         }
         return `${what} (worst price of ${of}; estimated)`;
       }
       case 'funding': {
-        const settled = `settled rate ${e.rate}, mark ${e.markPrice}`;
+        const settled = `settled rate ${e.rate}, mark ${grouped(e.markPrice)}`;
         const on = `on ${e.qty} ${base} ${e.side} at ${hhmm(e.fundingTime)} (${settled})`;
-        const unpaid = e.uncollected ? `; ${e.uncollected} USDT could not be collected` : '';
+        const unpaid = e.uncollected ? `; ${grouped(e.uncollected)} USDT could not be collected` : '';
         return e.amount.isNegative()
-          ? `Funding paid ${e.amount.neg()} USDT ${on}${unpaid}`
-          : `Funding received ${e.amount} USDT ${on}`;
+          ? `Funding paid ${grouped(e.amount.neg())} USDT ${on}${unpaid}`
+          : `Funding received ${grouped(e.amount)} USDT ${on}`;
       }
       case 'liquidation': {
         const p = e.position;
         const who = `${p.side === 'long' ? 'Long' : 'Short'} ${p.qty} ${base}`;
         const when = `its liquidation price, when the mark reached it at ${hhmm(minute)}`;
-        return `${who} liquidated at ${e.markPrice}, ${when}; margin lost ${e.marginLost} USDT (estimated)`;
+        return `${who} liquidated at ${grouped(e.markPrice)}, ${when}; margin lost ${grouped(e.marginLost)} USDT (estimated)`;
       }
       case 'order_rejected':
         if (e.afterTrigger) return `${label(e.order)} expired at ${hhmm(minute)} (estimated): ${e.reason}`;
@@ -550,8 +551,8 @@ class PerpCatchUp {
         // One line for the legs placed together, on the first of them.
         if (e.order.type === 'take_profit' && attach.stopLoss) return null;
         const legs = [
-          attach.stopLoss ? `stop-loss ${attach.stopLoss}` : null,
-          attach.takeProfit ? `take-profit ${attach.takeProfit}` : null,
+          attach.stopLoss ? `stop-loss ${grouped(attach.stopLoss)}` : null,
+          attach.takeProfit ? `take-profit ${grouped(attach.takeProfit)}` : null,
         ].filter((l) => l !== null);
         return `Attached ${legs.join(' / ')} placed at ${hhmmss(e.time)} (estimated)`;
       }

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { D, floorMinute, MINUTE_MS } from '@sim/engine';
+import { D, floorMinute, grouped, MINUTE_MS } from '@sim/engine';
 import { ServerProcess, startScenario, waitFor } from './harness.ts';
 import type { LiveClient } from './harness.ts';
 import { deposit, openPosition, position, waitOrderStatus } from './ops.ts';
@@ -104,7 +104,7 @@ describe('e2e: an outage, and a restart during it', () => {
     expect(sf.payload.catchUp?.basis).toBe('candle_worst_price');
     expect(sf.time).toBeGreaterThanOrEqual(spotX.minute);
     expect(sf.time).toBeLessThan(spotX.minute + MINUTE_MS);
-    expect(spotSummary.text).toContain(`Stop-loss filled 0.04 BTC at ${spotX.price.toString()} (worst price of ${hhmm(spotX.minute)} UTC; estimated)`);
+    expect(spotSummary.text).toContain(`Stop-loss filled 0.04 BTC at ${grouped(spotX.price)} (worst price of ${hhmm(spotX.minute)} UTC; estimated)`);
     const proceeds = spotX.price.mul('0.04');
     // The taker fee, 0.1 %, in the USDT received.
     expect(sf.payload.fill.feeAsset).toBe('USDT');
@@ -121,7 +121,7 @@ describe('e2e: an outage, and a restart during it', () => {
     expect(pf.payload.catchUp?.basis).toBe('candle_worst_price');
     expect(pf.time).toBeGreaterThanOrEqual(perpX.minute);
     expect(pf.time).toBeLessThan(perpX.minute + MINUTE_MS);
-    expect(perpSummary.text).toContain(`at ${perpX.price.toString()}`);
+    expect(perpSummary.text).toContain(`at ${grouped(perpX.price)}`);
     expect(perpSummary.text).toContain('estimated');
     expect(await position(restarted, SYMBOL)).toBeNull();
     const closedAt = D(pos.entryPrice).minus(perpX.price).mul('0.01');

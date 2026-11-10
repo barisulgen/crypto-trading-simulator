@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { grouped } from '@sim/engine';
 import { driftSign, fmtAvgPrice, fmtBalance, fmtCost, fmtProceeds, fmtDrift, fmtFloor, fmtNum, fmtUsdFloor, fmtPct, fmtPrice, fmtQty, fmtUsd, setRules, signOf, tickDecimals } from '../src/lib/format.ts';
 
 describe('tickDecimals', () => {
@@ -8,6 +9,14 @@ describe('tickDecimals', () => {
     expect(tickDecimals('1.00000000')).toBe(0);
     expect(tickDecimals('10')).toBe(0);
     expect(tickDecimals('0.10')).toBe(1);
+  });
+});
+
+describe("the server's grouping (notice texts) matches the screens'", () => {
+  it('a value already at its decimals reads the same through grouped and fmtNum', () => {
+    for (const [v, dp] of [['73596.0', 1], ['1234567.8912', 4], ['-1234.57', 2], ['999.99', 2], ['1000', 0], ['0.0012', 4]] as const) {
+      expect(grouped(v)).toBe(fmtNum(v, dp));
+    }
   });
 });
 

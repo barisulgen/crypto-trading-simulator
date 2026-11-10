@@ -162,7 +162,7 @@ describe('spot catch-up: stops from candles', () => {
 
     const sum = summary(events);
     expect(sum).toMatchObject({ type: 'catch_up', market: 'spot', symbol: SYMBOL, from: FROM, to: TO });
-    expect(sum.actions).toContain('Stop-loss filled 0.5 BTC at 58800 (worst price of 12:04 UTC; estimated)');
+    expect(sum.actions).toContain('Stop-loss filled 0.5 BTC at 58,800 (worst price of 12:04 UTC; estimated)');
     expectTaggedInOrder(events);
 
     expect(s(t.bal('USDT').free)).toBe(s(usdtBefore.plus('29370.6')));
@@ -184,7 +184,7 @@ describe('spot catch-up: stops from candles', () => {
 
     const events = run(t, input(candles([candle(T(12, 4), '58800', '61200')])));
     expect(summary(events).actions).toEqual([
-      'Stop-loss filled 0.5 BTC at 58800 (worst price of 12:04 UTC; estimated)',
+      'Stop-loss filled 0.5 BTC at 58,800 (worst price of 12:04 UTC; estimated)',
       'Take-profit 0.5 BTC cancelled: the other order of its pair triggered (estimated)',
     ]);
     const fills = ofType(events, 'fill');
@@ -243,7 +243,7 @@ describe('spot catch-up: stops from candles', () => {
     expect(fills[0]!.time).toBe(T(11, 59, 30));
     expect(fills[0]!.catchUp).toEqual(tag('trigger_minute_worst_price'));
     expect(summary(events).actions).toEqual([
-      'Stop-loss filled 0.5 BTC at 58700 (worst price of 11:59 UTC, its trigger minute; estimated)',
+      'Stop-loss filled 0.5 BTC at 58,700 (worst price of 11:59 UTC, its trigger minute; estimated)',
     ]);
     expectTaggedInOrder(events);
   });
@@ -342,8 +342,8 @@ describe('spot catch-up: limit orders from replayed trades', () => {
     expect(s(t.bal('USDT').locked)).toBe('0');
     expect(s(t.bal('BTC').free)).toBe(s(btcBefore.plus('0.999')));
     expect(summary(events).actions).toEqual([
-      'Limit buy filled 0.3 BTC at 60000 (replayed trade at 12:05:10 UTC; estimated)',
-      'Limit buy filled 0.7 BTC at 60000 (replayed trade at 12:05:40 UTC; estimated)',
+      'Limit buy filled 0.3 BTC at 60,000 (replayed trade at 12:05:10 UTC; estimated)',
+      'Limit buy filled 0.7 BTC at 60,000 (replayed trade at 12:05:40 UTC; estimated)',
     ]);
     expectTaggedInOrder(events);
   });
@@ -451,7 +451,7 @@ describe('spot catch-up: limit orders from replayed trades', () => {
     const tp = placed[1]!.order;
     expect(ofType(events, 'order_cancelled').map((e) => [e.order.id, e.reason])).toEqual([[tp.id, 'oco']]);
     expect(summary(events).actions).toContain(
-      'Stop-loss filled 0.999 BTC at 59400 (worst price of 12:05 UTC; estimated)',
+      'Stop-loss filled 0.999 BTC at 59,400 (worst price of 12:05 UTC; estimated)',
     );
     expectTaggedInOrder(events);
   });
@@ -481,7 +481,7 @@ describe('spot catch-up: cancels in flight across the gap', () => {
     expect(late!.reason).toBe('Cancel arrived too late: order already filled');
     expect(late!.catchUp).toEqual(tag('cancel_arrival'));
     expect(summary(events).actions).toEqual([
-      'Limit buy filled 1 BTC at 60000 (replayed trade at 12:04:30 UTC; estimated)',
+      'Limit buy filled 1 BTC at 60,000 (replayed trade at 12:04:30 UTC; estimated)',
       'Cancel of limit buy arrived at 12:04:50 UTC: order already filled (estimated)',
     ]);
     expect(t.stored(id).cancelArrivesAt).toBeNull();

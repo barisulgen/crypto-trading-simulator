@@ -63,7 +63,7 @@ describe('e2e: a perp limit buy fills only on a trade through its price', () => 
     expect(D(pos.fees).eq(f.fee)).toBe(true);
 
     const notice = await client.waitForMessage('notice', (m) => m.kind === 'fill');
-    expect(notice.text).toMatch(/^Opened long 0\.02 BTC @ 79900\.0 · fee \$0\.32 · liq /);
+    expect(notice.text).toMatch(/^Opened long 0\.02 BTC @ 79,900\.0 · fee \$0\.32 · liq /);
     const rows = await server.history({ market: 'perp', types: 'fill' });
     expect(rows).toHaveLength(1);
     expect(D(rows[0].payload.fill.price).eq(LIMIT)).toBe(true);
