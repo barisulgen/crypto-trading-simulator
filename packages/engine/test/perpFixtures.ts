@@ -145,6 +145,10 @@ export class FakePerpMarket implements PerpMarketView {
     if (!b) throw new Error(`No leverage brackets for ${symbol}`);
     return b;
   }
+  /** The symbol's leverage brackets, or null before they have loaded (never throws). */
+  maybeBrackets(symbol: string): Bracket[] | null {
+    return this.tiers.get(symbol) ?? null;
+  }
 }
 
 /** testCtx over a perp market: the same deterministic time, rng and ids; fees 0.02 % maker, 0.05 % taker. */

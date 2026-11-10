@@ -228,6 +228,11 @@ export class PerpMarketData extends EventEmitter implements PerpMarketView {
     return b;
   }
 
+  /** The symbol's leverage tiers, or null before they have loaded: brackets() without the throw. */
+  maybeBrackets(symbol: string): Bracket[] | null {
+    return this.tierSet?.brackets[symbol] ?? null;
+  }
+
   /**
    * The owner's own taker fill took `levels` from the side a `side` order takes (asks for a buy,
    * bids for a sell): later walks see those levels reduced until a depth update touches them.

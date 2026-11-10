@@ -205,6 +205,8 @@ export interface RunnerMark {
 export interface RunnerPerpMarket extends PerpMarketView {
   /** When the last mark update was received (local clock); null before the first. */
   markReceivedAt(symbol: string): number | null;
+  /** The symbol's leverage tiers, or null before they have loaded (never throws: read after every engine call). */
+  maybeBrackets(symbol: string): Bracket[] | null;
   /** A saved taker fill of a `side` order took `levels`: later walks see them reduced. */
   consume(symbol: string, side: Side, levels: PriceLevel[]): void;
   healthSnapshot(): HealthMap;
@@ -1500,12 +1502,9 @@ export class EngineRunner implements FundingSim {
   }
 
   private bracketsOf(symbol: string): Bracket[] | null {
-    try {
-      return this.d.perpMarket.brackets(symbol);
-    } catch {
-      return null;
-    }
+    return this.d.perpMarket.maybeBrackets(symbol);
   }
+
 }
 
 /** The order a submit created (its first event names it: placed or rejected). */

@@ -1491,6 +1491,26 @@ describe('perps through the runner', () => {
     expect(t.sim.perp.state.positions.BTCUSDT?.qty.toString()).toBe('0.1');
   }
 
+  it('before the leverage tiers load, engine calls look them up without throwing (no error built and caught per call)', () => {
+    const t = setup();
+    t.perp.clearBrackets('BTCUSDT');
+    t.runner.start();
+    let thrown = 0;
+    const brackets = t.perp.brackets.bind(t.perp);
+    t.perp.brackets = (symbol: string) => {
+      try {
+        return brackets(symbol);
+      } catch (e) {
+        thrown++;
+        throw e;
+      }
+    };
+    for (let i = 0; i < 3; i++) t.runner.deposit('spot', D('1'));
+    expect(t.runner.perpSettings()).toEqual({ BTCUSDT: { leverage: 20, marginMode: 'isolated' } });
+    expect(t.runner.positions()).toEqual([]);
+    expect(thrown).toBe(0);
+  });
+
   it("a leverage change broadcasts every symbol's perp settings once; calls that change none send none", () => {
     const t = setup();
     t.runner.start();
