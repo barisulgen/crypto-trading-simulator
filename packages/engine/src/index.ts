@@ -69,3 +69,6 @@ export * from './perp/math.ts';
 export * from './stats/quality.ts';
 export * from './stats/trades.ts';
 export * from './stats/types.ts';
+export { computeStats } from './stats/report.ts';
+export type { Drawdown, DrawdownPeriod, PnlPoint, Scope, Snapshot } from './stats/equity.ts';
+export type { BreakdownRow, Breakdowns } from './stats/breakdowns.ts';

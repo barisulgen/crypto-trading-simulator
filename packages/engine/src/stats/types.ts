@@ -1,6 +1,10 @@
 import type { Decimal } from '../decimal.ts';
-import type { PositionCloseReason, PositionSide } from '../perp/types.ts';
+import type { Position, PositionCloseReason, PositionSide } from '../perp/types.ts';
 import type { SimEvent } from '../sim.ts';
+import type { AccountValue } from '../spot/accounting.ts';
+import type { Basis, SpotRules } from '../types.ts';
+import type { Breakdowns } from './breakdowns.ts';
+import type { Drawdown, PnlPoint, Scope, Snapshot } from './equity.ts';
 
 /** One persisted event with the row id it was stored under. */
 export interface StatsEvent {
@@ -48,6 +52,8 @@ export interface BuiltTrades {
   /** Sorted by closing time, then by the closing event's row id. */
   trades: Trade[];
   open: OpenTrade[];
+  /** Dust sales (they carry no round trip) made before any trip of their coin had closed. */
+  unattributed: StatsEvent[];
 }
 
 /** Win rate, averages, profit factor, expectancy, extremes and streaks of a set of closed trades. */
@@ -109,4 +115,78 @@ export interface Risk {
   /** Mean leverage of the positions open in the range; null when there are none. */
   avgLeverage: Decimal | null;
   maxLeverage: number | null;
+}
+
+/** Which part of the record the stats cover. Bounds are inclusive; a null field does not filter. */
+export interface StatsFilter {
+  from: number | null;
+  to: number | null;
+  symbol: string | null;
+  /** 'spot' is the spot wallet and spot trades; 'leverage' the leverage wallet and perp trades. */
+  market: 'spot' | 'leverage' | null;
+}
+
+/** Everything the stats are computed from: the record, and the account as it is now. */
+export interface StatsInput {
+  events: StatsEvent[];
+  snapshots: Snapshot[];
+  now: number;
+  account: AccountValue;
+  basis: Record<string, Basis>;
+  positions: Position[];
+  /** False while any price is paused or anything is catching up: the current value is then not used. */
+  live: boolean;
+  /** The BTC ask each deposit's benchmark buy is made at, by the deposit's event row id. */
+  benchmarkBuys: { depositEventId: number; price: Decimal }[];
+  btcRules: SpotRules;
+  spotTakerFee: Decimal;
+  /** The current BTC best bid; null when there is none. */
+  btcBid: Decimal | null;
+  /** The IANA time zone hours and weekdays are read in. */
+  tz: string;
+}
+
+export interface StatsHeadline {
+  scope: Scope;
+  netPnl: Decimal;
+  /** A fraction of capitalMax; null when that is not above zero. */
+  returnPct: Decimal | null;
+  /** The highest capital of the scope during the range. */
+  capitalMax: Decimal;
+  /** The account's total value, or under a market filter the wallet's. */
+  currentValue: Decimal;
+  /** Total deposited, or under a market filter the wallet's capital. */
+  deposited: Decimal;
+  /** The figures include the current value at live prices. */
+  live: boolean;
+}
+
+/** Buying BTC with every deposit and holding it, measured over the whole account. */
+export interface StatsBenchmark {
+  scope: 'account';
+  /** Deposits with no BTC price to buy at; while any is missing every figure is null. */
+  missing: number;
+  /** The benchmark's value at the end of the range; null when it cannot be priced. */
+  value: Decimal | null;
+  pnl: Decimal | null;
+  returnPct: Decimal | null;
+  /** The benchmark's value at each point of the account series with a known BTC bid. */
+  series: { time: number; value: Decimal }[];
+}
+
+export interface StatsReport {
+  headline: StatsHeadline;
+  series: PnlPoint[];
+  drawdown: Drawdown;
+  quality: TradeQuality;
+  risk: Risk;
+  costs: Costs;
+  breakdowns: Breakdowns;
+  benchmark: StatsBenchmark;
+  /** Positions and round trips still open, and their unrealised P&L now (null when one is unpriced). */
+  open: { count: number; unrealized: Decimal | null };
+  /** Dust sales that belong to no trade; their P&L is in the net P&L but in no trade figure. */
+  unattributed: { count: number; realized: Decimal };
+  /** Closed trades and fills in scope that a catch-up run estimated. */
+  estimated: { trades: number; fills: number };
 }

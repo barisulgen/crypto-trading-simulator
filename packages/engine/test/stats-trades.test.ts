@@ -387,3 +387,66 @@ describe('buildTrades: estimated', () => {
     expect(buildTrades(rows(solTrip())).trades[0]!.estimated).toBe(false);
   });
 });
+
+describe('buildTrades: close order and what no trade holds', () => {
+  it('two trades closing in the same ms are ordered by the closing event row id', () => {
+    const p1 = position({ id: 'p1', openedAt: T0, qty: D('0.01') });
+    const p2 = position({ id: 'p2', openedAt: T0 + 100, qty: D('0.01') });
+    const list = rows([
+      { time: T0, event: opened(p1) },
+      { time: T0 + 100, event: opened(p2) },
+      { time: T0 + 5000, event: closed(p2, T0 + 5000, '1', '0.5') },
+      { time: T0 + 5000, event: closed(p1, T0 + 5000, '2', '0.5') },
+    ]);
+    const { trades } = buildTrades(list);
+    expect(trades.map((t) => [t.id, t.closeEventId])).toEqual([
+      ['p2', 3],
+      ['p1', 4],
+    ]);
+  });
+
+  it('a trade whose only catch-up event is its liquidation is estimated', () => {
+    const p = position({ id: 'e1', symbol: 'ETHUSDT', side: 'short', leverage: 20, openedAt: T0, margin: D('148.5') });
+    const list = rows([
+      { time: T0, event: opened(p) },
+      {
+        time: T0 + 5000,
+        event: {
+          type: 'liquidation',
+          market: 'perp',
+          time: T0 + 5000,
+          symbol: 'ETHUSDT',
+          position: p,
+          markPrice: D(3140),
+          marginLost: D('148.5'),
+          tradingLoss: D(140),
+          liquidationFee: D('8.5'),
+          remainder: D(0),
+          feeRateKnown: true,
+          cancelledOrderIds: [],
+          catchUp: tag,
+        },
+      },
+      { time: T0 + 5000, event: closed(p, T0 + 5000, '-140', '10', 'liquidated') },
+    ]);
+    expect(buildTrades(list).trades[0]!.estimated).toBe(true);
+  });
+
+  it('a dust sale with no closed trip of the coin before it is unattributed', () => {
+    const dust = spotFill('s0', T0, {
+      qty: D('0.01'),
+      price: D(600),
+      quote: D(6),
+      fee: D('0.006'),
+      feeUsd: D('0.006'),
+      realizedPnl: D('4.993'),
+      roundTripId: null,
+    });
+    const list = rows([{ time: T0 - 1000, event: dust }, ...solTrip()]);
+    const built = buildTrades(list);
+    expect(built.trades).toHaveLength(1);
+    expect(built.trades[0]!.result.toString()).toBe('72.87705');
+    expect(built.unattributed.map((r) => r.id)).toEqual([1]);
+    expect(buildTrades(rows(solTrip())).unattributed).toEqual([]);
+  });
+});

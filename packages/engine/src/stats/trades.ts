@@ -21,7 +21,8 @@ interface SpotGroup {
  * The closed trades of a recorded event list, and what is still open. A perp trade is one position
  * from open to close, with every fill and funding payment that names it, including funding settled
  * after the close. A spot trade is one round trip, with every fill that carries its id; a sale of
- * dust left behind by a closed trip (it carries no trip) joins that coin's latest closed trip.
+ * dust left behind by a closed trip (it carries no trip) joins that coin's latest closed trip; one
+ * made before any trip of its coin had closed is returned as unattributed.
  */
 export function buildTrades(events: StatsEvent[]): BuiltTrades {
   const ordered = [...events].sort((a, b) => a.id - b.id);
@@ -29,6 +30,7 @@ export function buildTrades(events: StatsEvent[]): BuiltTrades {
   const spot = new Map<string, SpotGroup>();
   // The latest closed trip of each coin, for a dust sale that carries no trip.
   const lastClosedTrip = new Map<string, string>();
+  const unattributed: StatsEvent[] = [];
 
   const perpGroup = (id: string, symbol: string): PerpGroup => {
     let g = perp.get(id);
@@ -56,7 +58,10 @@ export function buildTrades(events: StatsEvent[]): BuiltTrades {
         if (estimated) g.estimated = true;
       } else {
         const tripId = e.fill.roundTripId ?? (e.fill.side === 'sell' ? lastClosedTrip.get(e.fill.symbol) : undefined);
-        if (tripId === undefined) continue;
+        if (tripId === undefined) {
+          if (e.fill.side === 'sell') unattributed.push(row);
+          continue;
+        }
         const g = spotGroup(tripId, e.fill.symbol);
         g.fees = g.fees.plus(e.fill.feeUsd);
         if (estimated) g.estimated = true;
@@ -143,5 +148,5 @@ export function buildTrades(events: StatsEvent[]): BuiltTrades {
   }
 
   trades.sort((a, b) => a.closedAt - b.closedAt || a.closeEventId - b.closeEventId);
-  return { trades, open };
+  return { trades, open, unattributed };
 }
