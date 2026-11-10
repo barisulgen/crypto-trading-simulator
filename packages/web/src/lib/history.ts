@@ -382,7 +382,8 @@ function perpFillFields(f: PerpFillWire, o: WirePerpOrder): Field[] {
     { label: 'Slippage', value: fmtCost(f.slippageUsd), tone: signOf(f.slippageUsd) === 0 ? 'muted' : undefined },
     { label: 'Delay drift', value: fmtDrift(f.driftUsd), tone: drift > 0 ? 'down' : drift < 0 ? 'up' : 'muted' },
     { label: 'Role', value: f.liquidity === 'maker' ? 'Maker' : 'Taker' },
-    { label: 'Fee', value: `${fmtExact(f.fee)} ${f.feeAsset}` },
+    // The exact fee, then the figure the fill notice shows (rounded up to the cent), so it can be found here.
+    { label: 'Fee', value: `${fmtExact(f.fee)} ${f.feeAsset} (${fmtCost(f.fee)})` },
   ];
   // Money paid in, before the opening fee is taken from it: rounded up.
   if (f.marginIn !== null) fields.push({ label: 'Margin in (before fee)', value: fmtCost(f.marginIn) });

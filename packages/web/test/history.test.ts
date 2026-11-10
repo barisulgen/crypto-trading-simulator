@@ -710,7 +710,7 @@ describe('history rows: perpetuals, funding, liquidations and catch-up', () => {
       'Slippage: $0.00',
       'Delay drift: $0.00',
       'Role: Taker',
-      'Fee: 4 USDT',
+      'Fee: 4 USDT ($4.00)',
       'Margin in (before fee): $396.00',
     ]);
     expect(v.note).toBeNull();

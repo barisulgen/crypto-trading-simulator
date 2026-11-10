@@ -101,6 +101,35 @@ describe('coin quantities and fees read the same in a notice and its History row
     expect(text(e)).toContain('Increased long 1,234.5 BTC @ ');
   });
 
+  it("a perp fill's fee: the exact USDT, then the notice's figure in brackets", () => {
+    for (const [fee, shown] of [
+      ['0.0734602', '0.0734602 USDT ($0.08)'],
+      ['49380.001', '49,380.001 USDT ($49,380.01)'],
+      ['0.08', '0.08 USDT ($0.08)'],
+    ] as const) {
+      const e = {
+        type: 'fill', market: 'perp', time: T,
+        fill: {
+          ...spotFill('BTCUSDT', '0.002', '73460.2', fee, 'USDT').fill, market: 'perp', positionId: 'pos1',
+          marginIn: D('0.97947360'), uncovered: null,
+        },
+        order: {
+          id: 'o1', symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: D('0.002'), quoteQty: null, price: null,
+          triggerPrice: null, reduceOnly: false, closePosition: false, leverage: 150, status: 'filled', filledQty: D('0.002'),
+          filledQuote: D('146.9204'), fee: D(fee), lockAmount: D('0'), ocoGroupId: null, parentId: null, attach: null,
+          createdAt: T, arrivesAt: T, triggeredAt: null, cancelArrivesAt: null, bestAtSubmit: D('73460.2'), rejectReason: null,
+          realizedPnl: D('0'),
+        },
+      } as unknown as SimEvent;
+      const historyFee = field(describeEvent(row('fill', e, 'perp')), 'Fee');
+      expect(historyFee).toBe(shown);
+      // The figure in brackets is the one the notice shows, so it can always be found in History.
+      const noticeFee = /· fee \$([\d,]+\.\d{2})/.exec(text(e))?.[1];
+      expect(noticeFee).toBeDefined();
+      expect(historyFee.endsWith(` ($${noticeFee})`)).toBe(true);
+    }
+  });
+
   it('a liquidation of a position of 1,000 coins or more', () => {
     const position = {
       id: 'pos1', symbol: 'BTCUSDT', side: 'long', qty: D('1234.5'), entryPrice: D('80000'), leverage: 20, margin: D('4938000'),
