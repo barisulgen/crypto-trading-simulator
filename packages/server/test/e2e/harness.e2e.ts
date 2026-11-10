@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -124,5 +124,10 @@ describe('the e2e harness leaves nothing behind', () => {
     const pid = Number(/PID (\d+)/.exec(out)?.[1]);
     expect(pid).toBeGreaterThan(0);
     await waitFor('the abandoned server to be gone', () => !alive(pid), 5000);
+    // Its directory is the test's to remove, once nothing holds the database in it.
+    const dir = /DIR (.+)/.exec(out)?.[1]?.trim();
+    expect(dir, out).toMatch(/sim-e2e-/);
+    rmSync(dir!, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    expect(existsSync(dir!)).toBe(false);
   });
 });
