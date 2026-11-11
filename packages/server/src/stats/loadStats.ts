@@ -178,7 +178,7 @@ export const MAX_POINTS = 1500;
 /** Snapshots further apart than this mean data was interrupted: the line breaks there. */
 export const GAP_MS = 5 * 60_000;
 
-/** A point of a chart line; `gap` when data was interrupted since the point before it. */
+/** A point of a chart line; `gap` when snapshots were interrupted since the point before it. */
 type Gapped<P> = P & { gap?: true };
 
 /** The report with its chart lines thinned to at most MAX_POINTS each and their gaps marked. */
@@ -216,16 +216,16 @@ function keptIndices(values: Decimal[], max = MAX_POINTS): number[] {
 }
 
 /**
- * The kept points of a line, each marked `gap` when a point of the full line is more than GAP_MS
- * after the one before it anywhere since the previous kept point, so the line also breaks where
- * the points dropped spanned the gap.
+ * The kept points of a line. With `gaps`, each is marked `gap` when a point of the full line is
+ * more than GAP_MS after the one before it anywhere since the previous kept point, so the line
+ * also breaks where the points dropped spanned the gap.
  */
-function pick<P extends { time: number }>(line: P[], kept: number[]): Gapped<P>[] {
+function pick<P extends { time: number }>(line: P[], kept: number[], gaps: boolean): Gapped<P>[] {
   const out: Gapped<P>[] = [];
   let prev = -1;
   for (const k of kept) {
     let gap = false;
-    for (let i = Math.max(prev + 1, 1); i <= k; i++) {
+    for (let i = Math.max(prev + 1, 1); gaps && i <= k; i++) {
       if (line[i]!.time - line[i - 1]!.time > GAP_MS) gap = true;
     }
     out.push(gap ? { ...line[k]!, gap: true } : line[k]!);
@@ -238,10 +238,13 @@ function pick<P extends { time: number }>(line: P[], kept: number[]): Gapped<P>[
  * The report as the API sends it. The P&L series, and the underwater line beside it, keep at most
  * MAX_POINTS points (see keptIndices); the benchmark line keeps the series' times when it is drawn
  * on them, else it is thinned on its own values. Every drawdown figure was computed on the full
- * series. A kept point is marked `gap` where data was interrupted before it (see pick).
+ * series. On the account and wallet curves, which are snapshots, a kept point is marked `gap` where
+ * they were interrupted before it (see pick). A coin's curve steps at its trades' times, so neither
+ * it nor the benchmark beside it is ever marked.
  */
 export function downsampleReport(report: StatsReport): StatsResponse {
   const { series, drawdown, benchmark } = report;
+  const gaps = report.headline.scope.kind !== 'coin';
   const kept = keptIndices(series.map((p) => p.pnl));
   const seriesTimes = new Set(series.map((p) => p.time));
   const keptTimes = new Set(kept.map((i) => series[i]!.time));
@@ -251,8 +254,8 @@ export function downsampleReport(report: StatsReport): StatsResponse {
     : keptIndices(line.map((b) => b.value));
   return {
     ...report,
-    series: pick(series, kept),
+    series: pick(series, kept, gaps),
     drawdown: { ...drawdown, underwater: kept.map((i) => drawdown.underwater[i]!) },
-    benchmark: { ...benchmark, series: pick(line, lineKept) },
+    benchmark: { ...benchmark, series: pick(line, lineKept, gaps) },
   };
 }

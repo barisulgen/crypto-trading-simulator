@@ -175,7 +175,7 @@ export interface StatsBenchmark {
 }
 
 /**
- * A deposit, or under a wallet filter a transfer into or out of the wallet, for the equity chart.
+ * A deposit, or under a market filter a transfer into or out of its wallet, for the equity chart.
  * `wallet` is the wallet the deposit went into, or for a transfer the filtered wallet.
  */
 export interface StatsMarker {
@@ -188,7 +188,7 @@ export interface StatsMarker {
 export interface StatsReport {
   headline: StatsHeadline;
   series: PnlPoint[];
-  /** The deposits in the range (for every filter) and, under a market filter, its wallet's transfers; by time. */
+  /** The deposits in the range; under a market filter only its wallet's deposits, plus its transfers in and out; by time. */
   markers: StatsMarker[];
   drawdown: Drawdown;
   quality: TradeQuality;

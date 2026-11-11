@@ -597,12 +597,16 @@ describe('computeStats: deposit and transfer markers', () => {
     expect(marks({ ...ALL, from: t(0), to: t(2) })).toEqual(deposits.slice(0, 2));
   });
 
-  it('a wallet scope: every deposit, and the transfers into and out of the wallet', () => {
+  it('a wallet scope: its own deposits, and the transfers into and out of it; never a deposit into the other wallet', () => {
     expect(marks({ ...ALL, market: 'leverage' })).toEqual([
-      [t(0), 'deposit', '1000', 'spot'],
       [t(2), 'deposit', '500', 'leverage'],
       [t(3), 'transfer_in', '300', 'leverage'],
       [t(4), 'transfer_out', '100', 'leverage'],
+    ]);
+    expect(marks({ ...ALL, market: 'spot' })).toEqual([
+      [t(0), 'deposit', '1000', 'spot'],
+      [t(3), 'transfer_out', '300', 'spot'],
+      [t(4), 'transfer_in', '100', 'spot'],
       [t(5), 'deposit', '200', 'spot'],
     ]);
     expect(marks({ ...ALL, market: 'spot', from: t(3), to: t(4) })).toEqual([

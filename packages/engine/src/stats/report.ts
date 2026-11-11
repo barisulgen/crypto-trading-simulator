@@ -112,14 +112,15 @@ function livePoint(
 }
 
 /**
- * The deposits in the range, whatever the scope, and for a wallet scope also the transfers into
- * and out of that wallet, by time then row id.
+ * The deposits in the range and, for a wallet scope, only that wallet's deposits plus the transfers
+ * into and out of it; by time then row id.
  */
 function markers(events: StatsEvent[], scope: Scope, f: StatsFilter): StatsMarker[] {
   const out: StatsMarker[] = [];
   const ordered = events.filter((r) => within(r.time, f)).sort((a, b) => a.time - b.time || a.id - b.id);
   for (const { time, event: e } of ordered) {
     if (e.type === 'deposit') {
+      if (scope.kind === 'wallet' && e.wallet !== scope.wallet) continue;
       out.push({ time, kind: 'deposit', amount: e.amount, wallet: e.wallet });
     } else if (e.type === 'transfer' && scope.kind === 'wallet') {
       if (e.to === scope.wallet) out.push({ time, kind: 'transfer_in', amount: e.amount, wallet: scope.wallet });

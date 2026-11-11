@@ -596,6 +596,58 @@ describe('downsampleReport', () => {
   });
 });
 
+describe('downsampleReport: gap marks by scope', () => {
+  /** Three BTC perp fills and three snapshots, each 10 minutes after the one before. */
+  function tenMinutesApart(filter: StatsFilter): StatsReport {
+    const times = [T0, T0 + 10 * MIN, T0 + 20 * MIN];
+    const fills: StatsEvent[] = times.map((time, i) => ({
+      id: i + 2,
+      time,
+      event: { type: 'fill', market: 'perp', time, fill: perpFill({ id: `pf${i}`, time, realizedPnl: D(i) }), order: perpOrder() },
+    }));
+    const input: StatsInput = {
+      events: [{ id: 1, time: T0 - MIN, event: { type: 'deposit', time: T0 - MIN, wallet: 'leverage', amount: D(1000), totalDeposited: D(1000) } }, ...fills],
+      snapshots: times.map((time, i) => ({
+        time,
+        total: D(1000 + i),
+        deposited: D(1000),
+        spotValue: D(0),
+        leverageValue: D(1000 + i),
+        btcBid: D(100),
+      })),
+      now: T0 + 30 * MIN,
+      account: account(),
+      basis: {},
+      positions: [],
+      live: false,
+      benchmarkBuys: [{ depositEventId: 1, price: D(100) }],
+      btcRules,
+      spotTakerFee: D('0.001'),
+      btcBid: null,
+      tz: 'UTC',
+    };
+    return computeStats(input, filter);
+  }
+
+  it('account and wallet curves break over the gaps; a coin curve, built from trade times, and its benchmark never do', () => {
+    for (const filter of [ALL, { ...ALL, market: 'leverage' as const }]) {
+      const out = downsampleReport(tenMinutesApart(filter));
+      expect(out.series.filter((p) => p.gap)).toHaveLength(2);
+      expect(out.benchmark.series.filter((p) => p.gap)).toHaveLength(2);
+    }
+    for (const filter of [{ ...ALL, symbol: 'BTCUSDT' }, { ...ALL, symbol: 'BTCUSDT', market: 'leverage' as const }]) {
+      const report = tenMinutesApart(filter);
+      expect(report.headline.scope.kind).toBe('coin');
+      expect(report.series.map((p) => p.time)).toEqual([T0 - MIN, T0, T0 + 10 * MIN, T0 + 20 * MIN]);
+      expect(report.benchmark.series).toHaveLength(3);
+      const out = downsampleReport(report);
+      expect(out.series).toHaveLength(4);
+      expect(out.series.some((p) => 'gap' in p)).toBe(false);
+      expect(out.benchmark.series.some((p) => 'gap' in p)).toBe(false);
+    }
+  });
+});
+
 describe('downsampleReport: a coin series', () => {
   it('the benchmark, on other times than the series, is thinned on its own values', () => {
     const report = reportOver(minutes(3000), wave);
