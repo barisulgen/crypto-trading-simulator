@@ -7,6 +7,7 @@ import { BackwardsNote, FilterFields } from '../components/FilterFields.tsx';
 import { Button, RefreshIcon } from '../components/ui.tsx';
 import { api, ApiError } from '../lib/api.ts';
 import type { HistoryRow } from '../lib/api.ts';
+import { EXPORT_PAGE_SIZE, fetchAllHistory, historyCsv } from '../lib/csv.ts';
 import {
   EMPTY_FILTERS,
   EVENT_TYPES,
@@ -15,6 +16,7 @@ import {
   filterParams,
   hasFilters,
   historyQuery,
+  localDate,
   parseFilters,
   sortTypes,
 } from '../lib/history.ts';
@@ -26,6 +28,61 @@ import { navigate } from '../lib/route.ts';
 const go = (f: HistoryFilters) => navigate('/history', filterParams(f));
 
 const errorText = (e: unknown) => (e instanceof ApiError ? e.message : String(e));
+
+// ---- export ----
+
+/** Saves the text as a file through a temporary download link. */
+function saveCsv(csv: string, name: string) {
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Every event the filters match as a CSV file; nothing is saved if any page fails. */
+function ExportButton({ filters }: { filters: HistoryFilters }) {
+  const [rows, setRows] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const running = rows !== null;
+
+  async function run() {
+    setError('');
+    setRows(0);
+    try {
+      const all = await fetchAllHistory(
+        (before) => api.history({ ...historyQuery(filters, before), limit: EXPORT_PAGE_SIZE }),
+        setRows,
+      );
+      saveCsv(historyCsv(all, Intl.DateTimeFormat().resolvedOptions().timeZone), `history-${localDate(Date.now())}.csv`);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setRows(null);
+    }
+  }
+
+  return (
+    <>
+      {error !== '' && (
+        <span role="alert" className="max-w-[16rem] truncate text-xs text-down" title={error}>
+          Export failed: {error}
+        </span>
+      )}
+      {running && (
+        <span role="status" className="text-xs whitespace-nowrap text-muted">
+          Exporting... {rows} rows
+        </span>
+      )}
+      <Button tone="quiet" size="sm" disabled={running} title="Save every event these filters match as a CSV file" onClick={run}>
+        Export CSV
+      </Button>
+    </>
+  );
+}
 
 // ---- filters ----
 
@@ -82,7 +139,8 @@ function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(
           Filters
           {count > 0 && <span className="rounded-full bg-accent px-1.5 text-2xs font-semibold text-on-accent">{count}</span>}
         </Button>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex min-w-0 items-center gap-1">
+          <ExportButton filters={filters} />
           {hasFilters(filters) && (
             <Button tone="quiet" size="sm" onClick={() => go(EMPTY_FILTERS)}>
               Clear filters
