@@ -17,7 +17,6 @@ import { createLogger } from '../src/log.ts';
 import type { Candle } from '../src/market/candles.ts';
 import {
   CATCHING_UP_REFUSAL,
-  DEPOSIT_BTC_REFUSAL,
   EngineRunner,
   FEED_NOTICE_WINDOW_MS,
   GAP_NOT_APPLIED_REFUSAL,
@@ -1144,7 +1143,7 @@ describe('GET /api/stats', () => {
     expect(res.status).toBe(200);
     const series = res.body.series as { time: number; pnl: string }[];
     expect(series.length).toBeLessThanOrEqual(1500);
-    expect(series.length).toBeGreaterThan(1000);
+    expect(series.length).toBeGreaterThan(500);
     expect(series).toContainEqual(expect.objectContaining({ time: start + 1777 * 60_000, pnl: '-321' }));
     expect(series.at(-1)!.time).toBe(t.clock.now);
     expect(res.body.drawdown.maxUsd).toBe('327');
@@ -1201,7 +1200,7 @@ describe('POST /api/deposit while BTC spot is stale', () => {
     t.market.setFresh('BTCUSDT', false);
     const res = await t.call('POST', '/api/deposit', { wallet: 'spot', amount: '1000' });
     expect(res.status).toBe(503);
-    expect(res.body).toEqual({ error: DEPOSIT_BTC_REFUSAL });
+    expect(res.body).toEqual({ error: 'Deposits wait for a live BTC price (the benchmark buys BTC with each deposit)' });
     expect(t.db.prepare("SELECT count(*) AS n FROM events WHERE type = 'deposit'").get()).toEqual({ n: 0 });
   });
 });

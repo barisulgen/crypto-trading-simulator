@@ -189,30 +189,51 @@ export interface StatsResponse extends Omit<StatsReport, 'series' | 'drawdown' |
 }
 
 /**
- * The indices of the points kept: all of them when there are at most `max`; otherwise, over equal
- * buckets of the points before the last, each bucket's first point and its lowest and highest
- * value, in order and once each, then the last point.
+ * The indices of the points kept, ascending: all of them when there are at most `max`. Otherwise
+ * the last point; then the `required` points, in the order given, while they fit; then, over equal
+ * buckets of the points before the last, as many as the room left allows, each bucket's first
+ * point, its lowest and highest value and, with `underwater`, its deepest point below the peak.
  */
-function keptIndices(values: Decimal[], max = MAX_POINTS): number[] {
+function keptIndices(values: Decimal[], opts: { underwater?: Decimal[]; required?: number[]; max?: number } = {}): number[] {
   const n = values.length;
+  const max = opts.max ?? MAX_POINTS;
   if (n <= max) return values.map((_, i) => i);
+  const kept = new Set<number>([n - 1]);
+  for (const i of opts.required ?? []) {
+    if (kept.size >= max) break;
+    kept.add(i);
+  }
+  const under = opts.underwater;
+  const perBucket = under ? 4 : 3;
   const body = n - 1;
-  const buckets = Math.floor((max - 1) / 3);
-  const kept: number[] = [];
+  const buckets = Math.floor((max - kept.size) / perBucket);
   for (let b = 0; b < buckets; b++) {
     const start = Math.floor((b * body) / buckets);
     const end = Math.floor(((b + 1) * body) / buckets);
     if (start >= end) continue;
     let lo = start;
     let hi = start;
+    let deep = start;
     for (let i = start + 1; i < end; i++) {
       if (values[i]!.lt(values[lo]!)) lo = i;
       if (values[i]!.gt(values[hi]!)) hi = i;
+      if (under && under[i]!.lt(under[deep]!)) deep = i;
     }
-    kept.push(...[...new Set([start, lo, hi])].sort((x, y) => x - y));
+    kept.add(start).add(lo).add(hi).add(deep);
   }
-  kept.push(n - 1);
-  return kept;
+  return [...kept].sort((x, y) => x - y);
+}
+
+/**
+ * The series indices of the drawdown periods' peaks and troughs (every point at those times),
+ * deepest period first, so that the deepest are kept when not all of them fit.
+ */
+function periodIndices(series: PnlPoint[], drawdown: Drawdown): number[] {
+  const byTime = new Map<number, number[]>();
+  series.forEach((p, i) => byTime.set(p.time, [...(byTime.get(p.time) ?? []), i]));
+  return [...drawdown.periods]
+    .sort((a, b) => b.depthUsd.comparedTo(a.depthUsd))
+    .flatMap((p) => [...(byTime.get(p.start) ?? []), ...(byTime.get(p.trough) ?? [])]);
 }
 
 /**
@@ -236,16 +257,20 @@ function pick<P extends { time: number }>(line: P[], kept: number[], gaps: boole
 
 /**
  * The report as the API sends it. The P&L series, and the underwater line beside it, keep at most
- * MAX_POINTS points (see keptIndices); the benchmark line keeps the series' times when it is drawn
- * on them, else it is thinned on its own values. Every drawdown figure was computed on the full
- * series. On the account and wallet curves, which are snapshots, a kept point is marked `gap` where
+ * MAX_POINTS points (see keptIndices), among them each bucket's deepest point below the peak and
+ * the peak and trough of every drawdown period (the deepest periods first, while they fit). The
+ * benchmark line keeps the series' times when it is drawn on them, else it is thinned on its own
+ * values. Every drawdown figure was computed on the full series. On the account and wallet curves, which are snapshots, a kept point is marked `gap` where
  * they were interrupted before it (see pick). A coin's curve steps at its trades' times, so neither
  * it nor the benchmark beside it is ever marked.
  */
 export function downsampleReport(report: StatsReport): StatsResponse {
   const { series, drawdown, benchmark } = report;
   const gaps = report.headline.scope.kind !== 'coin';
-  const kept = keptIndices(series.map((p) => p.pnl));
+  const kept = keptIndices(
+    series.map((p) => p.pnl),
+    { underwater: drawdown.underwater.map((u) => u.usd), required: periodIndices(series, drawdown) },
+  );
   const seriesTimes = new Set(series.map((p) => p.time));
   const keptTimes = new Set(kept.map((i) => series[i]!.time));
   const line = benchmark.series;

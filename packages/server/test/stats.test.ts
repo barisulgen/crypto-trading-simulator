@@ -596,6 +596,44 @@ describe('downsampleReport', () => {
   });
 });
 
+describe('downsampleReport: drawdown', () => {
+  /** The sent series and underwater line keep the deepest drawdown and every period's peak and trough. */
+  function expectDrawdownKept(report: StatsReport) {
+    const out = downsampleReport(report);
+    expect(out.series.length).toBeLessThanOrEqual(MAX_POINTS);
+    expect(out.series.at(-1)).toEqual(report.series.at(-1));
+    const deepest = out.drawdown.underwater.reduce((m, u) => (u.usd.lt(m) ? u.usd : m), D(0));
+    expect(deepest).toEqual(report.drawdown.maxUsd.neg());
+    const sent = new Set(out.series.map((p) => p.time));
+    for (const p of report.drawdown.periods) {
+      expect(sent).toContain(p.start);
+      expect(sent).toContain(p.trough);
+    }
+    return out;
+  }
+
+  it('a sharp drop inside a bucket: the deepest underwater point is sent, not only the bucket extremes of P&L', () => {
+    // About 0-4, then 300 at point 1000, 150 at point 1001, and 290 after: the drawdown is 150.
+    const pnl = (i: number) => (i < 1000 ? i % 5 : i === 1000 ? 300 : i === 1001 ? 150 : 290);
+    const report = reportOver(minutes(3000), pnl);
+    expect(report.drawdown.maxUsd.toString()).toBe('150');
+    expect(report.drawdown.periods.map((p) => [p.start, p.trough])).toEqual([[T0 + 1000 * MIN, T0 + 1001 * MIN]]);
+    expectDrawdownKept(report);
+  });
+
+  it('500 drawdown periods: every peak and trough is sent, within 1500 points', () => {
+    // Each 6-point cycle peaks, falls 80 and recovers above the peak in the next cycle.
+    const pnl = (i: number) => {
+      const base = 10 * Math.floor(i / 6);
+      return base + [0, 40, -40, 0, 5, 5][i % 6]!;
+    };
+    const report = reportOver(minutes(3000), pnl);
+    expect(report.drawdown.periods.length).toBe(500);
+    const out = expectDrawdownKept(report);
+    expect(out.series.length).toBeGreaterThan(1000);
+  });
+});
+
 describe('downsampleReport: gap marks by scope', () => {
   /** Three BTC perp fills and three snapshots, each 10 minutes after the one before. */
   function tenMinutesApart(filter: StatsFilter): StatsReport {
