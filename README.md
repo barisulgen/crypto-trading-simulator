@@ -21,9 +21,11 @@ Ten liquid coins are available, each against USDT: BTC, ETH, SOL, NEAR, XRP, BNB
 
 ## Screenshots
 
-_Screenshots coming soon._
+<img width="2560" height="1320" alt="Screenshot 2026-11-11 164259" src="https://github.com/user-attachments/assets/ac26d77d-aed9-4048-9f79-7bb20d6c33a7" />
+<img width="2560" height="1316" alt="Screenshot 2026-11-11 164249" src="https://github.com/user-attachments/assets/e6593347-1bc6-4b3e-8b72-20f1e72ffdec" />
+<img width="2560" height="1318" alt="Screenshot 2026-11-11 164221" src="https://github.com/user-attachments/assets/3faebb24-b423-4be8-bb73-8c6bd5b5380e" />
+<img width="2560" height="1315" alt="Screenshot 2026-11-11 164139" src="https://github.com/user-attachments/assets/858bdc7e-0b97-4d27-b5d6-ecaeb4d5025b" />
 
-<!-- Add images here, e.g. ![Trade screen](screenshots/trade.png) -->
 
 ## Status
 
