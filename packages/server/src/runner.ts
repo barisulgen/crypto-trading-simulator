@@ -744,6 +744,17 @@ export class EngineRunner implements FundingSim {
     return this.d.sim.spot.state;
   }
 
+  /**
+   * What the stats read of the market now: the BTC spot rules the benchmark buys under, the BTC
+   * spot best bid while its data is fresh (else null), and the spot taker fee. Refused while the
+   * BTC spot rules are not loaded.
+   */
+  statsMarket(): { btcRules: SpotRules; btcBid: Decimal | null; spotTakerFee: Decimal } {
+    const btcRules = this.spotRulesOf(BENCHMARK_SYMBOL);
+    if (btcRules === null) throw new RefusedError(`Trading rules not loaded for ${BENCHMARK_SYMBOL}`);
+    return { btcRules, btcBid: this.btcBid(), spotTakerFee: this.d.fees.spot.taker };
+  }
+
   // ---- internals ----
 
   private ctx(): SimCtx {
@@ -1464,10 +1475,8 @@ export class EngineRunner implements FundingSim {
     if (this.gaps.any() || this.catchUp.keys().length > 0) return;
     const value = this.value();
     if (value.coins.some((c) => !c.fresh) || value.leverage.positions.some((p) => !p.markFresh)) return;
-    const market = this.d.spotMarket;
-    const btcBid = market.isFresh(BENCHMARK_SYMBOL) ? market.best(BENCHMARK_SYMBOL, 'sell') : null;
     const now = this.d.now();
-    insertEquitySnapshot(this.d.db, this.d.seasonId, value, now, btcBid);
+    insertEquitySnapshot(this.d.db, this.d.seasonId, value, now, this.btcBid());
     this.snapshotAt = now;
   }
 
@@ -1523,6 +1532,12 @@ export class EngineRunner implements FundingSim {
         return p && brackets ? liquidationPrice(brackets, p.side, p.qty, p.entryPrice, p.margin) : null;
       },
     };
+  }
+
+  /** The BTC spot best bid while BTC spot data is fresh; null otherwise. */
+  private btcBid(): Decimal | null {
+    const market = this.d.spotMarket;
+    return market.isFresh(BENCHMARK_SYMBOL) ? market.best(BENCHMARK_SYMBOL, 'sell') : null;
   }
 
   private spotRulesOf(symbol: string): SpotRules | null {

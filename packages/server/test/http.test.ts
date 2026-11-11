@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { D, liquidationPrice, maxRemovableMargin, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
+import { computeStats, D, liquidationPrice, maxRemovableMargin, PerpEngine, SimEngine, SpotEngine } from '@sim/engine';
 import { btcBrackets } from '../../engine/test/perpFixtures.ts';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
@@ -12,11 +12,12 @@ import { ClientHub } from '../src/api/ws.ts';
 import { COINS, loadConfig } from '../src/config.ts';
 import { currentSeasonId, openDb } from '../src/db/db.ts';
 import type { Db } from '../src/db/db.ts';
-import { loadLedger, loadPerpState, loadSpotState } from '../src/db/store.ts';
+import { loadLedger, loadPerpState, loadSpotState, toJson } from '../src/db/store.ts';
 import { createLogger } from '../src/log.ts';
 import type { Candle } from '../src/market/candles.ts';
 import {
   CATCHING_UP_REFUSAL,
+  DEPOSIT_BTC_REFUSAL,
   EngineRunner,
   FEED_NOTICE_WINDOW_MS,
   GAP_NOT_APPLIED_REFUSAL,
@@ -25,6 +26,7 @@ import {
   MARGIN_STALE_REFUSAL,
   RefusedError,
 } from '../src/runner.ts';
+import { downsampleReport, loadStatsInput } from '../src/stats/loadStats.ts';
 import { FakeClock, FakeHealth, FakeHistory, settle, TestMarket, TestPerpMarket } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
@@ -1051,6 +1053,158 @@ function prng(seed: number): () => number {
     return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/** Equity snapshots of the current season, written as the runner writes them: [time, P&L] on 1000 deposited, no BTC bid. */
+function insertSnapshots(db: Db, points: [number, number][]): void {
+  const seasonId = currentSeasonId(db);
+  const ins = db.prepare(
+    'INSERT INTO equity_snapshots (season_id, time, total, deposited, spot_value, leverage_value, btc_bid) VALUES (?, ?, ?, ?, ?, ?, NULL)',
+  );
+  db.transaction(() => {
+    for (const [time, pnl] of points) ins.run(seasonId, time, String(1000 + pnl), '1000', String(1000 + pnl), '0');
+  })();
+}
+
+describe('GET /api/stats', () => {
+  it('the report over the stored record: two deposits, a spot round trip and a perp trade', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    await t.login();
+    expect((await t.call('POST', '/api/deposit', { wallet: 'spot', amount: '1000' })).status).toBe(200);
+    t.clock.advance(60_000);
+    expect((await t.call('POST', '/api/deposit', { wallet: 'leverage', amount: '500' })).status).toBe(200);
+    await t.call('POST', '/api/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1' });
+    t.clock.advance(300);
+    await t.call('POST', '/api/orders', { symbol: 'BTCUSDT', side: 'sell', type: 'market', qty: '0.999' });
+    t.clock.advance(300);
+    await t.call('POST', '/api/perp/orders', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '0.01' });
+    t.clock.advance(100);
+    await t.call('POST', '/api/perp/close', { symbol: 'BTCUSDT' });
+    t.clock.advance(100);
+
+    const seasonId = currentSeasonId(t.db);
+    const expected = (tz: string, filter: Parameters<typeof computeStats>[1]) =>
+      JSON.parse(toJson(downsampleReport(computeStats(loadStatsInput(t.db, seasonId, t.runner, tz, t.clock.now), filter))));
+
+    const all = await t.call('GET', '/api/stats?tz=UTC');
+    expect(all.status).toBe(200);
+    expect(all.body).toEqual(expected('UTC', { from: null, to: null, symbol: null, market: null }));
+    expect(all.body.quality.count).toBe(2);
+    expect(all.body.breakdowns.market.map((r: any) => [r.key, r.count])).toEqual([
+      ['spot', 1],
+      ['perp', 1],
+    ]);
+    expect(all.body.markers.map((m: any) => [m.kind, m.amount, m.wallet])).toEqual([
+      ['deposit', '1000', 'spot'],
+      ['deposit', '500', 'leverage'],
+    ]);
+    expect(all.body.headline.netPnl).toBe((await t.call('GET', '/api/account')).body.netPnl);
+    expect(all.body.headline.live).toBe(true);
+    expect(all.body.benchmark.missing).toBe(0);
+
+    const from = T0 + 60_000;
+    const q = `tz=Europe%2FIstanbul&symbol=BTCUSDT&market=leverage&from=${from}&to=${t.clock.now}`;
+    const filtered = await t.call('GET', `/api/stats?${q}`);
+    expect(filtered.status).toBe(200);
+    expect(filtered.body).toEqual(expected('Europe/Istanbul', { from, to: t.clock.now, symbol: 'BTCUSDT', market: 'leverage' }));
+    expect(filtered.body.quality.count).toBe(1);
+    expect(filtered.body.headline.scope).toEqual({ kind: 'coin', symbol: 'BTCUSDT', market: 'perp' });
+  });
+
+  it('a bad time zone, market, symbol or bound is a 400', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    await t.login();
+    const error = async (q: string) => {
+      const res = await t.call('GET', `/api/stats?${q}`);
+      expect(res.status).toBe(400);
+      return res.body.error;
+    };
+    expect(await error('tz=Mars%2FPhobos')).toBe('tz must be a valid time zone');
+    expect(await error('')).toBe('tz must be a valid time zone');
+    expect(await error('tz=UTC&tz=UTC')).toBe('tz given more than once');
+    expect(await error('tz=UTC&market=perp')).toBe('market must be spot or leverage');
+    expect(await error('tz=UTC&symbol=FOOUSDT')).toBe('Unknown symbol FOOUSDT');
+    expect(await error('tz=UTC&from=yesterday')).toBe('from must be an integer from 0 to 9007199254740991');
+    expect(await error('tz=UTC&to=1.5')).toBe('to must be an integer from 0 to 9007199254740991');
+    expect(await error('tz=UTC&from=2&to=1')).toBe('from must not be after to');
+    expect((await t.call('GET', '/api/stats?tz=Asia%2FTokyo&market=spot&from=1&to=1')).status).toBe(200);
+  });
+
+  it('3000 snapshots: at most 1500 points, the lowest and the last kept', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    await t.login();
+    const start = t.clock.now - 3000 * 60_000;
+    insertSnapshots(
+      t.db,
+      Array.from({ length: 3000 }, (_, i): [number, number] => [start + i * 60_000, i === 1777 ? -321 : (i % 13) - 6]),
+    );
+    const res = await t.call('GET', '/api/stats?tz=UTC');
+    expect(res.status).toBe(200);
+    const series = res.body.series as { time: number; pnl: string }[];
+    expect(series.length).toBeLessThanOrEqual(1500);
+    expect(series.length).toBeGreaterThan(1000);
+    expect(series).toContainEqual(expect.objectContaining({ time: start + 1777 * 60_000, pnl: '-321' }));
+    expect(series.at(-1)!.time).toBe(t.clock.now);
+    expect(res.body.drawdown.maxUsd).toBe('327');
+    expect(res.body.drawdown.underwater).toHaveLength(series.length);
+  });
+
+  it('a point more than 5 minutes after the one before it carries gap: true', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    await t.login();
+    const now = t.clock.now;
+    insertSnapshots(t.db, [
+      [now - 30 * 60_000, 1],
+      [now - 29 * 60_000, 2],
+      [now - 19 * 60_000, 3],
+      [now - 18 * 60_000, 4],
+    ]);
+    const res = await t.call('GET', '/api/stats?tz=UTC');
+    expect(res.body.series.map((p: any) => [p.time, p.pnl, p.gap ?? false])).toEqual([
+      [now - 30 * 60_000, '0', false],
+      [now - 30 * 60_000, '1', false],
+      [now - 29 * 60_000, '2', false],
+      [now - 19 * 60_000, '3', true],
+      [now - 18 * 60_000, '4', false],
+      // The live point: nothing deposited, so a P&L of 0, 18 minutes after the last snapshot.
+      [now, '0', true],
+    ]);
+  });
+
+  it('with a LAN password, needs the session', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    expect((await t.call('GET', '/api/stats?tz=UTC')).status).toBe(401);
+    await t.login();
+    expect((await t.call('GET', '/api/stats?tz=UTC')).status).toBe(200);
+  });
+
+  it('is a 503 until the BTC spot rules the benchmark buys under are loaded', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    await t.login();
+    t.market.clearRules('BTCUSDT');
+    const res = await t.call('GET', '/api/stats?tz=UTC');
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'Trading rules not loaded for BTCUSDT' });
+  });
+});
+
+describe('POST /api/deposit while BTC spot is stale', () => {
+  it('is a 503 with the refusal, and records nothing', async () => {
+    const t = await makeApp();
+    apps.push(t.app);
+    await t.login();
+    t.market.setFresh('BTCUSDT', false);
+    const res = await t.call('POST', '/api/deposit', { wallet: 'spot', amount: '1000' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: DEPOSIT_BTC_REFUSAL });
+    expect(t.db.prepare("SELECT count(*) AS n FROM events WHERE type = 'deposit'").get()).toEqual({ n: 0 });
+  });
+});
 
 describe('order fuzz', () => {
   it('valid bodies with random fields changed, dropped or added, on every spot and perp write route, never get a 5xx', async () => {

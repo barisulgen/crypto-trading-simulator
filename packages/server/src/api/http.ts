@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
-import { InputError, MARGIN_MARK_UNAVAILABLE, maxLeverage, parseAmount, TIERS_NOT_LOADED } from '@sim/engine';
+import { computeStats, InputError, MARGIN_MARK_UNAVAILABLE, maxLeverage, parseAmount, TIERS_NOT_LOADED } from '@sim/engine';
 import type {
   Bracket,
   FeeSchedule,
@@ -14,6 +14,7 @@ import type {
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
+  StatsFilter,
   TierSource,
   Wallet,
 } from '@sim/engine';
@@ -32,6 +33,7 @@ import {
   submittedOrder,
 } from '../runner.ts';
 import type { EngineRunner } from '../runner.ts';
+import { downsampleReport, loadStatsInput } from '../stats/loadStats.ts';
 import { registerAuth } from './auth.ts';
 import type { ClientHub } from './ws.ts';
 
@@ -177,6 +179,19 @@ function queryMarket(q: Query): Market {
   const m = queryStr(q, 'market') ?? 'spot';
   if (m !== 'spot' && m !== 'perp') throw new InputError('market must be spot or perp');
   return m;
+}
+
+/** The `tz` query parameter: an IANA time zone the platform knows. */
+function queryTimeZone(q: Query): string {
+  const tz = queryStr(q, 'tz');
+  const invalid = new InputError('tz must be a valid time zone');
+  if (tz === undefined) throw invalid;
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: tz });
+  } catch {
+    throw invalid;
+  }
+  return tz;
 }
 
 /** The orders a call's events placed or rejected, in event order. */
@@ -507,6 +522,21 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
       limit: queryInt(q, 'limit', 1, HISTORY_MAX) ?? 50,
     });
     return send(reply, 200, result);
+  });
+
+  // The stats of the current season, filtered by range, coin and market; hours and weekdays in `tz`.
+  app.get('/api/stats', async (req, reply) => {
+    const q = req.query as Query;
+    const tz = queryTimeZone(q);
+    const s = queryStr(q, 'symbol');
+    const market = queryStr(q, 'market');
+    if (market !== undefined && market !== 'spot' && market !== 'leverage') throw new InputError('market must be spot or leverage');
+    const from = queryInt(q, 'from', 0, Number.MAX_SAFE_INTEGER) ?? null;
+    const to = queryInt(q, 'to', 0, Number.MAX_SAFE_INTEGER) ?? null;
+    if (from !== null && to !== null && from > to) throw new InputError('from must not be after to');
+    const filter: StatsFilter = { from, to, symbol: s === undefined ? null : symbol(s), market: market ?? null };
+    const input = loadStatsInput(d.db, d.seasonId, d.runner, tz, (d.now ?? Date.now)());
+    return send(reply, 200, downsampleReport(computeStats(input, filter)));
   });
 
   app.get('/api/candles', async (req, reply) => {

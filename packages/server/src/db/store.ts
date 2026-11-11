@@ -118,7 +118,7 @@ const ORDER_DECIMALS = [
 const dec = (v: unknown): Decimal | null => (v === null || v === undefined ? null : D(v as string));
 
 /** Revive a SpotOrder parsed from JSON (Decimal fields by name; a row from before cancelArrivesAt has none in flight). */
-function reviveOrder(raw: Record<string, unknown>): SpotOrder {
+export function reviveOrder(raw: Record<string, unknown>): SpotOrder {
   const o = { ...raw };
   for (const k of ORDER_DECIMALS) o[k] = dec(o[k]);
   const attach = o.attach as { stopLoss: string; takeProfit: string } | null | undefined;
@@ -130,7 +130,7 @@ function reviveOrder(raw: Record<string, unknown>): SpotOrder {
 const PERP_ORDER_DECIMALS = [...ORDER_DECIMALS, 'realizedPnl'] as const;
 
 /** Revive a PerpOrder parsed from JSON (Decimal fields by name; either attached leg may be absent). */
-function revivePerpOrder(raw: Record<string, unknown>): PerpOrder {
+export function revivePerpOrder(raw: Record<string, unknown>): PerpOrder {
   const o = { ...raw };
   for (const k of PERP_ORDER_DECIMALS) o[k] = dec(o[k]);
   const attach = o.attach as { stopLoss: string | null; takeProfit: string | null } | null | undefined;
@@ -143,7 +143,7 @@ const POSITION_DECIMALS = ['qty', 'entryPrice', 'margin', 'realizedPnl', 'fees',
 const WARN_LEVELS: readonly unknown[] = [0.5, 0.8, 0.9];
 
 /** Revive a Position parsed from JSON; a warning level it does not know is none given. */
-function revivePosition(raw: Record<string, unknown>): Position {
+export function revivePosition(raw: Record<string, unknown>): Position {
   const p = { ...raw };
   for (const k of POSITION_DECIMALS) p[k] = D(p[k] as string);
   p.warnLevel = WARN_LEVELS.includes(p.warnLevel) ? p.warnLevel : 0;
