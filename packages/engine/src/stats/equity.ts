@@ -189,7 +189,8 @@ export function pnlSeries(
       series.push({ time: origin, pnl: D(0), value: capitalThen(origin) });
     }
   }
-  series.push(...inRange);
+  // A loop, not push(...inRange): spreading a year of snapshots into one call overflows the stack.
+  for (const p of inRange) series.push(p);
 
   const live = input.live;
   const last = series.at(-1);

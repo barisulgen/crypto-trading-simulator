@@ -292,6 +292,11 @@ describe('risk', () => {
     expect(s(r2.avgLeverage!)).toBe('9');
   });
 
+  it('takes the highest leverage of 200,000 positions without overflowing the stack', () => {
+    const open = Array.from({ length: 200_000 }, (_, i) => position(`p${i}`, i === 123_456 ? 125 : 1 + (i % 20)));
+    expect(risk([], open, all).maxLeverage).toBe(125);
+  });
+
   it('is empty with no events', () => {
     const r = risk([], [], all);
     expect(r.liquidations).toBe(0);

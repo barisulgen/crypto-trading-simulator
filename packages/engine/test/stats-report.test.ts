@@ -653,6 +653,19 @@ describe('computeStats: empty', () => {
   });
 });
 
+describe('computeStats: scale', () => {
+  it('200,000 snapshots (about five months at one a minute): every scope completes', () => {
+    const n = 200_000;
+    const snapshots = Array.from({ length: n }, (_, i) => snap(t(i + 1), String(1000 + (i % 97) - 48), '1000', '80000'));
+    const events = rows([deposit(T0, 'spot', '1000', '1000')]);
+    const base = input({ events, snapshots, now: t(n + 1), benchmarkBuys: [{ depositEventId: 1, price: D(80000) }] });
+    for (const filter of [ALL, { ...ALL, market: 'spot' as const }, { ...ALL, symbol: 'BTCUSDT' }, { ...ALL, from: t(10) }]) {
+      const r = computeStats(base, filter);
+      expect(r.series.length).toBeGreaterThan(filter.symbol === null ? n - 10 : 0);
+    }
+  }, 30_000);
+});
+
 // ---- the real engine ----
 
 function book(bid: string, ask: string, qty = '100'): BookSnapshot {

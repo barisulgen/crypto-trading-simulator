@@ -128,6 +128,6 @@ export function risk(
     lostToLiquidations,
     liquidationFees,
     avgLeverage: levs.length === 0 ? null : levs.reduce((a, b) => a.plus(b), D(0)).div(levs.length),
-    maxLeverage: levs.length === 0 ? null : Math.max(...levs),
+    maxLeverage: levs.length === 0 ? null : levs.reduce((a, b) => Math.max(a, b)),
   };
 }
