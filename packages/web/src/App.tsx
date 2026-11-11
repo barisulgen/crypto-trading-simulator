@@ -12,11 +12,13 @@ import type { RoutePath } from './lib/route.ts';
 import { currentTheme, setTheme } from './lib/theme.ts';
 import type { Theme } from './lib/theme.ts';
 import { HistoryPage } from './pages/HistoryPage.tsx';
+import { StatsPage } from './pages/StatsPage.tsx';
 import { TradePage } from './pages/TradePage.tsx';
 
 const NAV: { path: RoutePath; label: string }[] = [
   { path: '/', label: 'Trade' },
   { path: '/history', label: 'History' },
+  { path: '/stats', label: 'Stats' },
 ];
 
 function ThemeToggle() {
@@ -50,14 +52,15 @@ function ThemeToggle() {
 function Header({ path }: { path: RoutePath }) {
   return (
     <header className="flex h-10 flex-none items-center gap-3 border-b border-line bg-panel px-3 desk:gap-4 desk:px-4">
-      <span className="font-semibold whitespace-nowrap [font-stretch:112%]">Trading Simulator</span>
-      <nav aria-label="Pages" className="flex h-full gap-1">
+      {/* The one part that gives way on a narrow phone, so the pages and the feed state always fit. */}
+      <span className="min-w-0 truncate font-semibold whitespace-nowrap [font-stretch:112%]">Trading Simulator</span>
+      <nav aria-label="Pages" className="flex h-full flex-none gap-1">
         {NAV.map((n) => (
           <a
             key={n.path}
             href={href(n.path)}
             aria-current={n.path === path ? 'page' : undefined}
-            className={`flex items-center px-2 text-sm ${
+            className={`flex items-center px-1.5 text-sm desk:px-2 ${
               n.path === path ? 'text-fg shadow-[inset_0_-2px_0_var(--color-accent)]' : 'text-muted hover:text-fg'
             }`}
           >
@@ -65,7 +68,7 @@ function Header({ path }: { path: RoutePath }) {
           </a>
         ))}
       </nav>
-      <div className="ml-auto flex items-center gap-1">
+      <div className="ml-auto flex flex-none items-center gap-1">
         <FeedIndicator />
         <ThemeToggle />
       </div>
@@ -89,7 +92,13 @@ export function App() {
           <AccountBar />
           <CatchUpIndicator />
           <main className="min-h-0 flex-1">
-            {route.path === '/history' ? <HistoryPage params={route.params} /> : <TradePage />}
+            {route.path === '/history' ? (
+              <HistoryPage params={route.params} />
+            ) : route.path === '/stats' ? (
+              <StatsPage params={route.params} />
+            ) : (
+              <TradePage />
+            )}
           </main>
         </>
       )}

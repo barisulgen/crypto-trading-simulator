@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { replaceSelection, selectionHref } from '../src/lib/route.ts';
+import { href, parseHash, replaceSelection, selectionHref } from '../src/lib/route.ts';
 
 const sol = { symbol: 'SOLUSDT', market: 'perp' } as const;
 
@@ -38,5 +38,20 @@ describe('trade selection in the address', () => {
     replaceSelection(sol);
     expect(replaceState).toHaveBeenCalledTimes(1);
     expect(loc.hash).toBe('#/history?symbol=SOLUSDT');
+  });
+});
+
+describe('routes', () => {
+  it('parses the stats route with its query, and builds its href', () => {
+    const r = parseHash('#/stats?symbol=BTCUSDT&from=2026-11-01');
+    expect(r.path).toBe('/stats');
+    expect(r.params.get('symbol')).toBe('BTCUSDT');
+    expect(parseHash('#/stats').path).toBe('/stats');
+    expect(href('/stats', { market: 'spot' })).toBe('#/stats?market=spot');
+  });
+
+  it('still sends an unknown path to Trade', () => {
+    expect(parseHash('#/nowhere').path).toBe('/');
+    expect(parseHash('#/history').path).toBe('/history');
   });
 });

@@ -116,6 +116,12 @@ export function localDayEnd(date: string): number | null {
   return p ? new Date(p[0], p[1], p[2] + 1).getTime() - 1 : null;
 }
 
+/** The local date 'YYYY-MM-DD' a moment falls on. */
+export function localDate(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 const validDate = (v: string | null): string | null => (v !== null && ymd(v) ? v : null);
 
 // ---- URL query <-> filters ----

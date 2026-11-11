@@ -1,15 +1,15 @@
 // History: every recorded event, newest first, with filters (coin, spot or leverage, event
 // type, date range) kept in the hash query, e.g. '#/history?symbol=BTCUSDT&types=fill', so a
 // filtered view survives a reload, can be bookmarked, and Back/Forward step through filter changes.
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Button, Segmented } from '../components/ui.tsx';
+import { BackwardsNote, FilterFields } from '../components/FilterFields.tsx';
+import { Button, RefreshIcon } from '../components/ui.tsx';
 import { api, ApiError } from '../lib/api.ts';
 import type { HistoryRow } from '../lib/api.ts';
 import {
   EMPTY_FILTERS,
   EVENT_TYPES,
-  HISTORY_COINS,
   MARKET_FILTERS,
   describeEvent,
   filterParams,
@@ -28,21 +28,6 @@ const go = (f: HistoryFilters) => navigate('/history', filterParams(f));
 const errorText = (e: unknown) => (e instanceof ApiError ? e.message : String(e));
 
 // ---- filters ----
-
-const CONTROL =
-  'h-8 min-w-0 rounded-ctl border border-line bg-canvas px-2 text-xs text-fg focus:border-focus disabled:opacity-50';
-
-function Labelled({ label, children, className = '' }: { label: string; children: (id: string) => ReactNode; className?: string }) {
-  const id = useId();
-  return (
-    <div className={`flex min-w-0 flex-col gap-1 ${className}`}>
-      <label htmlFor={id} className="text-2xs text-faint">
-        {label}
-      </label>
-      {children(id)}
-    </div>
-  );
-}
 
 function activeCount(f: HistoryFilters): number {
   return [f.symbol !== null, f.market !== null, f.types.length > 0, f.from !== null || f.to !== null].filter(Boolean).length;
@@ -78,20 +63,11 @@ function TypeChips({ types, onChange }: { types: EventType[]; onChange(t: EventT
   );
 }
 
-function RefreshIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6">
-      <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3.5H10" />
-    </svg>
-  );
-}
-
 function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(): void }) {
   // Phones: the filters fold behind a button so the list keeps the screen; desktop shows them all.
   const [open, setOpen] = useState(false);
   const count = activeCount(filters);
   const set = (patch: Partial<HistoryFilters>) => go({ ...filters, ...patch });
-  const backwards = filters.from !== null && filters.to !== null && filters.from > filters.to;
   return (
     <section aria-label="Filters" className="flex-none border-b border-line bg-panel desk:rounded-panel desk:border">
       <div className="flex h-11 items-center gap-2 px-3 desk:h-9">
@@ -123,64 +99,9 @@ function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(
         className={`${open ? 'flex' : 'hidden'} flex-col gap-3 border-t border-line px-3 pt-2.5 pb-3 desk:flex desk:border-t-0 desk:pt-0`}
       >
         <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 desk:flex desk:flex-wrap desk:items-end desk:gap-x-4">
-          <Labelled label="Coin">
-            {(id) => (
-              <select
-                id={id}
-                value={filters.symbol ?? ''}
-                onChange={(e) => set({ symbol: e.target.value || null })}
-                className={`${CONTROL} desk:w-32`}
-              >
-                <option value="">All coins</option>
-                {HISTORY_COINS.map((c) => (
-                  <option key={c} value={`${c}USDT`}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            )}
-          </Labelled>
-          <div className="flex min-w-0 flex-col gap-1">
-            <span className="text-2xs text-faint" aria-hidden="true">
-              Market
-            </span>
-            <Segmented
-              label="Market"
-              value={filters.market ?? 'all'}
-              options={[{ value: 'all', label: 'All', title: 'Both markets and every account event' }, ...MARKET_FILTERS]}
-              onChange={(v) => set({ market: v === 'all' ? null : v })}
-            />
-          </div>
-          <Labelled label="From">
-            {(id) => (
-              <input
-                id={id}
-                type="date"
-                value={filters.from ?? ''}
-                max={filters.to ?? undefined}
-                onChange={(e) => set({ from: e.target.value || null })}
-                className={CONTROL}
-              />
-            )}
-          </Labelled>
-          <Labelled label="To (inclusive)">
-            {(id) => (
-              <input
-                id={id}
-                type="date"
-                value={filters.to ?? ''}
-                min={filters.from ?? undefined}
-                onChange={(e) => set({ to: e.target.value || null })}
-                className={CONTROL}
-              />
-            )}
-          </Labelled>
+          <FilterFields value={filters} onChange={set} markets={MARKET_FILTERS} allTitle="Both markets and every account event" />
         </div>
-        {backwards && (
-          <p role="status" className="text-xs text-down">
-            The From date is after the To date, so no event can match.
-          </p>
-        )}
+        <BackwardsNote value={filters} what="no event can match" />
         <TypeChips types={filters.types} onChange={(types) => set({ types })} />
       </div>
     </section>
