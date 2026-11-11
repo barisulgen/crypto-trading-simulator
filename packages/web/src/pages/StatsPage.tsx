@@ -3,12 +3,13 @@
 // browser's time zone.
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { EquityChart } from '../components/EquityChart.tsx';
 import { StatsFilters } from '../components/StatsFilters.tsx';
 import { Button } from '../components/ui.tsx';
 import { api, ApiError } from '../lib/api.ts';
 import type { WireStatsReport } from '../lib/api.ts';
 import { isBackwards } from '../lib/history.ts';
-import { parseStatsFilters, statsFilterParams, statsQuery, statsView } from '../lib/stats.ts';
+import { parseStatsFilters, statsFilterParams, statsQuery, statsView, unrealisedAdded } from '../lib/stats.ts';
 import type { BreakdownTable, StatRow, StatTone, StatsView } from '../lib/stats.ts';
 
 const TONE: Record<StatTone, string> = { up: 'text-up', down: 'text-down', muted: 'text-muted', plain: 'text-fg' };
@@ -149,14 +150,13 @@ function Breakdown({ table }: { table: BreakdownTable }) {
   );
 }
 
-function Figures({ view, tz }: { view: StatsView; tz: string }) {
+function Figures({ view, chart, tz }: { view: StatsView; chart: ReactNode; tz: string }) {
   const extra = [view.open, view.unattributed, view.uncovered].filter((l) => l !== null);
   return (
     <div className="grid grid-cols-1 gap-1.5 desk:grid-cols-2 desk:items-start">
       <Headline view={view} />
       <Section title="Equity" className="desk:col-span-2">
-        {/* The equity chart mounts here. */}
-        <div data-slot="equity-chart" className="h-64 desk:h-80" />
+        {chart}
       </Section>
       <Section title="Trade quality" aside={view.quality.note ?? undefined}>
         <Rows rows={view.quality.rows} />
@@ -256,6 +256,8 @@ export function StatsPage({ params }: { params: URLSearchParams }) {
         <Message>Computing stats...</Message>
       );
   } else {
+    const now = Date.now();
+    const report = state.report;
     body = (
       <>
         {state.status === 'error' && (
@@ -267,7 +269,11 @@ export function StatsPage({ params }: { params: URLSearchParams }) {
           </p>
         )}
         <div className={state.status === 'loading' ? 'opacity-60' : ''}>
-          <Figures view={statsView(state.report, filters, Date.now())} tz={tz} />
+          <Figures
+            view={statsView(report, filters, now)}
+            chart={<EquityChart report={report} unrealisedAdded={unrealisedAdded(filters, report.headline.live, now)} />}
+            tz={tz}
+          />
         </div>
       </>
     );

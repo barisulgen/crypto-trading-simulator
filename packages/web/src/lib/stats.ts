@@ -68,7 +68,7 @@ function endsNow(f: StatsFilter, now: number | undefined): boolean {
  * Whether a coin's figures include what it holds now: only while prices are live and the range
  * reaches the present. `live` null (not known yet) counts as not live.
  */
-const unrealisedAdded = (f: StatsFilter, live: boolean | null, now: number | undefined): boolean =>
+export const unrealisedAdded = (f: StatsFilter, live: boolean | null, now: number | undefined): boolean =>
   live === true && endsNow(f, now);
 
 /**
