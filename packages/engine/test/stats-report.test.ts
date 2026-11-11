@@ -573,6 +573,49 @@ describe('computeStats: benchmark', () => {
   });
 });
 
+describe('computeStats: deposit and transfer markers', () => {
+  const events = rows([
+    deposit(t(0), 'spot', '1000', '1000'),
+    deposit(t(2), 'leverage', '500', '1500'),
+    transfer(t(3), 'spot', 'leverage', '300'),
+    transfer(t(4), 'leverage', 'spot', '100'),
+    deposit(t(5), 'spot', '200', '1700'),
+  ]);
+  const marks = (filter: StatsFilter) =>
+    computeStats(input({ events }), filter).markers.map((m) => [m.time, m.kind, s(m.amount), m.wallet]);
+
+  it('account and coin scopes: every deposit in the range, never a transfer', () => {
+    const deposits = [
+      [t(0), 'deposit', '1000', 'spot'],
+      [t(2), 'deposit', '500', 'leverage'],
+      [t(5), 'deposit', '200', 'spot'],
+    ];
+    expect(marks(ALL)).toEqual(deposits);
+    expect(marks({ ...ALL, symbol: 'BTCUSDT' })).toEqual(deposits);
+    expect(marks({ ...ALL, symbol: 'BTCUSDT', market: 'leverage' })).toEqual(deposits);
+    expect(marks({ ...ALL, from: t(1), to: t(5) })).toEqual(deposits.slice(1));
+    expect(marks({ ...ALL, from: t(0), to: t(2) })).toEqual(deposits.slice(0, 2));
+  });
+
+  it('a wallet scope: every deposit, and the transfers into and out of the wallet', () => {
+    expect(marks({ ...ALL, market: 'leverage' })).toEqual([
+      [t(0), 'deposit', '1000', 'spot'],
+      [t(2), 'deposit', '500', 'leverage'],
+      [t(3), 'transfer_in', '300', 'leverage'],
+      [t(4), 'transfer_out', '100', 'leverage'],
+      [t(5), 'deposit', '200', 'spot'],
+    ]);
+    expect(marks({ ...ALL, market: 'spot', from: t(3), to: t(4) })).toEqual([
+      [t(3), 'transfer_out', '300', 'spot'],
+      [t(4), 'transfer_in', '100', 'spot'],
+    ]);
+  });
+
+  it('none without deposits', () => {
+    expect(computeStats(input(), ALL).markers).toEqual([]);
+  });
+});
+
 describe('computeStats: empty', () => {
   it('no events and no snapshots: every figure null or 0, no throw', () => {
     const filters: StatsFilter[] = [

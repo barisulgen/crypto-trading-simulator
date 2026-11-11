@@ -2,7 +2,7 @@ import type { Decimal } from '../decimal.ts';
 import type { Position, PositionCloseReason, PositionSide } from '../perp/types.ts';
 import type { SimEvent } from '../sim.ts';
 import type { AccountValue } from '../spot/accounting.ts';
-import type { Basis, SpotRules } from '../types.ts';
+import type { Basis, SpotRules, Wallet } from '../types.ts';
 import type { Breakdowns } from './breakdowns.ts';
 import type { Drawdown, PnlPoint, Scope, Snapshot } from './equity.ts';
 
@@ -174,9 +174,22 @@ export interface StatsBenchmark {
   series: { time: number; value: Decimal }[];
 }
 
+/**
+ * A deposit, or under a wallet filter a transfer into or out of the wallet, for the equity chart.
+ * `wallet` is the wallet the deposit went into, or for a transfer the filtered wallet.
+ */
+export interface StatsMarker {
+  time: number;
+  kind: 'deposit' | 'transfer_in' | 'transfer_out';
+  amount: Decimal;
+  wallet: Wallet;
+}
+
 export interface StatsReport {
   headline: StatsHeadline;
   series: PnlPoint[];
+  /** The deposits in the range (for every filter) and, under a market filter, its wallet's transfers; by time. */
+  markers: StatsMarker[];
   drawdown: Drawdown;
   quality: TradeQuality;
   risk: Risk;

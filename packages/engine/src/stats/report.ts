@@ -8,7 +8,7 @@ import { costs, risk } from './costs.ts';
 import { capitalAt, drawdown, pnlSeries, rangePnl, type PnlPoint, type Scope } from './equity.ts';
 import { tradeQuality } from './quality.ts';
 import { buildTrades } from './trades.ts';
-import type { StatsBenchmark, StatsFilter, StatsInput, StatsReport, Trade } from './types.ts';
+import type { StatsBenchmark, StatsEvent, StatsFilter, StatsInput, StatsMarker, StatsReport, Trade } from './types.ts';
 
 const ACCOUNT: Scope = { kind: 'account' };
 
@@ -109,6 +109,24 @@ function livePoint(
     else pnl = pnl.plus(u);
   }
   return { point: { time: now, pnl, value: a.totalDeposited.plus(pnl) }, priced };
+}
+
+/**
+ * The deposits in the range, whatever the scope, and for a wallet scope also the transfers into
+ * and out of that wallet, by time then row id.
+ */
+function markers(events: StatsEvent[], scope: Scope, f: StatsFilter): StatsMarker[] {
+  const out: StatsMarker[] = [];
+  const ordered = events.filter((r) => within(r.time, f)).sort((a, b) => a.time - b.time || a.id - b.id);
+  for (const { time, event: e } of ordered) {
+    if (e.type === 'deposit') {
+      out.push({ time, kind: 'deposit', amount: e.amount, wallet: e.wallet });
+    } else if (e.type === 'transfer' && scope.kind === 'wallet') {
+      if (e.to === scope.wallet) out.push({ time, kind: 'transfer_in', amount: e.amount, wallet: scope.wallet });
+      else if (e.from === scope.wallet) out.push({ time, kind: 'transfer_out', amount: e.amount, wallet: scope.wallet });
+    }
+  }
+  return out;
 }
 
 interface Holding {
@@ -262,6 +280,7 @@ export function computeStats(input: StatsInput, filter: StatsFilter): StatsRepor
   return {
     headline,
     series,
+    markers: markers(events, scope, filter),
     drawdown: drawdown(series),
     quality: tradeQuality(trades),
     risk: risk(scoped, positions, { from, to }),
