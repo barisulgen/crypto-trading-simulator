@@ -54,7 +54,7 @@ The **Stats** page measures how the practice went, for the whole account or filt
 
 - **What counts as one trade.** A perpetual position, from the fill that opens it to the fill that closes it, however many partial closes there were in between and including a liquidation. A spot trade is a round trip: from a flat position to the next time it is flat again, where a leftover too small to sell (dust) counts as flat. Its result is net of fees and, for a perp, funding.
 - **Drawdown is measured on profit and loss**, not on the account's value, so a deposit can never hide it.
-- **Return on deposits** is the net P&L divided by the highest capital deposited in the range, so topping up lowers the return rather than flattering it.
+- **Return on deposits** is the net P&L divided by the highest capital in the range, so moving money out of a wallet late in the range cannot inflate its return.
 - **BTC buy-and-hold benchmark.** The same deposits, each one spent on BTC at the live ask with the 0.1 % taker fee, held ever since. It always covers the whole account, whatever the filters. A deposit is refused while the BTC data is not live, so the benchmark always has a real price to use.
 - **Estimated results are counted and marked.** Trades and fills that a catch-up after downtime had to estimate are included in the figures, and the page says how many.
 - **CSV export.** The History page's **Export CSV** button saves every event the current filters match as a UTF-8, comma-separated file, with exact amounts (no rounding).

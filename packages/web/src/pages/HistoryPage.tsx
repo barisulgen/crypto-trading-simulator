@@ -44,13 +44,12 @@ function saveCsv(csv: string, name: string) {
 }
 
 /** Every event the filters match as a CSV file; nothing is saved if any page fails. */
-function ExportButton({ filters }: { filters: HistoryFilters }) {
+function ExportButton({ filters, onError }: { filters: HistoryFilters; onError(message: string): void }) {
   const [rows, setRows] = useState<number | null>(null);
-  const [error, setError] = useState('');
   const running = rows !== null;
 
   async function run() {
-    setError('');
+    onError('');
     setRows(0);
     try {
       const all = await fetchAllHistory(
@@ -59,7 +58,7 @@ function ExportButton({ filters }: { filters: HistoryFilters }) {
       );
       saveCsv(historyCsv(all, Intl.DateTimeFormat().resolvedOptions().timeZone), `history-${localDate(Date.now())}.csv`);
     } catch (e) {
-      setError(errorText(e));
+      onError(errorText(e));
     } finally {
       setRows(null);
     }
@@ -67,11 +66,6 @@ function ExportButton({ filters }: { filters: HistoryFilters }) {
 
   return (
     <>
-      {error !== '' && (
-        <span role="alert" className="max-w-[16rem] truncate text-xs text-down" title={error}>
-          Export failed: {error}
-        </span>
-      )}
       {running && (
         <span role="status" className="text-xs whitespace-nowrap text-muted">
           Exporting... {rows} rows
@@ -123,6 +117,7 @@ function TypeChips({ types, onChange }: { types: EventType[]; onChange(t: EventT
 function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(): void }) {
   // Phones: the filters fold behind a button so the list keeps the screen; desktop shows them all.
   const [open, setOpen] = useState(false);
+  const [exportError, setExportError] = useState('');
   const count = activeCount(filters);
   const set = (patch: Partial<HistoryFilters>) => go({ ...filters, ...patch });
   return (
@@ -140,7 +135,7 @@ function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(
           {count > 0 && <span className="rounded-full bg-accent px-1.5 text-2xs font-semibold text-on-accent">{count}</span>}
         </Button>
         <div className="ml-auto flex min-w-0 items-center gap-1">
-          <ExportButton filters={filters} />
+          <ExportButton filters={filters} onError={setExportError} />
           {hasFilters(filters) && (
             <Button tone="quiet" size="sm" onClick={() => go(EMPTY_FILTERS)}>
               Clear filters
@@ -152,6 +147,11 @@ function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(
           </Button>
         </div>
       </div>
+      {exportError !== '' && (
+        <p role="alert" className="border-t border-line px-3 py-1.5 text-xs break-words text-down">
+          Export failed: {exportError}
+        </p>
+      )}
       <div
         id="history-filters"
         className={`${open ? 'flex' : 'hidden'} flex-col gap-3 border-t border-line px-3 pt-2.5 pb-3 desk:flex desk:border-t-0 desk:pt-0`}
