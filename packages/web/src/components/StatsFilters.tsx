@@ -9,10 +9,11 @@ import { Button, RefreshIcon } from './ui.tsx';
 
 const go = (f: StatsFilter) => navigate('/stats', statsFilterParams(f));
 
-export function StatsFilters({ filters, onRefresh }: { filters: StatsFilter; onRefresh(): void }) {
+/** `live`: whether the figures shown are at live prices; null while none are shown. */
+export function StatsFilters({ filters, live, onRefresh }: { filters: StatsFilter; live: boolean | null; onRefresh(): void }) {
   // Phones: the filters fold behind a button so the figures keep the screen; desktop shows them all.
   const [open, setOpen] = useState(false);
-  const notes = filterNotes(filters);
+  const notes = filterNotes(filters, live, Date.now());
   const count = [filters.symbol !== null, filters.market !== null, filters.from !== null || filters.to !== null].filter(Boolean).length;
   return (
     <section aria-label="Filters" className="flex-none border-b border-line bg-panel desk:rounded-panel desk:border">

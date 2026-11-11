@@ -55,11 +55,37 @@ export function statsQuery(f: StatsFilter, tz: string): StatsQuery {
   return q;
 }
 
-/** What a filter does not narrow, said next to the filters. */
-export function filterNotes(f: StatsFilter): string[] {
+/**
+ * Whether the filter's range reaches the present: no To date, or one whose local day has not
+ * ended by `now`. Without `now` a To date is taken as past, so nothing is claimed as current.
+ */
+function endsNow(f: StatsFilter, now: number | undefined): boolean {
+  const end = f.to === null ? null : localDayEnd(f.to);
+  return end === null || (now !== undefined && end >= now);
+}
+
+/**
+ * Whether a coin's figures include what it holds now: only while prices are live and the range
+ * reaches the present. `live` null (not known yet) counts as not live.
+ */
+const unrealisedAdded = (f: StatsFilter, live: boolean | null, now: number | undefined): boolean =>
+  live === true && endsNow(f, now);
+
+/**
+ * What a filter does not narrow, said next to the filters. `live` is whether the last report's
+ * figures were at live prices (null before one has loaded); it and `now` decide, as for the
+ * headline, whether a coin's unrealised P&L is added.
+ */
+export function filterNotes(f: StatsFilter, live: boolean | null, now?: number): string[] {
   const notes: string[] = [];
   if (f.symbol !== null || f.market !== null) notes.push('The BTC benchmark always covers the whole account.');
-  if (f.symbol !== null) notes.push('For one coin, the curve and drawdown follow its realised P&L; unrealised added now.');
+  if (f.symbol !== null) {
+    notes.push(
+      unrealisedAdded(f, live, now)
+        ? 'For one coin, the curve and drawdown follow its realised P&L; unrealised added now.'
+        : 'For one coin, the curve and drawdown follow its realised P&L only.',
+    );
+  }
   return notes;
 }
 
@@ -67,28 +93,28 @@ export function filterNotes(f: StatsFilter): string[] {
 
 export type StatTone = 'up' | 'down' | 'muted' | 'plain';
 
-/** A negative figure carries a true minus sign. */
-const minus = (s: string) => s.replace(/^-/, '−');
-
 /** Dollars to the cent; with `sign`, a gain carries '+'. */
 function usd(v: string | null, sign = false): string {
-  return v === null ? NONE : minus(fmtUsd(v, { sign }));
+  return v === null ? NONE : fmtUsd(v, { sign });
 }
 
-/** A fraction as a percentage: '0.25' -> '25.00 %' (dp 2), '0.5' -> '50.0 %' (dp 1). */
+/** A fraction as a percentage, written as fmtPct writes one: '0.25' -> '25.00%' (dp 2), '0.5' -> '50.0%' (dp 1). */
 function pct(fraction: string | null, dp: number, sign = false): string {
   if (fraction === null) return NONE;
   const shown = fmtNum(mulDec(fraction, '100'), dp);
-  const plus = sign && signOf(shown) > 0 ? '+' : '';
-  return `${plus}${minus(shown)} %`;
+  return `${sign && signOf(shown) > 0 ? '+' : ''}${shown}%`;
 }
 
-/** Up for a gain, down for a loss, muted for zero (as shown, to the cent) or nothing. */
-function toneOf(v: string | null): StatTone {
+/**
+ * Up for a gain, down for a loss, muted for zero or nothing. Money is judged as shown, to the
+ * cent (dp 2); a fraction, shown as a percent with 2 decimals, needs dp 4 (FRACTION).
+ */
+function toneOf(v: string | null, dp = 2): StatTone {
   if (v === null) return 'muted';
-  const s = signOf(v, 2);
+  const s = signOf(v, dp);
   return s > 0 ? 'up' : s < 0 ? 'down' : 'muted';
 }
+const FRACTION = 4;
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const baseOf = (symbol: string) => symbol.replace(/USDT$/, '');
@@ -134,9 +160,11 @@ export interface StatsView {
   headline: StatRow[];
   quality: { rows: StatRow[]; note: string | null };
   risk: StatRow[];
+  /** 'includes N estimated ...' when anything estimated is in scope; null otherwise. */
+  riskNote: string | null;
   costs: { rows: StatRow[]; note: string | null };
   breakdowns: { tables: BreakdownTable[]; empty: string | null; note: string | null };
-  /** 'Open: 2, unrealised −$12.50': trades still open, which are in no trade figure. */
+  /** 'Open: 2, unrealised -$12.50': trades still open, which are in no trade figure. */
   open: string;
   /** Realised P&L that belongs to no trade; null when there is none. */
   unattributed: string | null;
@@ -170,23 +198,18 @@ function tradeRow(label: string, t: WireTrade | null): StatRow {
   return { label, value: usd(t.result, true), tone: toneOf(t.result), note: tradeText(t), href: tradeHref(t), estimated: t.estimated };
 }
 
-function headlineRows(r: WireStatsReport, ranged: boolean, endsNow: boolean): StatRow[] {
+function headlineRows(r: WireStatsReport, ranged: boolean, added: boolean): StatRow[] {
   const h = r.headline;
   const { scope } = h;
-  const coinNote =
-    scope.kind !== 'coin' ? null : h.live && endsNow ? 'realised P&L; unrealised added now' : 'realised P&L only';
+  const coinNote = scope.kind !== 'coin' ? null : added ? 'realised P&L; unrealised added now' : 'realised P&L only';
+  const estimated = estimatedNote(r.estimated.trades, r.estimated.fills);
   const rows: StatRow[] = [
-    {
-      label: 'Net P&L',
-      value: usd(h.netPnl, true),
-      tone: toneOf(h.netPnl),
-      note: joinNotes(coinNote, estimatedNote(r.estimated.trades, r.estimated.fills)),
-    },
+    { label: 'Net P&L', value: usd(h.netPnl, true), tone: toneOf(h.netPnl), note: joinNotes(coinNote, estimated) },
     {
       label: 'Return',
       value: pct(h.returnPct, 2, true),
-      tone: toneOf(h.returnPct),
-      note: `of the highest capital, ${usd(h.capitalMax)}`,
+      tone: toneOf(h.returnPct, FRACTION),
+      note: joinNotes(`of the highest capital, ${usd(h.capitalMax)}`, estimated),
     },
   ];
   const stale = h.live ? undefined : 'at the last prices received';
@@ -215,7 +238,7 @@ function headlineRows(r: WireStatsReport, ranged: boolean, endsNow: boolean): St
   // stops at its last point: say so rather than compare two different moments silently.
   const bidNote = !h.live && !ranged ? 'at the current BTC bid, not as of the time above' : undefined;
   rows.push({ label: `BTC buy-and-hold P&L${whole}`, value: usd(b.pnl, true), tone: toneOf(b.pnl), note: bidNote });
-  rows.push({ label: `BTC buy-and-hold return${whole}`, value: pct(b.returnPct, 2, true), tone: toneOf(b.returnPct) });
+  rows.push({ label: `BTC buy-and-hold return${whole}`, value: pct(b.returnPct, 2, true), tone: toneOf(b.returnPct, FRACTION) });
   return rows;
 }
 
@@ -298,6 +321,8 @@ function costRows(r: WireStatsReport): StatRow[] {
     cost('Liquidation fees', c.liquidationFees),
     cost('Funding paid', c.fundingPaid),
     { label: 'Funding received', value: usd(c.fundingReceived), tone: signOf(c.fundingReceived, 2) > 0 ? 'up' : 'muted' },
+    // Received less paid: positive when funding paid the account on balance.
+    { label: 'Funding net', value: usd(c.fundingNet, true), tone: toneOf(c.fundingNet) },
     cost('Slippage', c.slippage, gap),
     cost('Total costs', c.total, 'fees, liquidation fees, slippage and net funding paid'),
     share,
@@ -332,12 +357,14 @@ const DIMENSIONS: { key: keyof WireStatsReport['breakdowns']; title: string; lab
  */
 export function statsView(r: WireStatsReport, filter: StatsFilter = EMPTY_STATS_FILTER, now?: number): StatsView {
   const ranged = filter.from !== null || filter.to !== null;
-  const end = filter.to === null ? null : localDayEnd(filter.to);
-  const endsNow = end === null || (now !== undefined && end >= now);
   const last = r.series.at(-1);
+  // An account or wallet curve ends at its last snapshot. A coin's ends at its last realising
+  // event, which is not a moment the figures stand at, so it is not dated.
   const asOf = r.headline.live
     ? null
-    : `${last ? `As of ${fmtDateTime(last.time)}` : 'No value recorded yet'}: prices are not live`;
+    : r.headline.scope.kind === 'coin'
+      ? 'Prices are not live; realised P&L as recorded, unrealised left out'
+      : `${last ? `As of ${fmtDateTime(last.time)}` : 'No value recorded yet'}: prices are not live`;
   const trades = estimatedNote(r.estimated.trades, 0);
   const tables: BreakdownTable[] =
     r.quality.count === 0
@@ -355,9 +382,10 @@ export function statsView(r: WireStatsReport, filter: StatsFilter = EMPTY_STATS_
   return {
     scope: scopeName(r.headline.scope),
     asOf,
-    headline: headlineRows(r, ranged, endsNow),
+    headline: headlineRows(r, ranged, unrealisedAdded(filter, r.headline.live, now)),
     quality: { rows: qualityRows(r), note: trades },
     risk: riskRows(r),
+    riskNote: estimatedNote(r.estimated.trades, r.estimated.fills),
     costs: { rows: costRows(r), note: estimatedNote(0, r.costs.estimatedFills) },
     breakdowns: {
       tables,

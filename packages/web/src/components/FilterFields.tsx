@@ -1,6 +1,6 @@
 // The coin, market and date-range fields History and Stats both filter by, kept in the hash query.
 import type { Wallet } from '@sim/engine';
-import { HISTORY_COINS } from '../lib/history.ts';
+import { HISTORY_COINS, isBackwards } from '../lib/history.ts';
 import { CONTROL, Labelled, Segmented } from './ui.tsx';
 import type { SegmentOption } from './ui.tsx';
 
@@ -88,7 +88,7 @@ export function FilterFields({
 
 /** The note shown when the From date is after the To date; nothing otherwise. */
 export function BackwardsNote({ value, what }: { value: RangeFilter; what: string }) {
-  if (value.from === null || value.to === null || value.from <= value.to) return null;
+  if (!isBackwards(value)) return null;
   return (
     <p role="status" className="text-xs text-down">
       The From date is after the To date, so {what}.

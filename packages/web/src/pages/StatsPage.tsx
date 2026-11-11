@@ -7,6 +7,7 @@ import { StatsFilters } from '../components/StatsFilters.tsx';
 import { Button } from '../components/ui.tsx';
 import { api, ApiError } from '../lib/api.ts';
 import type { WireStatsReport } from '../lib/api.ts';
+import { isBackwards } from '../lib/history.ts';
 import { parseStatsFilters, statsFilterParams, statsQuery, statsView } from '../lib/stats.ts';
 import type { BreakdownTable, StatRow, StatTone, StatsView } from '../lib/stats.ts';
 
@@ -83,7 +84,7 @@ function Rows({ rows }: { rows: StatRow[] }) {
 }
 
 /** A value that is a figure (money, a percent, '–'), not words such as 'incomplete: ...'. */
-const FIGURE = /^[-+−$\d–]/;
+const FIGURE = /^[-+$\d–]/;
 
 /** The headline figures as tiles: Net P&L first, the BTC benchmark beside the result. */
 function Headline({ view }: { view: StatsView }) {
@@ -98,7 +99,9 @@ function Headline({ view }: { view: StatsView }) {
         {view.headline.map((r, i) => (
           <div key={r.label} className="flex min-w-0 flex-col gap-0.5">
             <dt className="text-2xs text-faint">{r.label}</dt>
-            <dd className={`${!FIGURE.test(r.value) ? 'text-sm' : i === 0 ? 'text-xl' : 'text-lg'} font-semibold ${TONE[r.tone]}`}>
+            <dd
+              className={`${!FIGURE.test(r.value) ? 'text-sm' : `whitespace-nowrap ${i === 0 ? 'text-xl' : 'text-lg'}`} font-semibold ${TONE[r.tone]}`}
+            >
               {r.value}
             </dd>
             {r.note !== undefined && <dd className="text-2xs text-faint">{r.note}</dd>}
@@ -158,7 +161,7 @@ function Figures({ view, tz }: { view: StatsView; tz: string }) {
       <Section title="Trade quality" aside={view.quality.note ?? undefined}>
         <Rows rows={view.quality.rows} />
       </Section>
-      <Section title="Risk">
+      <Section title="Risk" aside={view.riskNote ?? undefined}>
         <Rows rows={view.risk} />
       </Section>
       <Section title="Costs" aside={view.costs.note ?? undefined}>
@@ -210,10 +213,17 @@ export function StatsPage({ params }: { params: URLSearchParams }) {
   // Answers for an older request (the filters changed since) are dropped.
   const gen = useRef(0);
 
+  const backwards = isBackwards(filters);
+
   useEffect(() => {
     const g = ++gen.current;
     const sameView = shownKey.current === key;
     shownKey.current = key;
+    // A From date after the To date covers no moment: nothing is asked; the filters bar says why.
+    if (isBackwards(parseStatsFilters(new URLSearchParams(key)))) {
+      setState({ report: null, status: 'ready', error: '' });
+      return;
+    }
     // A refresh keeps the figures on screen until the new ones arrive; new filters start empty.
     setState((s) => (sameView ? { ...s, status: 'loading' } : { report: null, status: 'loading', error: '' }));
     api.stats(statsQuery(parseStatsFilters(new URLSearchParams(key)), tz)).then(
@@ -231,7 +241,9 @@ export function StatsPage({ params }: { params: URLSearchParams }) {
 
   const retry = () => setRefresh((n) => n + 1);
   let body: ReactNode;
-  if (state.report === null) {
+  if (backwards) {
+    body = null;
+  } else if (state.report === null) {
     body =
       state.status === 'error' ? (
         <Message>
@@ -263,7 +275,7 @@ export function StatsPage({ params }: { params: URLSearchParams }) {
 
   return (
     <div className="mx-auto flex h-full min-h-0 w-full max-w-[100rem] flex-col desk:gap-1.5 desk:p-1.5">
-      <StatsFilters filters={filters} onRefresh={retry} />
+      <StatsFilters filters={filters} live={backwards ? null : (state.report?.headline.live ?? null)} onRefresh={retry} />
       <div aria-busy={state.status === 'loading'} className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto p-1.5 desk:p-0">
         {body}
       </div>

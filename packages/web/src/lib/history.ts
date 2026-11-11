@@ -122,6 +122,10 @@ export function localDate(ms: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/** The From date is after the To date: no moment can be in the range. */
+export const isBackwards = (f: { from: string | null; to: string | null }): boolean =>
+  f.from !== null && f.to !== null && f.from > f.to;
+
 const validDate = (v: string | null): string | null => (v !== null && ymd(v) ? v : null);
 
 // ---- URL query <-> filters ----
