@@ -5,21 +5,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { BaselineSeries, LineSeries, LineStyle, LineType, createChart, createSeriesMarkers } from 'lightweight-charts';
 import type {
-  BaselineData,
   IChartApi,
   IPrimitivePaneRenderer,
   IPrimitivePaneView,
   ISeriesPrimitive,
-  LineData,
   SeriesAttachedParameter,
   SeriesMarker,
   Time,
   UTCTimestamp,
-  WhitespaceData,
 } from 'lightweight-charts';
 import type { WireStatsReport } from '../lib/api.ts';
-import { chartCaption, chartData, chartLegend } from '../lib/equityChart.ts';
-import type { ChartMarker, ChartPoint, ChartShade } from '../lib/equityChart.ts';
+import { baselinePoints, chartCaption, chartData, chartLegend, edgeRoom, linePoints } from '../lib/equityChart.ts';
+import type { ChartMarker, ChartShade } from '../lib/equityChart.ts';
 import { fmtChartTime } from '../lib/market.ts';
 import { chartOptions, readPalette, tickLabel } from './chartTheme.ts';
 import type { Palette } from './chartTheme.ts';
@@ -28,29 +25,18 @@ const AXIS = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumF
 /** Axis and crosshair dollars: '$1,234.56', '-$350.00'. */
 const axisUsd = (p: number) => `${p < 0 ? '-' : ''}$${AXIS.format(Math.abs(p))}`;
 
-/** Empty space left and right of the curve, as a share of its points. */
-const EDGE_ROOM = 0.06;
-
 const NONE = 'transparent';
-/** A line's points; the segment after a point marked `breakAfter` drawn in no colour. */
-const linePoints = (points: ChartPoint[]): (LineData<Time> | WhitespaceData<Time>)[] =>
-  points.map((p) => {
-    const time = p.time as UTCTimestamp;
-    return 'value' in p ? { time, value: p.value, ...(p.breakAfter ? { color: NONE } : {}) } : { time };
-  });
-const HIDDEN_BASELINE = {
-  topLineColor: NONE,
-  topFillColor1: NONE,
-  topFillColor2: NONE,
-  bottomLineColor: NONE,
-  bottomFillColor1: NONE,
-  bottomFillColor2: NONE,
-};
-const baselinePoints = (points: ChartPoint[]): (BaselineData<Time> | WhitespaceData<Time>)[] =>
-  points.map((p) => {
-    const time = p.time as UTCTimestamp;
-    return 'value' in p ? { time, value: p.value, ...(p.breakAfter ? HIDDEN_BASELINE : {}) } : { time };
-  });
+const FONT = "11px 'Archivo Variable', 'Archivo', system-ui, sans-serif";
+/** Space kept beside a marker label, besides half its width. */
+const LABEL_PAD = 6;
+
+/** Half the widest marker label in pixels, plus a little: the room needed at each end of the curve. */
+function labelRoom(markers: ChartMarker[]): number {
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) return 40;
+  ctx.font = FONT;
+  return Math.max(0, ...markers.map((m) => ctx.measureText(m.text).width)) / 2 + LABEL_PAD;
+}
 
 /** Fills each drawdown period across the full height of the pane, behind the lines. */
 class DrawdownShading implements ISeriesPrimitive<Time> {
@@ -96,8 +82,9 @@ class DrawdownShading implements ISeriesPrimitive<Time> {
 
 function marker(m: ChartMarker, p: Palette): SeriesMarker<Time> {
   const time = m.time as UTCTimestamp;
-  if (m.kind === 'deposit') return { time, position: 'belowBar', shape: 'arrowUp', color: p.fg, text: m.text };
-  return { time, position: m.kind === 'transfer_in' ? 'belowBar' : 'aboveBar', shape: 'circle', color: p.muted, text: m.text };
+  // Above the line, so the line never strikes the label through.
+  if (m.kind === 'deposit') return { time, position: 'aboveBar', shape: 'arrowUp', color: p.fg, text: m.text };
+  return { time, position: 'aboveBar', shape: 'circle', color: p.muted, text: m.text };
 }
 
 function Swatch({ className }: { className: string }) {
@@ -132,6 +119,8 @@ export function EquityChart({ report, unrealisedAdded }: { report: WireStatsRepo
     const chart = createChart(box.current!, {
       ...base,
       layout: { ...base.layout, panes: { separatorColor: p.line, enableResize: false } },
+      // Room above the curve for the marker labels; a price label that does not fit is left out.
+      rightPriceScale: { ...base.rightPriceScale, scaleMargins: { top: 0.15, bottom: 0.08 }, entireTextOnly: true },
       autoSize: true,
       localization: { timeFormatter: (t: Time) => fmtChartTime((t as number) * 1000), priceFormatter: axisUsd },
       timeScale: {
@@ -183,17 +172,29 @@ export function EquityChart({ report, unrealisedAdded }: { report: WireStatsRepo
     const [top, bottom] = chart.panes();
     top?.setStretchFactor(3);
     bottom?.setStretchFactor(1);
-    // The whole curve, with room at both ends for the labels of markers on its first and last points.
+    // The whole curve, with room at both ends for the labels of markers on its first and last
+    // points, sized in pixels once the chart knows its width (and again when that changes).
     const count = new Set([...data.value, ...data.benchmark, ...data.underwater].map((x) => x.time)).size;
-    const room = 2 + count * EDGE_ROOM;
-    chart.timeScale().setVisibleLogicalRange({ from: -room, to: count - 1 + room });
-    return () => chart.remove();
+    const roomPx = labelRoom(data.markers);
+    const fit = (width: number) => {
+      const room = edgeRoom(count, width, roomPx);
+      chart.timeScale().setVisibleLogicalRange({ from: -room, to: count - 1 + room });
+    };
+    fit(box.current!.clientWidth);
+    chart.timeScale().subscribeSizeChange(fit);
+    return () => {
+      chart.timeScale().unsubscribeSizeChange(fit);
+      chart.remove();
+    };
   }, [data, enough, coin, themes]);
 
   return (
     <div className="flex flex-col">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 pt-2 text-2xs">
-        <span className="mr-auto font-semibold text-fg">{chartCaption(scope, unrealisedAdded)}</span>
+        <span className="mr-auto flex flex-col">
+          <span className="font-semibold text-fg">{chartCaption(scope, unrealisedAdded)}</span>
+          {enough && data.offCurve !== null && <span className="text-faint">{data.offCurve}</span>}
+        </span>
         {enough && (
           <ul className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted">
             <li className="flex items-center gap-1.5">

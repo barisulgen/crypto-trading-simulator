@@ -1,6 +1,7 @@
 // The equity chart's data (pure): the stats report's curve, capital, benchmark and underwater
 // lines as chart points in UTC seconds, the deposit and transfer markers, and the drawdown
 // periods to shade. Money becomes a JS number only here, for drawing.
+import type { BaselineData, LineData, Time, UTCTimestamp, WhitespaceData } from 'lightweight-charts';
 import type { WireStatsReport } from './api.ts';
 import { fmtUsd } from './format.ts';
 import { addDec, subDec } from './market.ts';
@@ -44,6 +45,8 @@ export interface ChartData {
   underwater: ChartPoint[];
   markers: ChartMarker[];
   shades: ChartShade[];
+  /** Deposits or transfers after the last point, which the curve cannot show; null when none. */
+  offCurve: string | null;
 }
 
 type Scope = WireStatsReport['headline']['scope'];
@@ -119,6 +122,53 @@ function snapAfter(times: number[], t: number): number {
   return times.find((x) => x >= t) ?? times.at(-1)!;
 }
 
+type Point = WireStatsReport['series'][number];
+type Underwater = WireStatsReport['drawdown']['underwater'][number];
+
+/**
+ * A coin's curve with a point at each deposit. The coin's series only has points where the coin
+ * realised P&L, so a deposit would otherwise show up as part of the next trade's step. Each
+ * deposit gets a point at its own time: the P&L (and how far below its peak) as at the point
+ * before, the value raised by the amount. A deposit at the time of a point is already in it.
+ */
+function withDeposits(
+  series: Point[],
+  underwater: Underwater[],
+  markers: ChartInput['markers'],
+): { series: Point[]; underwater: Underwater[] } {
+  const deposits = markers.filter((m) => m.kind === 'deposit').sort((a, b) => a.time - b.time);
+  const outSeries: Point[] = [];
+  const outUnder: Underwater[] = [];
+  let next = 0;
+  const addBefore = (time: number) => {
+    for (; next < deposits.length && deposits[next]!.time < time; next++) {
+      const d = deposits[next]!;
+      const prev = outSeries.at(-1);
+      if (!prev || prev.time === d.time) continue;
+      outSeries.push({ time: d.time, pnl: prev.pnl, value: addDec(prev.value, d.amount) });
+      outUnder.push({ time: d.time, usd: outUnder.at(-1)?.usd ?? '0' });
+    }
+  };
+  series.forEach((p, i) => {
+    addBefore(p.time);
+    // A deposit at exactly this time is counted in its value.
+    while (next < deposits.length && deposits[next]!.time === p.time) next++;
+    outSeries.push(p);
+    const u = underwater[i];
+    if (u) outUnder.push(u);
+  });
+  addBefore(Infinity);
+  return { series: outSeries, underwater: outUnder };
+}
+
+/** '1 deposit after the last point is not on the curve', or null. */
+function offCurveNote(deposits: number, transfers: number): string | null {
+  const part = (n: number, noun: string) => (n === 0 ? null : `${n} ${noun}${n === 1 ? '' : 's'}`);
+  const parts = [part(deposits, 'deposit'), part(transfers, 'transfer')].filter((x) => x !== null);
+  if (parts.length === 0) return null;
+  return `${parts.join(' and ')} after the last point ${deposits + transfers === 1 ? 'is' : 'are'} not on the curve`;
+}
+
 /** The time of the last point at or before `t`, else of the first point. */
 function snapBefore(times: number[], t: number): number {
   return times.findLast((x) => x <= t) ?? times[0]!;
@@ -131,32 +181,85 @@ function snapBefore(times: number[], t: number): number {
  * where the line was thinned.
  */
 export function chartData(r: ChartInput): ChartData {
-  const step = usualStep(r.series);
+  const { series, underwater } =
+    r.headline.scope.kind === 'coin'
+      ? withDeposits(r.series, r.drawdown.underwater, r.markers)
+      : { series: r.series, underwater: r.drawdown.underwater };
+  const step = usualStep(series);
   const breaks = (before: number, after: number) => breakTimes(before, after, step);
-  const value = line(r.series, (p) => p.value, breaks);
+  const value = line(series, (p) => p.value, breaks);
   const times = value.flatMap((p) => ('value' in p ? [p.time] : []));
-  if (times.length === 0) return { value: [], deposited: [], benchmark: [], underwater: [], markers: [], shades: [] };
+  if (times.length === 0) {
+    return { value: [], deposited: [], benchmark: [], underwater: [], markers: [], shades: [], offCurve: null };
+  }
 
-  const gapAt = new Set(r.series.filter((p) => p.gap === true).map((p) => p.time));
+  const gapAt = new Set(series.filter((p) => p.gap === true).map((p) => p.time));
 
+  // Money moved after the last point has no point to show it: it stays off the curve.
+  const last = times.at(-1)!;
+  const onCurve = r.markers.filter((m) => seconds(m.time) <= last);
+  const after = r.markers.filter((m) => seconds(m.time) > last);
+  const afterDeposits = after.filter((m) => m.kind === 'deposit').length;
+
+  // One marker per kind and minute, on the first point that shows all of it.
   const merged: { time: number; kind: MarkerKind; amount: string }[] = [];
-  for (const m of r.markers) {
+  for (const m of onCurve) {
     const same = merged.find((x) => x.kind === m.kind && Math.floor(x.time / MINUTE) === Math.floor(m.time / MINUTE));
-    if (same) same.amount = addDec(same.amount, m.amount);
-    else merged.push({ time: m.time, kind: m.kind, amount: m.amount });
+    if (same) {
+      same.amount = addDec(same.amount, m.amount);
+      same.time = Math.max(same.time, m.time);
+    } else merged.push({ time: m.time, kind: m.kind, amount: m.amount });
   }
 
   return {
     value,
-    deposited: line(r.series, (p) => subDec(p.value, p.pnl), breaks),
+    deposited: line(series, (p) => subDec(p.value, p.pnl), breaks),
     benchmark: r.headline.scope.kind === 'account' ? line(r.benchmark.series, (p) => p.value, breaks) : [],
-    underwater: line(r.drawdown.underwater, (p) => p.usd, breaks, gapAt),
+    underwater: line(underwater, (p) => p.usd, breaks, gapAt),
     markers: merged.map((m) => ({ time: snapAfter(times, seconds(m.time)), kind: m.kind, text: MARKER_TEXT[m.kind](m.amount) })),
     shades: r.drawdown.periods.map((p) => ({
       from: snapBefore(times, seconds(p.start)),
       to: p.end === null ? times.at(-1)! : snapAfter(times, seconds(p.end)),
     })),
+    offCurve: offCurveNote(afterDeposits, after.length - afterDeposits),
   };
+}
+
+const NONE = 'transparent';
+
+/** A line's points for the chart; the segment after a point marked `breakAfter` in no colour. */
+export function linePoints(points: ChartPoint[]): (LineData<Time> | WhitespaceData<Time>)[] {
+  return points.map((p) => {
+    const time = p.time as UTCTimestamp;
+    return 'value' in p ? { time, value: p.value, ...(p.breakAfter ? { color: NONE } : {}) } : { time };
+  });
+}
+
+const HIDDEN_BASELINE = {
+  topLineColor: NONE,
+  topFillColor1: NONE,
+  topFillColor2: NONE,
+  bottomLineColor: NONE,
+  bottomFillColor1: NONE,
+  bottomFillColor2: NONE,
+};
+
+/** The underwater line's points for the chart; line and fill after a `breakAfter` point in no colour. */
+export function baselinePoints(points: ChartPoint[]): (BaselineData<Time> | WhitespaceData<Time>)[] {
+  return points.map((p) => {
+    const time = p.time as UTCTimestamp;
+    return 'value' in p ? { time, value: p.value, ...(p.breakAfter ? HIDDEN_BASELINE : {}) } : { time };
+  });
+}
+
+/**
+ * The empty bars to leave before the first point and after the last so that `roomPx` pixels
+ * (half the widest marker label) fit there, for `points` points over `widthPx` pixels. When the
+ * chart is too narrow for that, as much room as the curve itself.
+ */
+export function edgeRoom(points: number, widthPx: number, roomPx: number): number {
+  const span = Math.max(points - 1, 1);
+  return widthPx > 2 * roomPx ? (roomPx * span) / (widthPx - 2 * roomPx) : span;
 }
 
 const coinOf = (scope: Extract<Scope, { kind: 'coin' }>) =>

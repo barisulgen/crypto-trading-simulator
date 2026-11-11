@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WireStatsReport } from '../src/lib/api.ts';
-import { chartCaption, chartData, chartLegend } from '../src/lib/equityChart.ts';
+import { baselinePoints, chartCaption, chartData, chartLegend, edgeRoom, linePoints } from '../src/lib/equityChart.ts';
 import type { ChartInput, ChartPoint } from '../src/lib/equityChart.ts';
 
 const T0 = Date.UTC(2026, 10, 9, 9, 0);
@@ -168,6 +168,76 @@ describe('equity chart data', () => {
     ]);
   });
 
+  it('puts a merged marker at or after the last deposit of its minute, not on a point before it', () => {
+    const d = chartData(
+      input({
+        series: [
+          { time: t(0), pnl: '0', value: '0' },
+          { time: t(0) + 20_000, pnl: '0', value: '500' },
+          { time: t(1), pnl: '0', value: '1200' },
+        ],
+        markers: [deposit(t(0) + 10_000, '500'), deposit(t(0) + 40_000, '700')],
+      }),
+    );
+    expect(d.markers).toEqual([{ time: s(t(1)), kind: 'deposit', text: '+$1,200' }]);
+  });
+
+  describe('under a coin filter', () => {
+    const coin = { headline: { scope: { kind: 'coin', symbol: 'BTCUSDT', market: null } as const } };
+    // Deposits 1000 at t0 and 500 at t20; BTC trades realise +50 at t10 and -20 at t30.
+    const rows = input({
+      ...coin,
+      series: [
+        { time: t(0), pnl: '0', value: '1000' },
+        { time: t(10), pnl: '50', value: '1050' },
+        { time: t(30), pnl: '30', value: '1530' },
+      ],
+      markers: [deposit(t(0), '1000'), deposit(t(20), '500')],
+      drawdown: {
+        underwater: [
+          { time: t(0), usd: '0' },
+          { time: t(10), usd: '0' },
+          { time: t(30), usd: '-20' },
+        ],
+        periods: [],
+      },
+    });
+
+    it('shows a deposit at its own time, and the next trade as only its own P&L', () => {
+      const d = chartData(rows);
+      expect(times(d.value)).toEqual([t(0), t(10), t(20), t(30)].map(s));
+      expect(values(d.value)).toEqual([1000, 1050, 1550, 1530]);
+      expect(values(d.deposited)).toEqual([1000, 1000, 1500, 1500]);
+      expect(values(d.underwater)).toEqual([0, 0, 0, -20]);
+      // The first deposit is already in the origin point: not added twice.
+      expect(d.markers).toEqual([
+        { time: s(t(0)), kind: 'deposit', text: '+$1,000' },
+        { time: s(t(20)), kind: 'deposit', text: '+$500' },
+      ]);
+    });
+
+    it('shows a deposit after the last trade on the curve too', () => {
+      const d = chartData({ ...rows, markers: [...rows.markers, deposit(t(40), '200')] });
+      expect(values(d.value)).toEqual([1000, 1050, 1550, 1530, 1730]);
+      expect(d.markers.at(-1)).toEqual({ time: s(t(40)), kind: 'deposit', text: '+$200' });
+      expect(d.offCurve).toBeNull();
+    });
+  });
+
+  it('leaves a deposit after the last point off the curve and says so', () => {
+    const series = [
+      { time: t(0), pnl: '0', value: '1000' },
+      { time: t(5), pnl: '10', value: '1010' },
+    ];
+    const one = chartData(input({ series, markers: [deposit(t(0), '1000'), deposit(t(7), '300')] }));
+    expect(one.markers).toEqual([{ time: s(t(0)), kind: 'deposit', text: '+$1,000' }]);
+    expect(one.offCurve).toBe('1 deposit after the last point is not on the curve');
+    const two = chartData(input({ series, markers: [deposit(t(7), '300'), deposit(t(9), '300')] }));
+    expect(two.markers).toEqual([]);
+    expect(two.offCurve).toBe('2 deposits after the last point are not on the curve');
+    expect(chartData(input({ series })).offCurve).toBeNull();
+  });
+
   it('labels transfers in and out of a wallet, merged per minute and kind', () => {
     const transfer = (time: number, kind: 'transfer_in' | 'transfer_out', amount: string): Marker => ({
       time,
@@ -219,7 +289,15 @@ describe('equity chart data', () => {
   });
 
   it('has nothing to draw without points', () => {
-    expect(chartData(input())).toEqual({ value: [], deposited: [], benchmark: [], underwater: [], markers: [], shades: [] });
+    expect(chartData(input())).toEqual({
+      value: [],
+      deposited: [],
+      benchmark: [],
+      underwater: [],
+      markers: [],
+      shades: [],
+      offCurve: null,
+    });
   });
 });
 
@@ -252,5 +330,32 @@ describe('equity chart labels', () => {
       deposited: 'Deposited',
       benchmark: null,
     });
+  });
+});
+
+describe('equity chart drawing', () => {
+  const line: ChartPoint[] = [{ time: 1, value: 2, breakAfter: true }, { time: 3 }, { time: 5, value: 4 }];
+
+  it('hides the segment after a break, as the chart joins points across a time with no value', () => {
+    expect(linePoints(line)).toEqual([{ time: 1, value: 2, color: 'transparent' }, { time: 3 }, { time: 5, value: 4 }]);
+    const hidden = {
+      topLineColor: 'transparent',
+      topFillColor1: 'transparent',
+      topFillColor2: 'transparent',
+      bottomLineColor: 'transparent',
+      bottomFillColor1: 'transparent',
+      bottomFillColor2: 'transparent',
+    };
+    expect(baselinePoints(line)).toEqual([{ time: 1, value: 2, ...hidden }, { time: 3 }, { time: 5, value: 4 }]);
+  });
+
+  it('leaves room at each end, in bars, as wide as the widest label needs', () => {
+    // 101 points over 400 px with 50 px of room each side: 100 + 2r bars, r bars = 50 px.
+    const r = edgeRoom(101, 400, 50);
+    expect(r).toBeCloseTo((50 * 100) / 300, 6);
+    expect((r * 400) / (100 + 2 * r)).toBeCloseTo(50, 6);
+    // Too narrow to fit the room at all: still a finite, generous room.
+    expect(Number.isFinite(edgeRoom(101, 90, 50))).toBe(true);
+    expect(edgeRoom(101, 90, 50)).toBeGreaterThanOrEqual(100);
   });
 });
