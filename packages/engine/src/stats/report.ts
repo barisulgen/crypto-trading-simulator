@@ -290,6 +290,11 @@ export function computeStats(input: StatsInput, filter: StatsFilter): StatsRepor
     benchmark: benchmark(input, filter, accountSeries, accountLive, accountCapitalMax),
     open: { count: open.length, unrealized },
     unattributed: { count: dustCount, realized: dustRealized },
-    estimated: { trades: trades.filter((t) => t.estimated).length, fills: cost.estimatedFills },
+    estimated: {
+      trades: trades.filter((t) => t.estimated).length,
+      fills: cost.estimatedFills,
+      funding: cost.estimatedFunding,
+      liquidations: cost.estimatedLiquidations,
+    },
   };
 }

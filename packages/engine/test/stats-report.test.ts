@@ -321,7 +321,7 @@ describe('computeStats: worked figures', () => {
     expect(s(r.risk.lostToLiquidations)).toBe('148.5');
     expect(r.risk.liquidations).toBe(1);
     expect(r.breakdowns.coin.map((b) => b.key)).toEqual(['BTC', 'ETH', 'SOL']);
-    expect(r.estimated).toEqual({ trades: 0, fills: 0 });
+    expect(r.estimated).toEqual({ trades: 0, fills: 0, funding: 0, liquidations: 0 });
   });
 });
 
@@ -495,13 +495,67 @@ describe('computeStats: estimated and unattributed', () => {
       ...btcPerpTrade('p1', t(6), t(7), '0'),
     ]);
     const r = computeStats(input({ events }), ALL);
-    expect(r.estimated).toEqual({ trades: 1, fills: 1 });
+    expect(r.estimated).toEqual({ trades: 1, fills: 1, funding: 0, liquidations: 0 });
     expect(r.quality.best!.id).toBe('rt-s');
     expect(r.quality.best!.estimated).toBe(true);
     expect(r.quality.worst!.id).toBe('p1');
     expect(r.quality.worst!.estimated).toBe(false);
     // The stop gapped 2 below its trigger on 9.99 coins.
     expect(s(r.costs.catchUpGapCost)).toBe('19.98');
+  });
+
+  it('a catch-up funding payment and liquidation in scope are counted as estimated', () => {
+    const p = position({ id: 'p1', openedAt: t(1) });
+    const q = position({ id: 'q1', symbol: 'ETHUSDT', openedAt: t(1) });
+    const estimated = <E extends PerpEvent>(e: E): E => ({ ...e, catchUp: worst });
+    const liquidated = (x: Position, time: number): PerpEvent => ({
+      type: 'liquidation',
+      market: 'perp',
+      time,
+      symbol: x.symbol,
+      position: x,
+      markPrice: D(54000),
+      marginLost: D(60),
+      tradingLoss: D(57),
+      liquidationFee: D(3),
+      remainder: D(0),
+      feeRateKnown: true,
+      cancelledOrderIds: [],
+    });
+    const events = rows([
+      deposit(T0, 'leverage', '1000', '1000'),
+      opened(p),
+      perpFill('p1', t(1)),
+      // An open position's payment: no trade carries it, but it moved the P&L and the costs.
+      estimated(funding('p1', t(2), '-0.5')),
+      opened(q),
+      perpFill('q1', t(1), { symbol: 'ETHUSDT' }),
+      estimated({ ...funding('q1', t(2), '-0.4'), symbol: 'ETHUSDT' }),
+      estimated(liquidated(q, t(3))),
+      estimated(closed(q, t(3), '-57', '3.3', 'liquidated')),
+    ]);
+    const r = computeStats(input({ events, positions: [p] }), ALL);
+    expect(r.estimated).toEqual({ trades: 1, fills: 0, funding: 2, liquidations: 1 });
+    expect(r.costs.estimatedFunding).toBe(2);
+    expect(r.costs.estimatedLiquidations).toBe(1);
+    expect(computeStats(input({ events, positions: [p] }), { ...ALL, symbol: 'BTCUSDT' }).estimated).toEqual({
+      trades: 0,
+      fills: 0,
+      funding: 1,
+      liquidations: 0,
+    });
+    expect(computeStats(input({ events, positions: [p] }), { ...ALL, from: t(3) }).estimated).toEqual({
+      trades: 1,
+      fills: 0,
+      funding: 0,
+      liquidations: 1,
+    });
+    expect(computeStats(input({ events, positions: [p] }), { ...ALL, market: 'spot' }).estimated).toEqual({
+      trades: 0,
+      fills: 0,
+      funding: 0,
+      liquidations: 0,
+    });
   });
 
   it('a dust sale with no closed trip before it is reported, not lost', () => {
@@ -648,7 +702,7 @@ describe('computeStats: empty', () => {
       expect(r.benchmark.returnPct).toBeNull();
       expect(r.open).toEqual({ count: 0, unrealized: D(0) });
       expect(r.unattributed.count).toBe(0);
-      expect(r.estimated).toEqual({ trades: 0, fills: 0 });
+      expect(r.estimated).toEqual({ trades: 0, fills: 0, funding: 0, liquidations: 0 });
     }
   });
 });

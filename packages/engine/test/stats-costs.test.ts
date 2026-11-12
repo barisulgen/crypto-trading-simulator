@@ -243,6 +243,25 @@ describe('costs', () => {
     for (const k of keys) expect(s(c[k])).toBe('0');
     expect(c.share).toBeNull();
     expect(c.estimatedFills).toBe(0);
+    expect(c.estimatedFunding).toBe(0);
+    expect(c.estimatedLiquidations).toBe(0);
+  });
+
+  it('counts the fills, funding payments and liquidations a catch-up estimated', () => {
+    const estimated = (r: StatsEvent): StatsEvent => ({ ...r, event: { ...r.event, catchUp: worst } as SimEvent });
+    const c = costs(
+      [
+        estimated(fundingRow('-1')),
+        fundingRow('-2'),
+        estimated(fundingRow('0.5')),
+        estimated(liquidation(T0, '10', '1')),
+        liquidation(T0, '5', '1'),
+        perp({}, worst),
+        spot({}),
+      ],
+      D(0),
+    );
+    expect([c.estimatedFills, c.estimatedFunding, c.estimatedLiquidations]).toEqual([1, 2, 1]);
   });
 });
 

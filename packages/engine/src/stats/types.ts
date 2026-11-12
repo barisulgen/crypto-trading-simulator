@@ -105,6 +105,10 @@ export interface Costs {
   uncovered: Decimal;
   /** Fills produced by a catch-up run. */
   estimatedFills: number;
+  /** Funding payments produced by a catch-up run. */
+  estimatedFunding: number;
+  /** Liquidations produced by a catch-up run. */
+  estimatedLiquidations: number;
 }
 
 /** Liquidations and leverage over a range. */
@@ -200,6 +204,9 @@ export interface StatsReport {
   open: { count: number; unrealized: Decimal | null };
   /** Dust sales that belong to no trade; their P&L is in the net P&L but in no trade figure. */
   unattributed: { count: number; realized: Decimal };
-  /** Closed trades and fills in scope that a catch-up run estimated. */
-  estimated: { trades: number; fills: number };
+  /**
+   * What a catch-up run estimated: the closed trades in scope, and the fills, funding payments and
+   * liquidations dated in scope (an open position's funding is in no trade, yet moves the P&L).
+   */
+  estimated: { trades: number; fills: number; funding: number; liquidations: number };
 }

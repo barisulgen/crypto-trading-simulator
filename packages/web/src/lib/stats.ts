@@ -119,13 +119,22 @@ const FRACTION = 4;
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const baseOf = (symbol: string) => symbol.replace(/USDT$/, '');
 
-/** "includes N estimated trades and M estimated fills"; null when there are none. */
-function estimatedNote(trades: number, fills: number): string | null {
+type Estimated = WireStatsReport['estimated'];
+
+/**
+ * "includes 2 estimated trades, 1 estimated fill and 1 estimated funding payment", for the counts
+ * given; null when they are all zero.
+ */
+function estimatedNote(e: Partial<Estimated>): string | null {
   const parts = [
-    trades > 0 ? plural(trades, 'estimated trade', 'estimated trades') : null,
-    fills > 0 ? plural(fills, 'estimated fill', 'estimated fills') : null,
-  ].filter((p) => p !== null);
-  return parts.length > 0 ? `includes ${parts.join(' and ')}` : null;
+    plural(e.trades ?? 0, 'estimated trade', 'estimated trades'),
+    plural(e.fills ?? 0, 'estimated fill', 'estimated fills'),
+    plural(e.funding ?? 0, 'estimated funding payment', 'estimated funding payments'),
+    plural(e.liquidations ?? 0, 'estimated liquidation', 'estimated liquidations'),
+  ].filter((p) => !p.startsWith('0 '));
+  if (parts.length === 0) return null;
+  const last = parts.pop()!;
+  return `includes ${parts.length > 0 ? `${parts.join(', ')} and ${last}` : last}`;
 }
 
 const joinNotes = (...notes: (string | null | undefined)[]): string | undefined => {
@@ -202,7 +211,7 @@ function headlineRows(r: WireStatsReport, ranged: boolean, added: boolean): Stat
   const h = r.headline;
   const { scope } = h;
   const coinNote = scope.kind !== 'coin' ? null : added ? 'realised P&L; unrealised added now' : 'realised P&L only';
-  const estimated = estimatedNote(r.estimated.trades, r.estimated.fills);
+  const estimated = estimatedNote(r.estimated);
   const rows: StatRow[] = [
     { label: 'Net P&L', value: usd(h.netPnl, true), tone: toneOf(h.netPnl), note: joinNotes(coinNote, estimated) },
     {
@@ -244,7 +253,7 @@ function headlineRows(r: WireStatsReport, ranged: boolean, added: boolean): Stat
 
 function qualityRows(r: WireStatsReport): StatRow[] {
   const q = r.quality;
-  const est = estimatedNote(r.estimated.trades, 0);
+  const est = estimatedNote({ trades: r.estimated.trades });
   const tally = [`${q.wins} won`, `${q.losses} lost`, q.breakEven > 0 ? `${q.breakEven} break-even` : null];
   const profitFactor = q.noLosses ? 'No losing trades' : q.profitFactor === null ? NONE : fmtNum(q.profitFactor, 2);
   return [
@@ -365,7 +374,7 @@ export function statsView(r: WireStatsReport, filter: StatsFilter = EMPTY_STATS_
     : r.headline.scope.kind === 'coin'
       ? 'Prices are not live; realised P&L as recorded, unrealised left out'
       : `${last ? `As of ${fmtDateTime(last.time)}` : 'No value recorded yet'}: prices are not live`;
-  const trades = estimatedNote(r.estimated.trades, 0);
+  const trades = estimatedNote({ trades: r.estimated.trades });
   const tables: BreakdownTable[] =
     r.quality.count === 0
       ? []
@@ -385,8 +394,15 @@ export function statsView(r: WireStatsReport, filter: StatsFilter = EMPTY_STATS_
     headline: headlineRows(r, ranged, unrealisedAdded(filter, r.headline.live, now)),
     quality: { rows: qualityRows(r), note: trades },
     risk: riskRows(r),
-    riskNote: estimatedNote(r.estimated.trades, r.estimated.fills),
-    costs: { rows: costRows(r), note: estimatedNote(0, r.costs.estimatedFills) },
+    riskNote: estimatedNote(r.estimated),
+    costs: {
+      rows: costRows(r),
+      note: estimatedNote({
+        fills: r.costs.estimatedFills,
+        funding: r.costs.estimatedFunding,
+        liquidations: r.costs.estimatedLiquidations,
+      }),
+    },
     breakdowns: {
       tables,
       empty: tables.length === 0 ? 'No closed trades in this range' : null,

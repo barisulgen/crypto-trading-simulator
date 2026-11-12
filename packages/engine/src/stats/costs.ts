@@ -6,7 +6,8 @@ const GAP_BASES = new Set(['trigger_minute_worst_price', 'candle_worst_price']);
 
 /**
  * What the given events cost: fees by liquidity, liquidation fees, slippage (including what a stop
- * or take-profit estimated from history gapped through its trigger), and funding paid. The events
+ * or take-profit estimated from history gapped through its trigger), and funding paid; and how many
+ * of the fills, funding payments and liquidations a catch-up run estimated. The events
  * are trusted to be already filtered by time, coin and market. `netPnl` is the P&L of the same
  * scope, after costs.
  */
@@ -21,6 +22,8 @@ export function costs(events: StatsEvent[], netPnl: Decimal): Costs {
   let drift = D(0);
   let uncovered = D(0);
   let estimatedFills = 0;
+  let estimatedFunding = 0;
+  let estimatedLiquidations = 0;
 
   for (const { event: e } of events) {
     if (e.type === 'fill') {
@@ -40,10 +43,12 @@ export function costs(events: StatsEvent[], netPnl: Decimal): Costs {
       }
     } else if (e.type === 'liquidation') {
       liquidationFees = liquidationFees.plus(e.liquidationFee);
+      if (e.catchUp) estimatedLiquidations += 1;
     } else if (e.type === 'funding') {
       if (e.amount.lt(0)) fundingPaid = fundingPaid.minus(e.amount);
       else fundingReceived = fundingReceived.plus(e.amount);
       if (e.uncollected) uncovered = uncovered.plus(e.uncollected);
+      if (e.catchUp) estimatedFunding += 1;
     }
   }
 
@@ -70,6 +75,8 @@ export function costs(events: StatsEvent[], netPnl: Decimal): Costs {
     preCost,
     uncovered,
     estimatedFills,
+    estimatedFunding,
+    estimatedLiquidations,
   };
 }
 

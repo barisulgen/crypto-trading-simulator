@@ -89,6 +89,8 @@ function report(over: Partial<WireStatsReport> = {}): WireStatsReport {
       preCost: '100',
       uncovered: '0',
       estimatedFills: 0,
+      estimatedFunding: 0,
+      estimatedLiquidations: 0,
     },
     breakdowns: {
       coin: [
@@ -111,7 +113,7 @@ function report(over: Partial<WireStatsReport> = {}): WireStatsReport {
     benchmark: { scope: 'account', missing: 0, value: '1050', pnl: '50', returnPct: '0.05', series: [] },
     open: { count: 0, unrealized: '0' },
     unattributed: { count: 0, realized: '0' },
-    estimated: { trades: 0, fills: 0 },
+    estimated: { trades: 0, fills: 0, funding: 0, liquidations: 0 },
     ...over,
   };
 }
@@ -294,6 +296,35 @@ describe('statsView', () => {
     expect(allRows(v).some((r) => /NaN|Infinity|undefined|null/.test(r.value))).toBe(false);
   });
 
+  it('says so when estimated funding payments or liquidations are in the figures', () => {
+    const base = report();
+    const v = statsView(
+      report({
+        estimated: { trades: 1, fills: 2, funding: 3, liquidations: 1 },
+        costs: { ...base.costs, estimatedFills: 2, estimatedFunding: 3, estimatedLiquidations: 1 },
+      }),
+    );
+    const all = 'includes 1 estimated trade, 2 estimated fills, 3 estimated funding payments and 1 estimated liquidation';
+    expect(row(v.headline, 'Net P&L').note).toBe(all);
+    expect(row(v.headline, 'Return').note).toBe(`of the highest capital, $1,000.00 · ${all}`);
+    expect(v.riskNote).toBe(all);
+    expect(v.costs.note).toBe('includes 2 estimated fills, 3 estimated funding payments and 1 estimated liquidation');
+    // Trade figures count trades only: an estimated payment or liquidation already marks its trade.
+    expect(v.quality.note).toBe('includes 1 estimated trade');
+
+    // Funding alone, as from an open position's payment during a gap.
+    const funding = statsView(
+      report({
+        estimated: { trades: 0, fills: 0, funding: 1, liquidations: 0 },
+        costs: { ...base.costs, estimatedFunding: 1 },
+      }),
+    );
+    expect(row(funding.headline, 'Net P&L').note).toBe('includes 1 estimated funding payment');
+    expect(funding.riskNote).toBe('includes 1 estimated funding payment');
+    expect(funding.costs.note).toBe('includes 1 estimated funding payment');
+    expect(funding.quality.note).toBeNull();
+  });
+
   it('links the best and worst trade to History, filtered to the coin and the days it was open', () => {
     const v = statsView(report());
     const best = row(v.quality.rows, 'Best trade');
@@ -309,7 +340,7 @@ describe('statsView', () => {
     const base = report();
     const v = statsView(
       report({
-        estimated: { trades: 2, fills: 3 },
+        estimated: { trades: 2, fills: 3, funding: 0, liquidations: 0 },
         quality: { ...base.quality, worst: { ...base.quality.worst!, estimated: true } },
         costs: { ...base.costs, estimatedFills: 3, catchUpGapCost: '1.5' },
       }),
