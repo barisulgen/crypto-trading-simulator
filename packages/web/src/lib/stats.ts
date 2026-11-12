@@ -317,6 +317,14 @@ function costRows(r: WireStatsReport): StatRow[] {
   let share: StatRow;
   if (c.share === null) {
     share = { label: 'Share of profit eaten by costs', value: `No profit before costs (${usd(c.preCost)})`, tone: 'muted' };
+  } else if (cmpDec(c.preCost, '1') < 0 && cmpDec(c.total, c.preCost) > 0) {
+    // Against a profit under $1 the percent is huge and says nothing: put the two amounts in words.
+    const size = cmpDec(c.total, mulDec(c.preCost, '10')) >= 0 ? 'far larger' : 'larger';
+    share = {
+      label: 'Share of profit eaten by costs',
+      value: `Costs (${usd(c.total)}) were ${size} than the profit before costs (${usd(c.preCost)})`,
+      tone: 'down',
+    };
   } else {
     const turned = cmpDec(c.share, '1') > 0 ? ': the costs turned a profit into a loss' : '';
     share = {

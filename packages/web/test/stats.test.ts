@@ -257,6 +257,47 @@ describe('statsView', () => {
     });
   });
 
+  describe('costs against a profit under $1', () => {
+    const SHARE = 'Share of profit eaten by costs';
+    const rowFor = (preCost: string, total: string, share: string) =>
+      row(statsView(report({ costs: { ...report().costs, share, preCost, total } })).costs.rows, SHARE);
+
+    it('says "far larger" when the costs are at least ten times the profit', () => {
+      const r = rowFor('0.0052', '0.3889', '74.7885');
+      expect(r.value).toBe('Costs ($0.39) were far larger than the profit before costs ($0.01)');
+      expect(r.tone).toBe('down');
+      expect(r.note).toBeUndefined();
+      expect(r.value).not.toContain('%');
+    });
+
+    it('says "far larger" at exactly ten times', () => {
+      expect(rowFor('0.05', '0.5', '10').value).toBe('Costs ($0.50) were far larger than the profit before costs ($0.05)');
+    });
+
+    it('says "larger" when the costs are above the profit but under ten times it', () => {
+      const r = rowFor('0.81', '0.95', '1.1728');
+      expect(r.value).toBe('Costs ($0.95) were larger than the profit before costs ($0.81)');
+      expect(r.tone).toBe('down');
+      expect(r.note).toBeUndefined();
+    });
+
+    it('keeps the percent when the costs are not above the profit', () => {
+      expect(rowFor('0.5', '0.2', '0.4')).toMatchObject({ value: '40.00%', note: 'of the $0.50 made before costs' });
+    });
+
+    it('keeps the percent when the profit is exactly $1', () => {
+      expect(rowFor('1', '5', '5')).toMatchObject({
+        value: '500.00%',
+        note: 'of the $1.00 made before costs: the costs turned a profit into a loss',
+      });
+    });
+
+    it('keeps "No profit before costs" at zero', () => {
+      const r = row(statsView(report({ costs: { ...report().costs, share: null, preCost: '0', total: '0.4' } })).costs.rows, SHARE);
+      expect(r.value).toBe('No profit before costs ($0.00)');
+    });
+  });
+
   it('with no losing trade, the profit factor reads "No losing trades"', () => {
     const v = statsView(report({ quality: { ...report().quality, losses: 0, avgLoss: null, profitFactor: null, noLosses: true } }));
     expect(row(v.quality.rows, 'Profit factor').value).toBe('No losing trades');
