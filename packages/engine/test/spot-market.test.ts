@@ -13,7 +13,7 @@ function setup(usdt: string, opts: { btc?: string; rngValues?: number[] } = {}) 
   const market = new FakeMarket();
   const ctx = testCtx(market, { now: NOW, rngValues: opts.rngValues });
   const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
-  if (D(usdt).gt(0)) deposit(engine.state.ledger, 'spot', D(usdt), ctx);
+  if (D(usdt).gt(0)) deposit(engine.state.ledger, 'spot', D(usdt), ctx, D('100'));
   if (opts.btc) seedCoins(engine.state, 'BTC', D(opts.btc));
   const bal = (asset: string) => engine.state.ledger.balances.spot[asset]!;
   return { market, ctx, engine, bal };

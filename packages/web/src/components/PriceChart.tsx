@@ -1,24 +1,14 @@
 // Candle chart of the selected coin and market (lightweight-charts v5) with the owner's fills as
 // markers and, on a perpetual with an open position, its entry and liquidation prices.
 import { useEffect, useRef, useState } from 'react';
-import {
-  CandlestickSeries,
-  ColorType,
-  CrosshairMode,
-  LineStyle,
-  TickMarkType,
-  createChart,
-  createSeriesMarkers,
-} from 'lightweight-charts';
+import { CandlestickSeries, LineStyle, createChart, createSeriesMarkers } from 'lightweight-charts';
 import type {
   AutoscaleInfo,
   CandlestickData,
-  DeepPartial,
   IChartApi,
   IPriceLine,
   ISeriesApi,
   ISeriesMarkersPluginApi,
-  ChartOptions,
   SeriesMarker,
   Time,
   UTCTimestamp,
@@ -32,7 +22,6 @@ import {
   applyKline,
   fillMarkers,
   fmtChartTime,
-  fmtTick,
   liquidationMark,
   mergeCandles,
   perpMarkers,
@@ -40,6 +29,8 @@ import {
 } from '../lib/market.ts';
 import type { LiquidationMark } from '../lib/market.ts';
 import { chartLines } from '../lib/positions.ts';
+import { chartOptions, readPalette, tickLabel } from './chartTheme.ts';
+import type { Palette } from './chartTheme.ts';
 import { Button, Segmented } from './ui.tsx';
 
 /** Load older candles when the left edge of the view comes within this many bars of the oldest one. */
@@ -65,64 +56,6 @@ export function IntervalPicker() {
       className="flex-none"
     />
   );
-}
-
-interface Palette {
-  panel: string;
-  line: string;
-  fg: string;
-  muted: string;
-  faint: string;
-  raised: string;
-  up: string;
-  down: string;
-}
-
-/** The theme tokens (styles/theme.css) as the chart's colours; read again on every theme switch. */
-function readPalette(): Palette {
-  const css = getComputedStyle(document.documentElement);
-  const v = (name: string) => css.getPropertyValue(`--ink-${name}`).trim();
-  return {
-    panel: v('panel'),
-    line: v('line'),
-    fg: v('fg'),
-    muted: v('muted'),
-    faint: v('faint'),
-    raised: v('raised'),
-    up: v('up'),
-    down: v('down'),
-  };
-}
-
-function chartOptions(p: Palette): DeepPartial<ChartOptions> {
-  const axisLabel = { color: p.faint, labelBackgroundColor: p.raised, style: LineStyle.Dashed, width: 1 as const };
-  return {
-    layout: {
-      background: { type: ColorType.Solid, color: p.panel },
-      textColor: p.muted,
-      fontFamily: "'Archivo Variable', 'Archivo', system-ui, sans-serif",
-      fontSize: 11,
-    },
-    grid: { vertLines: { color: p.raised }, horzLines: { color: p.raised } },
-    crosshair: { mode: CrosshairMode.Normal, vertLine: axisLabel, horzLine: axisLabel },
-    rightPriceScale: { borderColor: p.line },
-    timeScale: { borderColor: p.line },
-  };
-}
-
-/** Local-time axis labels; candle times stay true UTC timestamps. */
-function tickLabel(time: Time, type: TickMarkType): string {
-  const ms = (time as number) * 1000;
-  switch (type) {
-    case TickMarkType.Year:
-      return fmtTick(ms, 'year');
-    case TickMarkType.Month:
-      return fmtTick(ms, 'month');
-    case TickMarkType.DayOfMonth:
-      return fmtTick(ms, 'day');
-    default:
-      return fmtTick(ms, 'time');
-  }
 }
 
 const bar = (c: Candle): CandlestickData<Time> => {

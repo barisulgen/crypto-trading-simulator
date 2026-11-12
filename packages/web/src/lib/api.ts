@@ -19,6 +19,8 @@ import type {
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
+  StatsBenchmark,
+  StatsReport,
   TierSource,
   Wallet,
 } from '@sim/engine';
@@ -239,6 +241,24 @@ export interface HistoryQuery {
   limit?: number;
 }
 
+/** A chart point as GET /api/stats sends it: `gap` when data was interrupted since the point before. */
+export type Gapped<P> = P & { gap?: true };
+
+/** GET /api/stats: the report, its chart lines thinned by the server and their gaps marked. */
+export type WireStatsReport = Wire<Omit<StatsReport, 'series' | 'benchmark'>> & {
+  series: Gapped<Wire<StatsReport['series'][number]>>[];
+  benchmark: Wire<Omit<StatsBenchmark, 'series'>> & { series: Gapped<Wire<StatsBenchmark['series'][number]>>[] };
+};
+
+/** GET /api/stats parameters: a range in ms (both ends included), a coin, a market, and the time zone of the hours and weekdays. */
+export interface StatsQuery {
+  symbol?: string;
+  market?: Wallet;
+  from?: number;
+  to?: number;
+  tz: string;
+}
+
 /** A non-2xx response; `message` is the server's error text. */
 export class ApiError extends Error {
   constructor(
@@ -301,6 +321,7 @@ export const api = {
     request<{ fills: WireFillRow[] }>('GET', `/api/fills${qs(p)}`).then((r) => r.fills),
   history: (p: HistoryQuery = {}) =>
     request<HistoryPage>('GET', `/api/history${qs({ ...p, types: p.types?.join(',') })}`),
+  stats: (q: StatsQuery) => request<WireStatsReport>('GET', `/api/stats${qs({ ...q })}`),
   candles: (symbol: string, interval: Interval, endTime?: number, market: Market = 'spot') =>
     request<{ candles: Candle[] }>('GET', `/api/candles${qs({ symbol, interval, endTime, market })}`).then(
       (r) => r.candles,

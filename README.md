@@ -35,7 +35,7 @@ Built in phases:
 |---|---|---|
 | 1 | Live market data, trade screen, deposits and transfers, spot trading (market, limit, post-only, stop-loss, take-profit, linked SL/TP pairs), fees, history | ✅ Done |
 | 2 | Leverage with isolated margin, liquidation on mark price with maintenance tiers, funding, liquidation warnings, catch-up after downtime | ✅ Done |
-| 3 | Stats page, equity curve, BTC buy-and-hold benchmark, CSV export | Planned |
+| 3 | Stats page, equity curve, BTC buy-and-hold benchmark, CSV export | ✅ Done |
 | 4 | Cross margin, trade journal and tags, account reset with seasons | Planned |
 
 **Older databases are test data.** A database recorded before catch-up existed may be missing what happened while the app was closed. For such a database the app shows a **TEST DATA** band across the top, and the server says so when it starts. Run `npm run db:wipe` to delete it and start real practice; a new database shows no band.
@@ -49,6 +49,17 @@ The leverage wallet trades Binance's USDⓈ-M **perpetual futures** for the same
 - **Liquidation.** A position is liquidated when the **mark price** (not the last trade) reaches its liquidation price. Its whole margin is lost, including a liquidation fee at Binance's rate for the coin. Warnings appear as the margin ratio passes 50 %, 80 % and 90 %, and a liquidation shows an alert that stays until you acknowledge it. Nothing is liquidated on a stale mark price.
 - **Funding.** Positions pay or receive funding at each coin's real funding times, at the rate Binance settles. A payment comes out of the position's margin. Every payment is recorded in the history and shown on the position.
 - **Catch-up.** When the live data stops (the app was closed, or the connection dropped) and comes back, each affected coin and market shows **Catching up** and refuses new orders until the gap is applied. The gap is replayed from Binance's 1-minute candles, mark-price candles, funding history and, for limit orders, its recorded trades. Where the candles cannot tell what happened first, the outcome less favourable to you is chosen, and a close estimated this way never loses more than the position's margin. Everything applied this way is marked **estimated** in the history, with what it was estimated from, and a summary of each catch-up is recorded with it. Binance keeps futures trade history for about two days; a resting perp limit order whose gap is older than that is cancelled at the start of the gap rather than guessed.
+
+## Stats
+
+The **Stats** page measures how the practice went, for the whole account or filtered by coin, market (spot or leverage) and date range. It shows an equity curve with every deposit marked, and figures for trade quality, risk, costs and breakdowns by coin, side, leverage, hold time and time of day.
+
+- **What counts as one trade.** A perpetual position, from the fill that opens it to the fill that closes it, however many partial closes there were in between and including a liquidation. A spot trade is a round trip: from a flat position to the next time it is flat again, where a leftover too small to sell (dust) counts as flat. Its result is net of fees and, for a perp, funding.
+- **Drawdown is measured on profit and loss**, not on the account's value, so a deposit can never hide it.
+- **Return on deposits** is the net P&L divided by the highest capital in the range, so moving money out of a wallet late in the range cannot inflate its return.
+- **BTC buy-and-hold benchmark.** The same deposits, each one spent on BTC at the live ask with the 0.1 % taker fee, held ever since. It always covers the whole account, whatever the filters. A deposit is refused while the BTC data is not live, so the benchmark always has a real price to use.
+- **Estimated results are counted and marked.** Trades and fills that a catch-up after downtime had to estimate are included in the figures, and the page says how many.
+- **CSV export.** The History page's **Export CSV** button saves every event the current filters match as a UTF-8, comma-separated file, with exact amounts (no rounding).
 
 ## Requirements
 
@@ -103,7 +114,7 @@ npm run test:e2e  # end-to-end scenarios against a local fake Binance (about a m
 npm run typecheck
 ```
 
-The end-to-end scenarios start the real server from its entry point, on a throwaway database, against a fake Binance served locally (`packages/server/test/e2e/`), and drive it through its HTTP and WebSocket API as the web app does. They need no network access. They cover a liquidation on the mark price with its warnings, a funding settlement, a limit order filling only on a trade-through, a restart during an outage followed by catch-up, and a stale mark price that liquidates nothing.
+The end-to-end scenarios start the real server from its entry point, on a throwaway database, against a fake Binance served locally (`packages/server/test/e2e/`), and drive it through its HTTP and WebSocket API as the web app does. They need no network access. They cover a liquidation on the mark price with its warnings, a funding settlement, a limit order filling only on a trade-through, a restart during an outage followed by catch-up, and a stale mark price that liquidates nothing. The liquidation scenario also checks that the stats report it as one closed trade, one liquidation and the right loss.
 
 For a visual check of the same states, `npx tsx packages/server/test/e2e/uiTour.ts <out-dir> <shot-tool>` (after `npm run build`) drives the server and the built web app against the fake and, for each state, runs `node <shot-tool> <url> <out-dir> <shots.json>`, where `shots.json` lists `{ name, w, h, mobile?, url, tab?, wait? }` and the tool is expected to save `<out-dir>/<name>.png` for each entry.
 
@@ -126,7 +137,7 @@ The trading engine is covered by worked-example tests. For example: this market 
 packages/
   engine/   Pure TypeScript trading engine (no I/O; exact decimal maths)
   server/   Binance spot and futures market data, order-book sync, feed health, funding, catch-up, SQLite, REST + WebSocket API
-  web/      React trade screen and history
+  web/      React trade screen, history and stats
 ```
 
 ## License

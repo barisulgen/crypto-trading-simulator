@@ -68,8 +68,8 @@ export class SimEngine {
     }
   }
 
-  deposit(wallet: Wallet, amount: Decimal, ctx: { now: number }): ActionResult {
-    return deposit(this.ledger, wallet, amount, ctx);
+  deposit(wallet: Wallet, amount: Decimal, ctx: { now: number }, btcAsk: Decimal): ActionResult {
+    return deposit(this.ledger, wallet, amount, ctx, btcAsk);
   }
 
   /** Moves free USDT only: locked funds and position margin never move. */

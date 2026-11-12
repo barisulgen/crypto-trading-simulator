@@ -14,6 +14,7 @@ import type {
   SpotOrder,
   SpotOrderRequest,
   SpotRules,
+  StatsFilter,
   TierSource,
   Wallet,
 } from '@sim/engine';
@@ -32,6 +33,9 @@ import {
   submittedOrder,
 } from '../runner.ts';
 import type { EngineRunner } from '../runner.ts';
+import { statsBounds, statsLive } from '../stats/loadStats.ts';
+import { StatsTimeoutError, StatsWorkerStoppedError } from '../stats/statsService.ts';
+import type { StatsService } from '../stats/statsService.ts';
 import { registerAuth } from './auth.ts';
 import type { ClientHub } from './ws.ts';
 
@@ -48,6 +52,8 @@ export interface AppDeps {
   candles: Record<Market, { history(symbol: string, interval: string, endTime?: number): Promise<Candle[]> }>;
   db: Db;
   seasonId: number;
+  /** Computes the stats, off the engine's thread in the running server. */
+  stats: StatsService;
   coins: string[];
   symbols: string[];
   fees: { spot: FeeSchedule; perp: FeeSchedule };
@@ -179,6 +185,19 @@ function queryMarket(q: Query): Market {
   return m;
 }
 
+/** The `tz` query parameter: an IANA time zone the platform knows. */
+function queryTimeZone(q: Query): string {
+  const tz = queryStr(q, 'tz');
+  const invalid = new InputError('tz must be a valid time zone');
+  if (tz === undefined) throw invalid;
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: tz });
+  } catch {
+    throw invalid;
+  }
+  return tz;
+}
+
 /** The orders a call's events placed or rejected, in event order. */
 function placedOrRejected<O>(events: { type: string; order?: O }[]): O[] {
   return events.flatMap((e) => (e.type === 'order_placed' || e.type === 'order_rejected' ? [e.order as O] : []));
@@ -204,7 +223,8 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     // Fastify's own client errors: invalid JSON, body too large, unsupported content type.
     if (status !== undefined && status >= 400 && status < 500) return send(reply, status, { error: message });
     d.logger.error(`${req.method} ${req.url.split('?')[0]} failed: ${message}`);
-    return send(reply, 500, { error: 'Internal error' });
+    if (err instanceof StatsTimeoutError) return send(reply, 503, { error: message });
+    return send(reply, 500, { error: err instanceof StatsWorkerStoppedError ? message : 'Internal error' });
   });
 
   const symbol = (s: string): string => {
@@ -507,6 +527,25 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
       limit: queryInt(q, 'limit', 1, HISTORY_MAX) ?? 50,
     });
     return send(reply, 200, result);
+  });
+
+  // The stats of the current season, filtered by range, coin and market; hours and weekdays in `tz`.
+  app.get('/api/stats', async (req, reply) => {
+    const q = req.query as Query;
+    const tz = queryTimeZone(q);
+    const s = queryStr(q, 'symbol');
+    const market = queryStr(q, 'market');
+    if (market !== undefined && market !== 'spot' && market !== 'leverage') throw new InputError('market must be spot or leverage');
+    const from = queryInt(q, 'from', 0, Number.MAX_SAFE_INTEGER) ?? null;
+    const to = queryInt(q, 'to', 0, Number.MAX_SAFE_INTEGER) ?? null;
+    if (from !== null && to !== null && from > to) throw new InputError('from must not be after to');
+    const filter: StatsFilter = { from, to, symbol: s === undefined ? null : symbol(s), market: market ?? null };
+    // Only the account now and the record's bounds are read here; the record is read and the
+    // report computed by the stats service, as of this moment.
+    const live = statsLive(d.runner);
+    const now = (d.now ?? Date.now)();
+    const json = await d.stats.report({ seasonId: d.seasonId, bounds: statsBounds(d.db), live, filter, tz, now });
+    return reply.code(200).type('application/json; charset=utf-8').send(json);
   });
 
   app.get('/api/candles', async (req, reply) => {

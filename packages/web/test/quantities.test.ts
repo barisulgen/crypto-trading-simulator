@@ -166,7 +166,7 @@ describe('coin quantities and fees read the same in a notice and its History row
     };
     const ledger = emptyLedger(['USDT', 'DOGE']);
     const sim = new SimEngine(ledger, new SpotEngine(emptySpotState(ledger)), new PerpEngine(emptyPerpState(ledger)));
-    deposit(ledger, 'spot', D('1000'), ctx);
+    deposit(ledger, 'spot', D('1000'), ctx, D('100'));
     seedCoins(sim.spot.state, 'DOGE', D('20000'), D('0.2'));
     const [placed] = sim.submit('spot', { symbol: 'DOGEUSDT', side: 'sell', type: 'stop_loss', qty: '12000', triggerPrice: '0.19' }, ctx);
     if (placed?.type !== 'order_placed') throw new Error(`not placed: ${JSON.stringify(placed)}`);

@@ -120,7 +120,7 @@ function setup() {
   const market = new FakeMarket();
   const ctx = testCtx(market, { now: NOW });
   const engine = new SpotEngine(emptySpotState(emptyLedger(['USDT', 'BTC'])));
-  deposit(engine.state.ledger, 'spot', D('1000'), ctx);
+  deposit(engine.state.ledger, 'spot', D('1000'), ctx, D('100'));
   return { market, ctx, engine };
 }
 

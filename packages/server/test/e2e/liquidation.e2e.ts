@@ -118,6 +118,18 @@ describe('e2e: the mark price falls through a long’s liquidation price', () =>
     expect(D(account.balances.leverage.USDT.free).eq(freeAfterOpen)).toBe(true);
     expect(D(account.balances.leverage.USDT.locked).isZero()).toBe(true);
 
+    // The stats count it as one closed trade, a liquidation, and a loss of the margin plus the opening fee.
+    const fills = await server.history({ market: 'perp', types: 'fill' });
+    expect(fills).toHaveLength(1);
+    const openingFee = D(fills[0].payload.fill.fee);
+    const stats = await server.get('/api/stats?tz=UTC');
+    expect(stats.quality.count).toBe(1);
+    expect(stats.risk.liquidations).toBe(1);
+    expect(stats.risk.lostToLiquidations).toBe(D(p.marginLost).toString());
+    const lossOfTrade = D(p.marginLost).plus(openingFee).neg().toString();
+    expect(stats.quality.worst.result).toBe(lossOfTrade);
+    expect(stats.quality.best.result).toBe(lossOfTrade);
+
     // Acknowledged: the next browser is not alerted again.
     await server.ok('/api/liquidations/ack', { eventId: detail.eventId });
     const after = await server.client();

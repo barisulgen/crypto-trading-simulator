@@ -204,7 +204,15 @@ export type CancelReason =
  * is the moment they represent.
  */
 export type EngineEvent =
-  | { type: 'deposit'; time: number; wallet: Wallet; amount: Decimal; totalDeposited: Decimal }
+  | {
+      type: 'deposit';
+      time: number;
+      wallet: Wallet;
+      amount: Decimal;
+      totalDeposited: Decimal;
+      /** The BTC spot best ask when it was made; absent on deposits recorded before it was kept. */
+      btcAsk?: Decimal;
+    }
   | { type: 'transfer'; time: number; from: Wallet; to: Wallet; amount: Decimal }
   | { type: 'order_placed'; market?: 'spot'; time: number; order: SpotOrder; catchUp?: CatchUpTag }
   | {

@@ -66,3 +66,9 @@ export {
 export type { FundingSide, FundingState, FundingWindow, PerpSettings, PerpState } from './perp/state.ts';
 export * from './perp/tiers.ts';
 export * from './perp/math.ts';
+export * from './stats/quality.ts';
+export * from './stats/trades.ts';
+export * from './stats/types.ts';
+export { computeStats } from './stats/report.ts';
+export type { Drawdown, DrawdownPeriod, PnlPoint, Scope, Snapshot } from './stats/equity.ts';
+export type { BreakdownRow, Breakdowns } from './stats/breakdowns.ts';

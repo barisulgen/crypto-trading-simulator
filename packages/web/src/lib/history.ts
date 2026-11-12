@@ -116,6 +116,16 @@ export function localDayEnd(date: string): number | null {
   return p ? new Date(p[0], p[1], p[2] + 1).getTime() - 1 : null;
 }
 
+/** The local date 'YYYY-MM-DD' a moment falls on. */
+export function localDate(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** The From date is after the To date: no moment can be in the range. */
+export const isBackwards = (f: { from: string | null; to: string | null }): boolean =>
+  f.from !== null && f.to !== null && f.from > f.to;
+
 const validDate = (v: string | null): string | null => (v !== null && ymd(v) ? v : null);
 
 // ---- URL query <-> filters ----
@@ -529,11 +539,14 @@ function describeKnown(row: HistoryRow): EventView {
   switch (row.type) {
     case 'deposit': {
       const p = row.payload as Payload<'deposit'>;
-      return view('Deposit', 'plain', [
+      const fields: Field[] = [
         { label: 'Amount', value: fmtUsd(p.amount) },
         { label: 'Wallet', value: WALLET[p.wallet] ?? p.wallet },
         { label: 'Total deposited', value: fmtUsd(p.totalDeposited) },
-      ]);
+      ];
+      // Deposits recorded before the BTC ask was kept have none.
+      if (p.btcAsk !== undefined) fields.push({ label: 'BTC ask at deposit', value: fmtPrice('BTCUSDT', p.btcAsk, EXACT) });
+      return view('Deposit', 'plain', fields);
     }
     case 'transfer': {
       const p = row.payload as Payload<'transfer'>;

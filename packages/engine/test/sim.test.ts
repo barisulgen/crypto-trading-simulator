@@ -54,7 +54,7 @@ function execute(sim: SimEngine, ctx: SimCtx, ...order: ['spot', SpotOrderReques
  */
 function withLong() {
   const t = setup();
-  expect(t.sim.deposit('spot', D('1500'), t.ctx).ok).toBe(true);
+  expect(t.sim.deposit('spot', D('1500'), t.ctx, D('100')).ok).toBe(true);
   expect(t.sim.transfer('spot', 'leverage', D('1000'), t.ctx).ok).toBe(true);
   execute(t.sim, t.ctx, 'perp', btcLong('0.1'));
   return t;
@@ -88,7 +88,7 @@ describe('SimEngine', () => {
 
   it('dispatches orders to the engine of their market', () => {
     const { ctx, sim } = setup();
-    sim.deposit('spot', D('1500'), ctx);
+    sim.deposit('spot', D('1500'), ctx, D('100'));
     sim.transfer('spot', 'leverage', D('1000'), ctx);
 
     execute(sim, ctx, 'spot', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1' });
@@ -106,7 +106,7 @@ describe('SimEngine', () => {
 
   it('cancels on the engine of the market', () => {
     const { ctx, sim } = setup();
-    sim.deposit('spot', D('1500'), ctx);
+    sim.deposit('spot', D('1500'), ctx, D('100'));
     sim.transfer('spot', 'leverage', D('1000'), ctx);
     const id = execute(sim, ctx, 'perp', { symbol: 'BTCUSDT', side: 'buy', type: 'limit', price: '79000', qty: '0.1' });
     expect(sim.perp.state.orders.get(id)!.status).toBe('open');
@@ -158,7 +158,7 @@ describe('valueAccount with positions', () => {
 
   it('a short loses as the mark rises', () => {
     const t = setup();
-    t.sim.deposit('spot', D('1000'), t.ctx);
+    t.sim.deposit('spot', D('1000'), t.ctx, D('100'));
     t.sim.transfer('spot', 'leverage', D('1000'), t.ctx);
     execute(t.sim, t.ctx, 'perp', { ...btcLong('0.1'), side: 'sell' });
     const p = t.sim.perp.state.positions.BTCUSDT!;
@@ -207,7 +207,7 @@ describe('valueAccount with positions', () => {
 
   it('a held coin never priced sets pricesLoading; one priced earlier and now stale does not', () => {
     const { ctx, sim } = setup();
-    sim.deposit('spot', D('1000'), ctx);
+    sim.deposit('spot', D('1000'), ctx, D('100'));
     execute(sim, ctx, 'spot', { symbol: 'BTCUSDT', side: 'buy', type: 'market', qty: '1' });
     const none = { mark: () => null };
     expect(valueAccount(sim, () => null, none, ['BTCUSDT']).pricesLoading).toBe(true);
@@ -218,7 +218,7 @@ describe('valueAccount with positions', () => {
 
   it('with no positions the leverage value is its USDT', () => {
     const { ctx, sim } = setup();
-    sim.deposit('leverage', D('250'), ctx);
+    sim.deposit('leverage', D('250'), ctx, D('100'));
     const v = valueAccount(sim, () => null, { mark: () => null }, ['BTCUSDT']);
     expect(v.leverage.positions).toEqual([]);
     expect(s(v.leverage.value)).toBe('250');

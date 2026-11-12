@@ -1,4 +1,4 @@
-// Small shared building blocks: buttons, a segmented switch, a text field, a modal dialog.
+// Small shared building blocks: buttons, a segmented switch, a text field, filter controls, a modal dialog.
 import { useEffect, useId, useRef } from 'react';
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react';
 
@@ -122,6 +122,32 @@ export function TextField({
       </div>
       {hint !== undefined && <div className="text-xs text-faint">{hint}</div>}
     </div>
+  );
+}
+
+/** A compact filter control (select, date input). */
+export const CONTROL =
+  'h-8 min-w-0 rounded-ctl border border-line bg-canvas px-2 text-xs text-fg focus:border-focus disabled:opacity-50';
+
+/** A small label over a filter control; `children` gets the id to give the control. */
+export function Labelled({ label, children, className = '' }: { label: string; children: (id: string) => ReactNode; className?: string }) {
+  const id = useId();
+  return (
+    <div className={`flex min-w-0 flex-col gap-1 ${className}`}>
+      <label htmlFor={id} className="text-2xs text-faint">
+        {label}
+      </label>
+      {children(id)}
+    </div>
+  );
+}
+
+/** The circular arrow of a Refresh button. */
+export function RefreshIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6">
+      <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3.5H10" />
+    </svg>
   );
 }
 

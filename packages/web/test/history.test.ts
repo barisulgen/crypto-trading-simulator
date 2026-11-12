@@ -168,6 +168,19 @@ describe('history rows', () => {
     expect(lines(v)).toEqual(['Amount: $1,000.00', 'Wallet: Spot', 'Total deposited: $1,250.50']);
   });
 
+  it('deposit: the BTC ask recorded with it, when it has one (older deposits have none)', () => {
+    const v = describeEvent(
+      row(
+        'deposit',
+        { type: 'deposit', time: T, wallet: 'leverage', amount: '500', totalDeposited: '1750.5', btcAsk: '67012.3' },
+        null,
+        'leverage',
+      ),
+    );
+    expect(v.label).toBe('Deposit');
+    expect(lines(v)).toEqual(['Amount: $500.00', 'Wallet: Leverage', 'Total deposited: $1,750.50', 'BTC ask at deposit: 67,012.30']);
+  });
+
   it('transfer: amount, from and to', () => {
     const v = describeEvent(row('transfer', { type: 'transfer', time: T, from: 'spot', to: 'leverage', amount: '200' }, null, null));
     expect(v.label).toBe('Transfer');

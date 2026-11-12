@@ -1,7 +1,10 @@
-// Hash routes without a router: '#/' is Trade, '#/history?symbol=BTCUSDT&...' is History.
+// Hash routes without a router: '#/' is Trade, '#/history?symbol=BTCUSDT&...' is History,
+// '#/stats?symbol=BTCUSDT&...' is Stats.
 import { useSyncExternalStore } from 'react';
 
-export type RoutePath = '/' | '/history';
+export type RoutePath = '/' | '/history' | '/stats';
+
+const PATHS: readonly RoutePath[] = ['/', '/history', '/stats'];
 
 export interface Route {
   path: RoutePath;
@@ -13,7 +16,7 @@ export function parseHash(hash: string): Route {
   const q = raw.indexOf('?');
   const path = q === -1 ? raw : raw.slice(0, q);
   const params = new URLSearchParams(q === -1 ? '' : raw.slice(q + 1));
-  return { path: path === '/history' ? '/history' : '/', params };
+  return { path: PATHS.find((p) => p === path) ?? '/', params };
 }
 
 /** The href for a route, e.g. href('/history', { symbol: 'BTCUSDT' }) -> '#/history?symbol=BTCUSDT'. */

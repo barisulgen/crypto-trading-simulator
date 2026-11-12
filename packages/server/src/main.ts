@@ -33,6 +33,7 @@ import { ConnectLimiter, defaultSetTimer } from './market/ws.ts';
 import { FundingService } from './funding/fundingService.ts';
 import { EngineRunner } from './runner.ts';
 import { onShutdownSignals } from './shutdownSignals.ts';
+import { WorkerStats } from './stats/statsService.ts';
 
 const WEB_DIST = fileURLToPath(new URL('../../web/dist/', import.meta.url));
 
@@ -43,6 +44,8 @@ const overridden = overriddenEndpoints(endpoints);
 if (overridden.length > 0) logger.warn(`Binance endpoints overridden, not live Binance: ${overridden.join(', ')}`);
 const db = openDb(config.dbPath);
 const seasonId = currentSeasonId(db);
+// The stats are read and computed in a worker thread, so a large record never stalls the engine.
+const stats = new WorkerStats({ dbPath: config.dbPath, logger });
 const ledger = loadLedger(db, seasonId, ['USDT', ...config.coins]);
 const sim = new SimEngine(
   ledger,
@@ -120,6 +123,7 @@ async function shutdown(code: number): Promise<void> {
   candles.perp.close();
   rest.dispose(); // queued REST requests are dropped, never sent after shutdown began
   futuresRest.dispose();
+  await stats.close().catch(() => {});
   await app?.close().catch(() => {});
   db.close();
   process.exit(code);
@@ -177,6 +181,7 @@ app = await buildApp({
   candles,
   db,
   seasonId,
+  stats,
   coins: config.coins,
   symbols: config.symbols,
   fees: config.fees,
