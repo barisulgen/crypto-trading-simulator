@@ -256,9 +256,11 @@ export function computeStats(input: StatsInput, filter: StatsFilter): StatsRepor
   const cost = costs(dated, range.pnl);
   const positions = input.positions.filter((p) => marketMatches('perp', p.symbol, filter));
 
+  // The trades open now. Their unrealised P&L is now's, so a range that ended earlier leaves it out.
   const open = built.open.filter((o) => marketMatches(o.market, o.symbol, filter));
-  let unrealized: Decimal | null = D(0);
-  for (const o of open) {
+  const pastRange = to !== null && to < now;
+  let unrealized: Decimal | null = pastRange ? null : D(0);
+  for (const o of pastRange ? [] : open) {
     const u = o.market === 'spot' ? spotUnrealized(input, o.symbol) : perpUnrealized(input, o.symbol);
     unrealized = u === null || unrealized === null ? null : unrealized.plus(u);
   }
@@ -288,7 +290,7 @@ export function computeStats(input: StatsInput, filter: StatsFilter): StatsRepor
     costs: cost,
     breakdowns: breakdowns(trades, input.tz),
     benchmark: benchmark(input, filter, accountSeries, accountLive, accountCapitalMax),
-    open: { count: open.length, unrealized },
+    open: { count: open.length, unrealized, pastRange },
     unattributed: { count: dustCount, realized: dustRealized },
     estimated: {
       trades: trades.filter((t) => t.estimated).length,

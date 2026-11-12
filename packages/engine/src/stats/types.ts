@@ -200,8 +200,12 @@ export interface StatsReport {
   costs: Costs;
   breakdowns: Breakdowns;
   benchmark: StatsBenchmark;
-  /** Positions and round trips still open, and their unrealised P&L now (null when one is unpriced). */
-  open: { count: number; unrealized: Decimal | null };
+  /**
+   * Positions and round trips open now, and their unrealised P&L now (null when one is unpriced).
+   * `pastRange` when the range ends before now: the unrealised P&L is then null, since it is not
+   * as of the range's end.
+   */
+  open: { count: number; unrealized: Decimal | null; pastRange: boolean };
   /** Dust sales that belong to no trade; their P&L is in the net P&L but in no trade figure. */
   unattributed: { count: number; realized: Decimal };
   /**

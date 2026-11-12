@@ -173,7 +173,10 @@ export interface StatsView {
   riskNote: string | null;
   costs: { rows: StatRow[]; note: string | null };
   breakdowns: { tables: BreakdownTable[]; empty: string | null; note: string | null };
-  /** 'Open: 2, unrealised -$12.50': trades still open, which are in no trade figure. */
+  /**
+   * 'Open: 2, unrealised -$12.50': trades still open, which are in no trade figure. Under a range
+   * that ended before now, 'Open now: 2', without the unrealised P&L, which is not as of its end.
+   */
   open: string;
   /** Realised P&L that belongs to no trade; null when there is none. */
   unattributed: string | null;
@@ -408,7 +411,9 @@ export function statsView(r: WireStatsReport, filter: StatsFilter = EMPTY_STATS_
       empty: tables.length === 0 ? 'No closed trades in this range' : null,
       note: tables.length > 0 ? trades : null,
     },
-    open: `Open: ${r.open.count}${r.open.count > 0 ? `, unrealised ${usd(r.open.unrealized, true)}` : ''}`,
+    open: r.open.pastRange
+      ? `Open now: ${r.open.count}`
+      : `Open: ${r.open.count}${r.open.count > 0 ? `, unrealised ${usd(r.open.unrealized, true)}` : ''}`,
     unattributed: r.unattributed.count > 0 ? `Realised outside any trade: ${usd(r.unattributed.realized, true)}` : null,
     uncovered: cmpDec(r.costs.uncovered, '0') !== 0 ? `Losses the wallet could not cover: ${usd(r.costs.uncovered)} (counted)` : null,
   };

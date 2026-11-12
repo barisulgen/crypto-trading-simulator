@@ -111,7 +111,7 @@ function report(over: Partial<WireStatsReport> = {}): WireStatsReport {
       weekday: [{ key: 'Mon', pnl: '-15', count: 6, winRate: '0.5' }],
     },
     benchmark: { scope: 'account', missing: 0, value: '1050', pnl: '50', returnPct: '0.05', series: [] },
-    open: { count: 0, unrealized: '0' },
+    open: { count: 0, unrealized: '0', pastRange: false },
     unattributed: { count: 0, realized: '0' },
     estimated: { trades: 0, fills: 0, funding: 0, liquidations: 0 },
     ...over,
@@ -278,7 +278,7 @@ describe('statsView', () => {
         costs: { ...report().costs, share: null, preCost: '0' },
         benchmark: { scope: 'account', missing: 0, value: null, pnl: null, returnPct: null, series: [] },
         breakdowns: NO_BREAKDOWNS,
-        open: { count: 1, unrealized: null },
+        open: { count: 1, unrealized: null, pastRange: false },
       }),
     );
     for (const label of ['Win rate', 'Average win', 'Average loss', 'Profit factor', 'Expected profit per trade', 'Best trade', 'Worst trade']) {
@@ -458,8 +458,11 @@ describe('statsView', () => {
   });
 
   it('shows the open trades, and the lines that only matter when not zero', () => {
-    const v = statsView(report({ open: { count: 2, unrealized: '-12.5' } }));
+    const v = statsView(report({ open: { count: 2, unrealized: '-12.5', pastRange: false } }));
     expect(v.open).toBe('Open: 2, unrealised -$12.50');
+    // A range that ended before now: what is open now, with no unrealised figure from after its end.
+    expect(statsView(report({ open: { count: 2, unrealized: null, pastRange: true } })).open).toBe('Open now: 2');
+    expect(statsView(report({ open: { count: 0, unrealized: null, pastRange: true } })).open).toBe('Open now: 0');
     expect(v.unattributed).toBeNull();
     expect(v.uncovered).toBeNull();
     const w = statsView(

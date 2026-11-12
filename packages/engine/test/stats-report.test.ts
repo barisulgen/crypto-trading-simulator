@@ -457,7 +457,45 @@ describe('computeStats: filters', () => {
     const r = computeStats(input({ events, account: acct, positions: [p] }), { ...ALL, symbol: 'BTCUSDT' });
     expect(s(r.headline.netPnl)).toBe('-0.3');
     expect(r.headline.live).toBe(false);
-    expect(r.open).toEqual({ count: 1, unrealized: null });
+    expect(r.open).toEqual({ count: 1, unrealized: null, pastRange: false });
+  });
+});
+
+describe('computeStats: open trades', () => {
+  const p = position({ id: 'p1', openedAt: t(1) });
+  const events = rows([deposit(T0, 'leverage', '1000', '1000'), opened(p), perpFill('p1', t(1))]);
+  const acct = account({
+    totalDeposited: D(1000),
+    leverage: {
+      free: D(939.7),
+      locked: D(0),
+      value: D(1004.7),
+      positions: [
+        {
+          symbol: 'BTCUSDT',
+          side: 'long',
+          qty: D('0.01'),
+          margin: D(60),
+          markPrice: D(60500),
+          markFresh: true,
+          markAt: t(59),
+          unrealizedPnl: D(5),
+        },
+      ],
+    },
+  });
+  const open = (filter: StatsFilter) => computeStats(input({ events, account: acct, positions: [p] }), filter).open;
+
+  it('a range that reaches now: the trades open now and their unrealised P&L', () => {
+    expect(open(ALL)).toEqual({ count: 1, unrealized: D(5), pastRange: false });
+    expect(open({ ...ALL, from: t(2), to: t(60) })).toEqual({ count: 1, unrealized: D(5), pastRange: false });
+    expect(open({ ...ALL, to: t(90) })).toEqual({ count: 1, unrealized: D(5), pastRange: false });
+  });
+
+  it('a range that ended before now: the trades open now, without an unrealised figure that is not as of its end', () => {
+    expect(open({ ...ALL, to: t(59) })).toEqual({ count: 1, unrealized: null, pastRange: true });
+    expect(open({ ...ALL, from: t(0), to: t(1), symbol: 'BTCUSDT' })).toEqual({ count: 1, unrealized: null, pastRange: true });
+    expect(open({ ...ALL, to: t(59), market: 'spot' })).toEqual({ count: 0, unrealized: null, pastRange: true });
   });
 });
 
@@ -700,7 +738,7 @@ describe('computeStats: empty', () => {
       expect(r.benchmark.missing).toBe(0);
       expect(s(r.benchmark.pnl)).toBe('0');
       expect(r.benchmark.returnPct).toBeNull();
-      expect(r.open).toEqual({ count: 0, unrealized: D(0) });
+      expect(r.open).toEqual(filter.to === null ? { count: 0, unrealized: D(0), pastRange: false } : { count: 0, unrealized: null, pastRange: true });
       expect(r.unattributed.count).toBe(0);
       expect(r.estimated).toEqual({ trades: 0, fills: 0, funding: 0, liquidations: 0 });
     }
