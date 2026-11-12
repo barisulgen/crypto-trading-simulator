@@ -99,7 +99,7 @@ function ExportButton({ filters, onError }: { filters: HistoryFilters; onError(m
         disabled={running}
         onChange={(e) => choose(e.target.value === 'excel-eu' ? 'excel-eu' : 'standard')}
         title={FORMAT_TITLES[format]}
-        className={`${CONTROL} w-auto max-w-32 desk:max-w-none`}
+        className={`${CONTROL} h-9 w-auto flex-none field-sizing-content desk:h-6 desk:px-1`}
       >
         <option value="standard" title={FORMAT_TITLES.standard}>
           Standard
@@ -159,7 +159,7 @@ function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(
   const set = (patch: Partial<HistoryFilters>) => go({ ...filters, ...patch });
   return (
     <section aria-label="Filters" className="flex-none border-b border-line bg-panel desk:rounded-panel desk:border">
-      <div className="flex h-11 items-center gap-2 px-3 desk:h-9">
+      <div className="flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1 desk:min-h-9">
         <h1 className="text-xs font-semibold text-muted">History</h1>
         <Button
           size="sm"
@@ -171,7 +171,7 @@ function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(
           Filters
           {count > 0 && <span className="rounded-full bg-accent px-1.5 text-2xs font-semibold text-on-accent">{count}</span>}
         </Button>
-        <div className="ml-auto flex min-w-0 items-center gap-1">
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
           <ExportButton filters={filters} onError={setExportError} />
           {hasFilters(filters) && (
             <Button tone="quiet" size="sm" onClick={() => go(EMPTY_FILTERS)}>
