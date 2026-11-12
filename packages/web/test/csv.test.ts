@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { HistoryPage, HistoryRow } from '../src/lib/api.ts';
 import { CSV_COLUMNS, fetchAllHistory, historyCsv, localTimeText } from '../src/lib/csv.ts';
+import type { CsvFormat } from '../src/lib/csv.ts';
+import { loadCsvFormat, saveCsvFormat } from '../src/lib/csvFormat.ts';
 
 /** A small RFC 4180 reader: rows of fields, quotes and doubled quotes undone. */
-function parse(text: string): string[][] {
+function parse(text: string, sep = ','): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = '';
@@ -17,7 +19,7 @@ function parse(text: string): string[][] {
       } else if (c === '"') quoted = false;
       else field += c;
     } else if (c === '"') quoted = true;
-    else if (c === ',') {
+    else if (c === sep) {
       row.push(field);
       field = '';
     } else if (c === '\r' && text[i + 1] === '\n') {
@@ -355,6 +357,164 @@ describe('historyCsv', () => {
   it('puts the visible text in details: the title and each label: value, joined with a dot', () => {
     const r = record(row({ type: 'transfer', payload: { time: T0, from: 'spot', to: 'leverage', amount: '250' } }));
     expect(r.details).toMatch(/^Transfer · Amount: .*250.* · From: Spot · To: Leverage$/);
+  });
+});
+
+const SEP: Record<CsvFormat, string> = { standard: ',', 'excel-eu': ';' };
+const NUMERIC = [
+  'qty',
+  'price',
+  'quote',
+  'fee',
+  'fee_usd',
+  'slippage_usd',
+  'drift_usd',
+  'best_at_arrival',
+  'best_at_submit_or_trigger',
+  'trigger_price',
+  'realized_pnl',
+  'amount',
+];
+
+const fullFill = { ...spotFill, triggerPrice: '67000.5', realizedPnl: '-12.5' };
+
+describe('historyCsv in the Excel (Turkish/European) format', () => {
+  const fillRow = row({ id: 5, type: 'fill', symbol: 'BTCUSDT', market: 'spot', payload: { fill: fullFill, order: order('market') } });
+  const transfer = (amount: string) =>
+    row({ id: 7, type: 'transfer', payload: { time: T0, from: 'spot', to: 'leverage', amount } });
+
+  it('is the standard output when no format is given', () => {
+    const rows = [fillRow, transfer('250')];
+    expect(historyCsv(rows, TZ)).toBe(historyCsv(rows, TZ, 'standard'));
+  });
+
+  it('joins the header with semicolons, with a byte order mark, CRLF and no sep line', () => {
+    const text = historyCsv([fillRow], TZ, 'excel-eu');
+    expect(text.charCodeAt(0)).toBe(0xfeff);
+    expect(text.slice(1).split('\r\n')[0]).toBe(CSV_COLUMNS.join(';'));
+    expect(text.endsWith('\r\n')).toBe(true);
+    expect(text.replace(/\r\n/g, '').includes('\n')).toBe(false);
+    expect(text.toLowerCase()).not.toContain('sep=');
+    expect(historyCsv([], TZ, 'excel-eu')).toBe(`﻿${CSV_COLUMNS.join(';')}\r\n`);
+  });
+
+  it('writes comma decimals in every numeric column, every digit kept and nothing quoted', () => {
+    const text = historyCsv([fillRow], TZ, 'excel-eu');
+    const line = parse(text.slice(1), ';')[1]!;
+    const r = Object.fromEntries(CSV_COLUMNS.map((c, i) => [c, line[i]!]));
+    expect(r).toMatchObject({
+      qty: '0,00123456',
+      price: '67890,12',
+      quote: '83,8147',
+      fee: '0,000001234',
+      fee_usd: '0,0838',
+      slippage_usd: '0,0012',
+      drift_usd: '-0,0034',
+      best_at_arrival: '67889,99',
+      best_at_submit_or_trigger: '67880,5',
+      trigger_price: '67000,5',
+      realized_pnl: '-12,5',
+    });
+    expect(text).toContain(';0,000001234;');
+    expect(text).toContain(';-12,5;');
+    expect(text).not.toMatch(/"-?\d+,\d+"/);
+  });
+
+  it('keeps an integer amount as it is and converts a decimal one', () => {
+    const get = (amount: string) =>
+      parse(historyCsv([transfer(amount)], TZ, 'excel-eu').slice(1), ';')[1]![CSV_COLUMNS.indexOf('amount')];
+    expect(get('250')).toBe('250');
+    expect(get('250.75')).toBe('250,75');
+    expect(get('-0.5')).toBe('-0,5');
+  });
+
+  it('leaves non-numeric text in a numeric column, and every other column, unchanged', () => {
+    const r = parse(historyCsv([transfer('1.5 USDT')], TZ, 'excel-eu').slice(1), ';')[1]!;
+    expect(r[CSV_COLUMNS.indexOf('amount')]).toBe('1.5 USDT');
+    expect(r[CSV_COLUMNS.indexOf('time_utc')]).toBe('2026-10-18T21:05:09.123Z');
+    expect(r[CSV_COLUMNS.indexOf('id')]).toBe('7');
+  });
+
+  it.each(['standard', 'excel-eu'] as const)('quotes text with a comma, a semicolon and a quote correctly in %s and reads it back', (format) => {
+    const reason = 'bad, worse; "worst"';
+    const text = historyCsv([row({ type: 'feed_gap', payload: { startedAt: T0, endedAt: T0 + 1000, reason } })], TZ, format);
+    const r = parse(text.slice(1), SEP[format])[1]!;
+    expect(r).toHaveLength(CSV_COLUMNS.length);
+    expect(r[CSV_COLUMNS.indexOf('details')]).toContain(reason);
+    expect(text).toContain('""worst""');
+  });
+
+  it('quotes a comma in a text field of the Excel format', () => {
+    const text = historyCsv([row({ type: 'feed_gap', payload: { startedAt: T0, endedAt: T0 + 1000, reason: 'a, b' } })], TZ, 'excel-eu');
+    expect(text).toContain(';"Data gap');
+  });
+
+  it.each(['standard', 'excel-eu'] as const)('reads a whole %s file back: rows, columns, estimated flag and exact numbers', (format) => {
+    const rows = [
+      fillRow,
+      row({
+        id: 2,
+        type: 'fill',
+        symbol: 'BTCUSDT',
+        market: 'spot',
+        payload: { fill: { ...fullFill, id: 'f2', realizedPnl: null }, order: order('market'), catchUp: { from: T0 - 1000, to: T0, basis: 'candle_worst_price' } },
+      }),
+      transfer('250'),
+      row({ id: 4, type: 'funding', symbol: 'BTCUSDT', market: 'perp', payload: { market: 'perp', side: 'long', markPrice: '61000.25', amount: '-0.0123' } }),
+      row({ id: 9, type: 'feed_gap', payload: { startedAt: T0, endedAt: T0 + 1000, reason: 'a; b, c' } }),
+    ];
+    const parsed = parse(historyCsv(rows, TZ, format).slice(1), SEP[format]);
+    expect(parsed).toHaveLength(rows.length + 1);
+    for (const line of parsed) expect(line).toHaveLength(CSV_COLUMNS.length);
+    const rec = (i: number) => Object.fromEntries(CSV_COLUMNS.map((c, k) => [c, parsed[i]![k]!]));
+    expect(rec(1).estimated).toBe('');
+    expect(rec(2).estimated).toBe('yes');
+    const num = (i: number, c: string) => (format === 'excel-eu' ? rec(i)[c]!.replace(',', '.') : rec(i)[c]!);
+    expect(num(1, 'qty')).toBe('0.00123456');
+    expect(num(1, 'fee')).toBe('0.000001234');
+    expect(num(1, 'drift_usd')).toBe('-0.0034');
+    expect(num(1, 'realized_pnl')).toBe('-12.5');
+    expect(num(3, 'amount')).toBe('250');
+    expect(num(4, 'price')).toBe('61000.25');
+    expect(num(4, 'amount')).toBe('-0.0123');
+    for (const c of NUMERIC) for (let i = 1; i <= rows.length; i++) expect(rec(i)[c]).not.toContain('"');
+  });
+});
+
+describe('the remembered CSV format', () => {
+  const store = (initial: Record<string, string> = {}) => {
+    const data = { ...initial };
+    return {
+      data,
+      getItem: (k: string) => data[k] ?? null,
+      setItem: (k: string, v: string) => {
+        data[k] = v;
+      },
+    };
+  };
+
+  it('round-trips a choice under sim-csv-format', () => {
+    const s = store();
+    saveCsvFormat(s, 'excel-eu');
+    expect(s.data['sim-csv-format']).toBe('excel-eu');
+    expect(loadCsvFormat(s)).toBe('excel-eu');
+    saveCsvFormat(s, 'standard');
+    expect(loadCsvFormat(s)).toBe('standard');
+  });
+
+  it('is standard when nothing, or something unknown, is stored', () => {
+    expect(loadCsvFormat(store())).toBe('standard');
+    expect(loadCsvFormat(store({ 'sim-csv-format': 'tsv' }))).toBe('standard');
+    expect(loadCsvFormat(null)).toBe('standard');
+  });
+
+  it('is standard, and does not throw, when the storage throws', () => {
+    const denied = () => {
+      throw new Error('denied');
+    };
+    const bad = { getItem: denied, setItem: denied };
+    expect(loadCsvFormat(bad)).toBe('standard');
+    expect(() => saveCsvFormat(bad, 'excel-eu')).not.toThrow();
   });
 });
 

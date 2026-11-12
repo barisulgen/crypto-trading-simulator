@@ -4,10 +4,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { BackwardsNote, FilterFields } from '../components/FilterFields.tsx';
-import { Button, RefreshIcon } from '../components/ui.tsx';
+import { Button, CONTROL, RefreshIcon } from '../components/ui.tsx';
 import { api, ApiError } from '../lib/api.ts';
 import type { HistoryRow } from '../lib/api.ts';
 import { EXPORT_PAGE_SIZE, fetchAllHistory, historyCsv } from '../lib/csv.ts';
+import type { CsvFormat } from '../lib/csv.ts';
+import { loadCsvFormat, saveCsvFormat } from '../lib/csvFormat.ts';
 import {
   EMPTY_FILTERS,
   EVENT_TYPES,
@@ -43,10 +45,30 @@ function saveCsv(csv: string, name: string) {
   URL.revokeObjectURL(url);
 }
 
+const FORMAT_TITLES: Record<CsvFormat, string> = {
+  standard: 'Commas between fields, dot decimals',
+  'excel-eu': 'Semicolons between fields, comma decimals: opens directly in Excel with Turkish or European settings',
+};
+
+/** The browser's local storage, or null where even looking it up is refused. */
+function browserStorage(): Storage | null {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
+}
+
 /** Every event the filters match as a CSV file; nothing is saved if any page fails. */
 function ExportButton({ filters, onError }: { filters: HistoryFilters; onError(message: string): void }) {
   const [rows, setRows] = useState<number | null>(null);
   const running = rows !== null;
+  const [format, setFormat] = useState<CsvFormat>(() => loadCsvFormat(browserStorage()));
+
+  function choose(f: CsvFormat) {
+    setFormat(f);
+    saveCsvFormat(browserStorage(), f);
+  }
 
   async function run() {
     onError('');
@@ -56,7 +78,7 @@ function ExportButton({ filters, onError }: { filters: HistoryFilters; onError(m
         (before) => api.history({ ...historyQuery(filters, before), limit: EXPORT_PAGE_SIZE }),
         setRows,
       );
-      saveCsv(historyCsv(all, Intl.DateTimeFormat().resolvedOptions().timeZone), `history-${localDate(Date.now())}.csv`);
+      saveCsv(historyCsv(all, Intl.DateTimeFormat().resolvedOptions().timeZone, format), `history-${localDate(Date.now())}.csv`);
     } catch (e) {
       onError(errorText(e));
     } finally {
@@ -71,6 +93,21 @@ function ExportButton({ filters, onError }: { filters: HistoryFilters; onError(m
           Exporting... {rows} rows
         </span>
       )}
+      <select
+        aria-label="CSV format"
+        value={format}
+        disabled={running}
+        onChange={(e) => choose(e.target.value === 'excel-eu' ? 'excel-eu' : 'standard')}
+        title={FORMAT_TITLES[format]}
+        className={`${CONTROL} w-auto max-w-32 desk:max-w-none`}
+      >
+        <option value="standard" title={FORMAT_TITLES.standard}>
+          Standard
+        </option>
+        <option value="excel-eu" title={FORMAT_TITLES['excel-eu']}>
+          Excel (Turkish/European)
+        </option>
+      </select>
       <Button tone="quiet" size="sm" disabled={running} title="Save every event these filters match as a CSV file" onClick={run}>
         Export CSV
       </Button>

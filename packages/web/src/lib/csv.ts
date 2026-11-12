@@ -1,8 +1,12 @@
 // History as a spreadsheet file (pure): one line per recorded event, exact decimals as recorded,
-// standard CSV (UTF-8 with a byte order mark, ',' between fields, '.' as the decimal mark, RFC 4180
-// quoting, CRLF line ends), and the paging loop that gathers every row a filter matches.
+// in one of two formats, both UTF-8 with a byte order mark, RFC 4180 quoting and CRLF line ends:
+// 'standard' (',' between fields, '.' as the decimal mark) and 'excel-eu' (';' between fields and
+// ',' as the decimal mark in the numeric columns, which opens directly in Excel with Turkish or
+// European settings). Also the paging loop that gathers every row a filter matches.
 import type { HistoryPage, HistoryRow } from './api.ts';
 import { describeEvent } from './history.ts';
+
+export type CsvFormat = 'standard' | 'excel-eu';
 
 export const CSV_COLUMNS = [
   'id',
@@ -123,12 +127,40 @@ function marketOf(row: HistoryRow): string {
   return perp ? 'perp' : 'spot';
 }
 
-/** One field, quoted only when it holds a comma, a quote or a line break (quotes doubled). */
-const quote = (s: string): string => (/[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+/** Columns holding numbers; the Excel format gives these a decimal comma. */
+const NUMERIC_COLUMNS: ReadonlySet<Column> = new Set<Column>([
+  'qty',
+  'price',
+  'quote',
+  'fee',
+  'fee_usd',
+  'slippage_usd',
+  'drift_usd',
+  'best_at_arrival',
+  'best_at_submit_or_trigger',
+  'trigger_price',
+  'realized_pnl',
+  'amount',
+]);
 
-/** Every row as a CSV file's text, newest first as given; `tz` is the zone of time_local. */
-export function historyCsv(rows: HistoryRow[], tz: string): string {
-  const lines = [CSV_COLUMNS.join(',')];
+const PLAIN_DECIMAL = /^-?\d+(\.\d+)?$/;
+
+/** One field, quoted when it holds a separator, a quote or a line break (quotes doubled). */
+function quote(s: string, quoted: RegExp): string {
+  return quoted.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/**
+ * Every row as a CSV file's text, newest first as given; `tz` is the zone of time_local.
+ * 'standard' is ',' between fields and '.' decimals. 'excel-eu' is ';' between fields and, in the
+ * numeric columns, ',' as the decimal mark on a plain decimal number (every digit kept, never
+ * quoted so Excel still reads it as a number); a comma elsewhere is quoted.
+ */
+export function historyCsv(rows: HistoryRow[], tz: string, format: CsvFormat = 'standard'): string {
+  const excel = format === 'excel-eu';
+  const sep = excel ? ';' : ',';
+  const quoted = excel ? /[;",\r\n]/ : /[",\r\n]/;
+  const lines = [CSV_COLUMNS.join(sep)];
   for (const row of rows) {
     const cols: Record<Column, string> = {
       id: String(row.id),
@@ -157,7 +189,12 @@ export function historyCsv(rows: HistoryRow[], tz: string): string {
       details: detailsOf(row),
       ...payloadColumns(row),
     };
-    lines.push(CSV_COLUMNS.map((c) => quote(cols[c])).join(','));
+    lines.push(
+      CSV_COLUMNS.map((c) => {
+        const v = cols[c];
+        return excel && NUMERIC_COLUMNS.has(c) && PLAIN_DECIMAL.test(v) ? v.replace('.', ',') : quote(v, quoted);
+      }).join(sep),
+    );
   }
   return `﻿${lines.join('\r\n')}\r\n`;
 }
