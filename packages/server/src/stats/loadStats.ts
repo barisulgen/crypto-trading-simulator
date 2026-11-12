@@ -1,4 +1,4 @@
-import { D } from '@sim/engine';
+import { computeStats, D } from '@sim/engine';
 import type {
   AccountValue,
   Basis,
@@ -11,11 +11,12 @@ import type {
   SpotRules,
   StatsBenchmark,
   StatsEvent,
+  StatsFilter,
   StatsInput,
   StatsReport,
 } from '@sim/engine';
 import type { Db } from '../db/db.ts';
-import { reviveOrder, revivePerpOrder, revivePosition } from '../db/store.ts';
+import { reviveOrder, revivePerpOrder, revivePosition, toJson } from '../db/store.ts';
 
 /** The event types the stats read. */
 const STATS_EVENT_TYPES = [
@@ -102,6 +103,47 @@ export interface StatsSource {
   statsMarket(): { btcRules: SpotRules; btcBid: Decimal | null; spotTakerFee: Decimal };
 }
 
+/** What the stats read of the account as it is now: cheap to gather, on the thread that runs it. */
+export interface StatsLive {
+  account: AccountValue;
+  basis: Record<string, Basis>;
+  positions: Position[];
+  /** No price or mark is paused or loading and nothing is catching up. */
+  live: boolean;
+  btcRules: SpotRules;
+  btcBid: Decimal | null;
+  spotTakerFee: Decimal;
+}
+
+/**
+ * The account now, from the runner. The current value counts as live only while no price or mark
+ * is paused or loading and nothing is catching up. Throws while the BTC spot rules are not loaded.
+ */
+export function statsLive(runner: StatsSource): StatsLive {
+  const market = runner.statsMarket();
+  const account = runner.account();
+  const live =
+    account.pricesPaused.length === 0 &&
+    account.marksPaused.length === 0 &&
+    !account.pricesLoading &&
+    runner.catchingUp().length === 0;
+  return {
+    account,
+    basis: runner.state.basis,
+    positions: runner.positions(),
+    live,
+    btcRules: market.btcRules,
+    btcBid: market.btcBid,
+    spotTakerFee: market.spotTakerFee,
+  };
+}
+
+interface EventRow {
+  id: number;
+  time: number;
+  payload: string;
+}
+
 interface SnapshotRow {
   time: number;
   total: string;
@@ -111,35 +153,65 @@ interface SnapshotRow {
   btc_bid: string | null;
 }
 
+/** The stored rows the stats are computed from, as read. */
+export interface StatsRows {
+  events: EventRow[];
+  snapshots: SnapshotRow[];
+}
+
 /**
- * Everything the stats are computed from: the season's deposits, transfers, fills, round trips,
- * positions opened and closed, funding and liquidations in (time, id) order; every equity
- * snapshot; the BTC ask each deposit recorded (for the benchmark); and the account as it is now.
- * The current value counts as live only while no price or mark is paused or loading and nothing
- * is catching up.
+ * The newest event id and snapshot rowid at one moment. Reading only rows up to them gives the
+ * record as it stood then, even when it is read later, after more has been written.
  */
-export function loadStatsInput(db: Db, seasonId: number, runner: StatsSource, tz: string, now: number): StatsInput {
-  const rows = db
+export interface StatsBounds {
+  eventId: number;
+  snapshotRowid: number;
+}
+
+/** The record's bounds now: two index lookups. */
+export function statsBounds(db: Db): StatsBounds {
+  const e = db.prepare('SELECT max(id) AS m FROM events').get() as { m: number | null };
+  const s = db.prepare('SELECT max(rowid) AS m FROM equity_snapshots').get() as { m: number | null };
+  return { eventId: e.m ?? 0, snapshotRowid: s.m ?? 0 };
+}
+
+/**
+ * The season's deposits, transfers, fills, round trips, positions opened and closed, funding and
+ * liquidations in (time, id) order, and every equity snapshot in time order; with `bounds`, only
+ * the rows that existed at that moment.
+ */
+export function readStatsRows(db: Db, seasonId: number, bounds?: StatsBounds): StatsRows {
+  const maxEvent = bounds?.eventId ?? Number.MAX_SAFE_INTEGER;
+  const maxSnapshot = bounds?.snapshotRowid ?? Number.MAX_SAFE_INTEGER;
+  const events = db
     .prepare(
       `SELECT id, time, payload FROM events
-       WHERE season_id = ? AND type IN (${STATS_EVENT_TYPES.map(() => '?').join(',')})
+       WHERE season_id = ? AND id <= ? AND type IN (${STATS_EVENT_TYPES.map(() => '?').join(',')})
        ORDER BY time, id`,
     )
-    .all(seasonId, ...STATS_EVENT_TYPES) as { id: number; time: number; payload: string }[];
-  const events: StatsEvent[] = rows.map((r) => ({ id: r.id, time: r.time, event: reviveEvent(JSON.parse(r.payload) as Raw) }));
+    .all(seasonId, maxEvent, ...STATS_EVENT_TYPES) as EventRow[];
+  const snapshots = db
+    .prepare(
+      `SELECT time, total, deposited, spot_value, leverage_value, btc_bid FROM equity_snapshots
+       WHERE season_id = ? AND rowid <= ? ORDER BY time, rowid`,
+    )
+    .all(seasonId, maxSnapshot) as SnapshotRow[];
+  return { events, snapshots };
+}
+
+/**
+ * Everything the stats are computed from: the stored rows revived, the BTC ask each deposit
+ * recorded (for the benchmark), and the account as it is now.
+ */
+export function statsInputFromRows(rows: StatsRows, live: StatsLive, tz: string, now: number): StatsInput {
+  const events: StatsEvent[] = rows.events.map((r) => ({ id: r.id, time: r.time, event: reviveEvent(JSON.parse(r.payload) as Raw) }));
 
   const benchmarkBuys: StatsInput['benchmarkBuys'] = [];
   for (const { id, event } of events) {
     if (event.type === 'deposit' && event.btcAsk !== undefined) benchmarkBuys.push({ depositEventId: id, price: event.btcAsk });
   }
 
-  const snapshotRows = db
-    .prepare(
-      `SELECT time, total, deposited, spot_value, leverage_value, btc_bid FROM equity_snapshots
-       WHERE season_id = ? ORDER BY time, rowid`,
-    )
-    .all(seasonId) as SnapshotRow[];
-  const snapshots: Snapshot[] = snapshotRows.map((r) => ({
+  const snapshots: Snapshot[] = rows.snapshots.map((r) => ({
     time: r.time,
     total: D(r.total),
     deposited: D(r.deposited),
@@ -148,27 +220,41 @@ export function loadStatsInput(db: Db, seasonId: number, runner: StatsSource, tz
     btcBid: r.btc_bid === null ? null : D(r.btc_bid),
   }));
 
-  const market = runner.statsMarket();
-  const account = runner.account();
-  const live =
-    account.pricesPaused.length === 0 &&
-    account.marksPaused.length === 0 &&
-    !account.pricesLoading &&
-    runner.catchingUp().length === 0;
   return {
     events,
     snapshots,
     now,
-    account,
-    basis: runner.state.basis,
-    positions: runner.positions(),
-    live,
+    account: live.account,
+    basis: live.basis,
+    positions: live.positions,
+    live: live.live,
     benchmarkBuys,
-    btcRules: market.btcRules,
-    spotTakerFee: market.spotTakerFee,
-    btcBid: market.btcBid,
+    btcRules: live.btcRules,
+    spotTakerFee: live.spotTakerFee,
+    btcBid: live.btcBid,
     tz,
   };
+}
+
+/** The stats input from the database and the runner, on the calling thread. */
+export function loadStatsInput(db: Db, seasonId: number, runner: StatsSource, tz: string, now: number): StatsInput {
+  return statsInputFromRows(readStatsRows(db, seasonId), statsLive(runner), tz, now);
+}
+
+/** One stats request: the account now and the record's bounds then, gathered when it was made. */
+export interface StatsRequest {
+  seasonId: number;
+  bounds: StatsBounds;
+  live: StatsLive;
+  filter: StatsFilter;
+  tz: string;
+  now: number;
+}
+
+/** The report a request asks for, as the JSON the API sends. */
+export function statsJson(db: Db, req: StatsRequest): string {
+  const input = statsInputFromRows(readStatsRows(db, req.seasonId, req.bounds), req.live, req.tz, req.now);
+  return toJson(downsampleReport(computeStats(input, req.filter)));
 }
 
 // ---- the report as it is sent ----

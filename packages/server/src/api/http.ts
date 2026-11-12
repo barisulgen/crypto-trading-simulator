@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
-import { computeStats, InputError, MARGIN_MARK_UNAVAILABLE, maxLeverage, parseAmount, TIERS_NOT_LOADED } from '@sim/engine';
+import { InputError, MARGIN_MARK_UNAVAILABLE, maxLeverage, parseAmount, TIERS_NOT_LOADED } from '@sim/engine';
 import type {
   Bracket,
   FeeSchedule,
@@ -33,7 +33,9 @@ import {
   submittedOrder,
 } from '../runner.ts';
 import type { EngineRunner } from '../runner.ts';
-import { downsampleReport, loadStatsInput } from '../stats/loadStats.ts';
+import { statsBounds, statsLive } from '../stats/loadStats.ts';
+import { StatsWorkerStoppedError } from '../stats/statsService.ts';
+import type { StatsService } from '../stats/statsService.ts';
 import { registerAuth } from './auth.ts';
 import type { ClientHub } from './ws.ts';
 
@@ -50,6 +52,8 @@ export interface AppDeps {
   candles: Record<Market, { history(symbol: string, interval: string, endTime?: number): Promise<Candle[]> }>;
   db: Db;
   seasonId: number;
+  /** Computes the stats, off the engine's thread in the running server. */
+  stats: StatsService;
   coins: string[];
   symbols: string[];
   fees: { spot: FeeSchedule; perp: FeeSchedule };
@@ -219,7 +223,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     // Fastify's own client errors: invalid JSON, body too large, unsupported content type.
     if (status !== undefined && status >= 400 && status < 500) return send(reply, status, { error: message });
     d.logger.error(`${req.method} ${req.url.split('?')[0]} failed: ${message}`);
-    return send(reply, 500, { error: 'Internal error' });
+    return send(reply, 500, { error: err instanceof StatsWorkerStoppedError ? message : 'Internal error' });
   });
 
   const symbol = (s: string): string => {
@@ -535,8 +539,12 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     const to = queryInt(q, 'to', 0, Number.MAX_SAFE_INTEGER) ?? null;
     if (from !== null && to !== null && from > to) throw new InputError('from must not be after to');
     const filter: StatsFilter = { from, to, symbol: s === undefined ? null : symbol(s), market: market ?? null };
-    const input = loadStatsInput(d.db, d.seasonId, d.runner, tz, (d.now ?? Date.now)());
-    return send(reply, 200, downsampleReport(computeStats(input, filter)));
+    // Only the account now and the record's bounds are read here; the record is read and the
+    // report computed by the stats service, as of this moment.
+    const live = statsLive(d.runner);
+    const now = (d.now ?? Date.now)();
+    const json = await d.stats.report({ seasonId: d.seasonId, bounds: statsBounds(d.db), live, filter, tz, now });
+    return reply.code(200).type('application/json; charset=utf-8').send(json);
   });
 
   app.get('/api/candles', async (req, reply) => {

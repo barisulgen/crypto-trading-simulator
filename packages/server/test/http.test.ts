@@ -26,6 +26,8 @@ import {
   RefusedError,
 } from '../src/runner.ts';
 import { downsampleReport, loadStatsInput } from '../src/stats/loadStats.ts';
+import { inProcessStats, StatsWorkerStoppedError } from '../src/stats/statsService.ts';
+import type { StatsService } from '../src/stats/statsService.ts';
 import { FakeClock, FakeHealth, FakeHistory, settle, TestMarket, TestPerpMarket } from './helpers.ts';
 
 const T0 = 1_700_000_000_000;
@@ -52,7 +54,9 @@ class FakeCandles {
   }
 }
 
-async function makeApp(opts: { password?: boolean; webDist?: string; db?: Db; clock?: FakeClock; history?: FakeHistory } = {}) {
+async function makeApp(
+  opts: { password?: boolean; webDist?: string; db?: Db; clock?: FakeClock; history?: FakeHistory; stats?: StatsService } = {},
+) {
   const db = opts.db ?? openDb(':memory:');
   const clock = opts.clock ?? new FakeClock(T0);
   const seasonId = currentSeasonId(db, () => clock.now);
@@ -103,6 +107,7 @@ async function makeApp(opts: { password?: boolean; webDist?: string; db?: Db; cl
     candles: { spot: candles, perp: perpCandles },
     db,
     seasonId,
+    stats: opts.stats ?? inProcessStats(db),
     coins: config.coins,
     symbols: config.symbols,
     fees: config.fees,
@@ -1179,6 +1184,25 @@ describe('GET /api/stats', () => {
     expect((await t.call('GET', '/api/stats?tz=UTC')).status).toBe(401);
     await t.login();
     expect((await t.call('GET', '/api/stats?tz=UTC')).status).toBe(200);
+  });
+
+  it('a stats worker that stopped is a 500 that says so; the next request is served', async () => {
+    let calls = 0;
+    const stats: StatsService = {
+      report: async () => {
+        calls += 1;
+        if (calls === 1) throw new StatsWorkerStoppedError();
+        return '{"served":true}';
+      },
+      close: async () => {},
+    };
+    const t = await makeApp({ stats });
+    apps.push(t.app);
+    await t.login();
+    const res = await t.call('GET', '/api/stats?tz=UTC');
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'The stats could not be computed: the stats worker stopped. Try again.' });
+    expect(await t.call('GET', '/api/stats?tz=UTC')).toMatchObject({ status: 200, body: { served: true } });
   });
 
   it('is a 503 until the BTC spot rules the benchmark buys under are loaded', async () => {
