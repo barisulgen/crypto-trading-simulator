@@ -117,9 +117,12 @@ const MARKER_TEXT: Record<MarkerKind, (amount: string) => string> = {
   transfer_out: (a) => `⇠ ${markerUsd(a, true)}`,
 };
 
-/** The time of the first point at or after `t`, else of the last point. */
-function snapAfter(times: number[], t: number): number {
-  return times.find((x) => x >= t) ?? times.at(-1)!;
+/**
+ * The chart second of the first point at or after `ms` (compared to the millisecond, so a point
+ * in the same second but before `ms` does not count), else of the last point.
+ */
+function snapAfter(points: { time: number }[], ms: number): number {
+  return seconds((points.find((p) => p.time >= ms) ?? points.at(-1)!).time);
 }
 
 type Point = WireStatsReport['series'][number];
@@ -169,15 +172,16 @@ function offCurveNote(deposits: number, transfers: number): string | null {
   return `${parts.join(' and ')} after the last point ${deposits + transfers === 1 ? 'is' : 'are'} not on the curve`;
 }
 
-/** The time of the last point at or before `t`, else of the first point. */
-function snapBefore(times: number[], t: number): number {
-  return times.findLast((x) => x <= t) ?? times[0]!;
+/** The chart second of the last point at or before `ms` (to the millisecond), else of the first point. */
+function snapBefore(points: { time: number }[], ms: number): number {
+  return seconds((points.findLast((p) => p.time <= ms) ?? points[0]!).time);
 }
 
 /**
  * The equity chart's lines, markers and shading from a stats report. Markers of one kind in the
  * same minute are merged into one with their sum. A marker or shade end that falls between
- * points goes onto the point after it (a shade's start onto the one before), so neither is lost
+ * points goes onto the first point at or after it, to the millisecond, so the point really
+ * includes the money (a shade's start onto the last point at or before it), and neither is lost
  * where the line was thinned.
  */
 export function chartData(r: ChartInput): ChartData {
@@ -216,10 +220,10 @@ export function chartData(r: ChartInput): ChartData {
     deposited: line(series, (p) => subDec(p.value, p.pnl), breaks),
     benchmark: r.headline.scope.kind === 'account' ? line(r.benchmark.series, (p) => p.value, breaks) : [],
     underwater: line(underwater, (p) => p.usd, breaks, gapAt),
-    markers: merged.map((m) => ({ time: snapAfter(times, seconds(m.time)), kind: m.kind, text: MARKER_TEXT[m.kind](m.amount) })),
+    markers: merged.map((m) => ({ time: snapAfter(series, m.time), kind: m.kind, text: MARKER_TEXT[m.kind](m.amount) })),
     shades: r.drawdown.periods.map((p) => ({
-      from: snapBefore(times, seconds(p.start)),
-      to: p.end === null ? times.at(-1)! : snapAfter(times, seconds(p.end)),
+      from: snapBefore(series, p.start),
+      to: p.end === null ? times.at(-1)! : snapAfter(series, p.end),
     })),
     offCurve: offCurveNote(afterDeposits, after.length - afterDeposits),
   };

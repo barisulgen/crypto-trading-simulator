@@ -182,6 +182,67 @@ describe('equity chart data', () => {
     expect(d.markers).toEqual([{ time: s(t(1)), kind: 'deposit', text: '+$1,200' }]);
   });
 
+  describe('markers to the millisecond', () => {
+    const base = Date.UTC(2026, 10, 9, 12, 5, 28);
+
+    it('puts two deposits 30 ms apart on the point that holds both, not the earlier one in the same second', () => {
+      const d = chartData(
+        input({
+          series: [
+            { time: base + 25, pnl: '0', value: '300' },
+            { time: base + 27_000, pnl: '0', value: '600' },
+          ],
+          markers: [deposit(base + 25, '300'), { time: base + 55, kind: 'deposit', amount: '300', wallet: 'leverage' }],
+        }),
+      );
+      expect(d.markers).toEqual([{ time: s(base + 27_000), kind: 'deposit', text: '+$600' }]);
+    });
+
+    it('keeps a deposit exactly at a point on that point', () => {
+      const d = chartData(
+        input({
+          series: [
+            { time: base + 25, pnl: '0', value: '300' },
+            { time: base + 27_000, pnl: '0', value: '600' },
+          ],
+          markers: [deposit(base + 25, '300')],
+        }),
+      );
+      expect(d.markers).toEqual([{ time: s(base), kind: 'deposit', text: '+$300' }]);
+    });
+
+    it('keeps a deposit on its own second when a later point of that second already includes it', () => {
+      const d = chartData(
+        input({
+          series: [
+            { time: base - 5_000, pnl: '0', value: '0' },
+            { time: base + 800, pnl: '0', value: '300' },
+            { time: base + 27_000, pnl: '0', value: '300' },
+          ],
+          markers: [deposit(base + 100, '300')],
+        }),
+      );
+      expect(d.markers).toEqual([{ time: s(base), kind: 'deposit', text: '+$300' }]);
+    });
+
+    it('ends a shade on the first point at or after its end, to the millisecond', () => {
+      const d = chartData(
+        input({
+          series: [
+            { time: base - 10_000, pnl: '0', value: '100' },
+            { time: base + 25, pnl: '-5', value: '95' },
+            { time: base + 27_000, pnl: '0', value: '100' },
+          ],
+          drawdown: {
+            underwater: [],
+            periods: [{ start: base - 10_000, trough: base + 25, end: base + 55, depthUsd: '5', depthPct: '0.05' }],
+          },
+        }),
+      );
+      expect(d.shades).toEqual([{ from: s(base - 10_000), to: s(base + 27_000) }]);
+    });
+  });
+
   describe('under a coin filter', () => {
     const coin = { headline: { scope: { kind: 'coin', symbol: 'BTCUSDT', market: null } as const } };
     // Deposits 1000 at t0 and 500 at t20; BTC trades realise +50 at t10 and -20 at t30.
