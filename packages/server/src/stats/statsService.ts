@@ -18,6 +18,18 @@ export class StatsWorkerStoppedError extends Error {
   }
 }
 
+/** The request ran past its time limit and was stopped; a new worker serves the next. */
+export class StatsTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(
+      `The stats took longer than ${Math.round(timeoutMs / 1000)} s to compute and were stopped. Try again, or choose a shorter date range.`,
+    );
+  }
+}
+
+/** How long one stats request may take in the worker, in milliseconds. */
+export const STATS_TIMEOUT_MS = 30_000;
+
 // ---- a request across threads ----
 
 /** A Decimal's tag in a request's JSON: a decimal does not survive a structured clone as one. */
@@ -59,20 +71,37 @@ export interface WorkerStatsOptions {
   /** The database file; the worker opens its own read-only connection to it. */
   dbPath: string;
   logger: Logger;
+  /** The longest one request may take once handed to the worker (not counting its wait in the queue). */
+  timeoutMs?: number;
+  /** The worker's entry module; for tests, which substitute a worker that misbehaves. */
+  workerUrl?: URL;
+}
+
+/** The request a worker is computing, with the timer that limits it. */
+interface Pending {
+  worker: Worker;
+  resolve(json: string): void;
+  reject(e: Error): void;
+  timer: NodeJS.Timeout;
 }
 
 /**
  * Computes the stats in one long-lived worker thread, so that reading and computing a large record
  * never holds up the thread the engine runs on. Requests run one at a time, in order. A worker
- * that stops fails the request it was computing; the next request starts a new one.
+ * that stops fails the request it was computing; the next request starts a new one. A request that
+ * takes longer than the time limit (30 s unless set) fails with a StatsTimeoutError: its worker is
+ * terminated and a new one started at once, so the requests behind it are still served.
  */
 export class WorkerStats implements StatsService {
   private worker: Worker | null = null;
-  private pending: { resolve(json: string): void; reject(e: Error): void } | null = null;
+  private pending: Pending | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
+  private readonly timeoutMs: number;
 
-  constructor(private readonly o: WorkerStatsOptions) {}
+  constructor(private readonly o: WorkerStatsOptions) {
+    this.timeoutMs = o.timeoutMs ?? STATS_TIMEOUT_MS;
+  }
 
   report(req: StatsRequest): Promise<string> {
     const text = encodeStatsRequest(req);
@@ -86,6 +115,7 @@ export class WorkerStats implements StatsService {
     this.closed = true;
     const w = this.worker;
     this.worker = null;
+    this.settle(w, (p) => p.reject(new StatsWorkerStoppedError()));
     if (w) await w.terminate();
   }
 
@@ -93,27 +123,47 @@ export class WorkerStats implements StatsService {
     if (this.closed) return Promise.reject(new StatsWorkerStoppedError());
     const worker = this.worker ?? this.start();
     return new Promise((resolve, reject) => {
-      this.pending = { resolve, reject };
+      const timer = setTimeout(() => this.timeOut(worker), this.timeoutMs);
+      timer.unref();
+      this.pending = { worker, resolve, reject, timer };
       worker.postMessage(text);
     });
   }
 
+  /** Takes the request `w` is computing, if there is one, and stops its timer; then hands it to `then`. */
+  private settle(w: Worker | null, then: (p: Pending) => void): boolean {
+    const p = this.pending;
+    if (!p || p.worker !== w) return false;
+    this.pending = null;
+    clearTimeout(p.timer);
+    then(p);
+    return true;
+  }
+
+  private timeOut(w: Worker): void {
+    if (!this.settle(w, (p) => p.reject(new StatsTimeoutError(this.timeoutMs)))) return;
+    this.o.logger.error(`Stats worker timed out after ${this.timeoutMs} ms; it was stopped and restarted`);
+    if (this.worker === w) this.worker = null;
+    void w.terminate();
+    if (!this.closed) this.start();
+  }
+
   private start(): Worker {
-    const w = new Worker(new URL('./statsWorker.mjs', import.meta.url), { workerData: { dbPath: this.o.dbPath } });
+    const w = new Worker(this.o.workerUrl ?? new URL('./statsWorker.mjs', import.meta.url), {
+      workerData: { dbPath: this.o.dbPath },
+    });
+    // A handler acts only on the request its own worker is computing: after a timeout, the stopped
+    // worker's late message or exit arrives while the next request is already pending on its successor.
     w.on('message', (m: StatsReply) => {
-      const p = this.pending;
-      this.pending = null;
-      if (!p) return;
-      if ('json' in m) p.resolve(m.json);
-      else p.reject(new Error(m.error));
+      this.settle(w, (p) => ('json' in m ? p.resolve(m.json) : p.reject(new Error(m.error))));
     });
     w.on('error', (e: Error) => this.o.logger.error(`Stats worker failed: ${e.message}`));
     w.on('exit', (code) => {
       if (this.worker === w) this.worker = null;
-      const p = this.pending;
-      this.pending = null;
-      if (!this.closed && p) this.o.logger.error(`Stats worker stopped (exit code ${code}) while computing a request`);
-      p?.reject(new StatsWorkerStoppedError());
+      this.settle(w, (p) => {
+        if (!this.closed) this.o.logger.error(`Stats worker stopped (exit code ${code}) while computing a request`);
+        p.reject(new StatsWorkerStoppedError());
+      });
     });
     this.worker = w;
     return w;

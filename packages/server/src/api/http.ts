@@ -34,7 +34,7 @@ import {
 } from '../runner.ts';
 import type { EngineRunner } from '../runner.ts';
 import { statsBounds, statsLive } from '../stats/loadStats.ts';
-import { StatsWorkerStoppedError } from '../stats/statsService.ts';
+import { StatsTimeoutError, StatsWorkerStoppedError } from '../stats/statsService.ts';
 import type { StatsService } from '../stats/statsService.ts';
 import { registerAuth } from './auth.ts';
 import type { ClientHub } from './ws.ts';
@@ -223,6 +223,7 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
     // Fastify's own client errors: invalid JSON, body too large, unsupported content type.
     if (status !== undefined && status >= 400 && status < 500) return send(reply, status, { error: message });
     d.logger.error(`${req.method} ${req.url.split('?')[0]} failed: ${message}`);
+    if (err instanceof StatsTimeoutError) return send(reply, 503, { error: message });
     return send(reply, 500, { error: err instanceof StatsWorkerStoppedError ? message : 'Internal error' });
   });
 

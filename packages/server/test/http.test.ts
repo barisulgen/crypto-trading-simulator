@@ -26,7 +26,7 @@ import {
   RefusedError,
 } from '../src/runner.ts';
 import { downsampleReport, loadStatsInput } from '../src/stats/loadStats.ts';
-import { inProcessStats, StatsWorkerStoppedError } from '../src/stats/statsService.ts';
+import { inProcessStats, StatsTimeoutError, StatsWorkerStoppedError } from '../src/stats/statsService.ts';
 import type { StatsService } from '../src/stats/statsService.ts';
 import { FakeClock, FakeHealth, FakeHistory, settle, TestMarket, TestPerpMarket } from './helpers.ts';
 
@@ -1202,6 +1202,27 @@ describe('GET /api/stats', () => {
     const res = await t.call('GET', '/api/stats?tz=UTC');
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ error: 'The stats could not be computed: the stats worker stopped. Try again.' });
+    expect(await t.call('GET', '/api/stats?tz=UTC')).toMatchObject({ status: 200, body: { served: true } });
+  });
+
+  it('stats that took too long are a 503 with the message; the next request is served', async () => {
+    let calls = 0;
+    const stats: StatsService = {
+      report: async () => {
+        calls += 1;
+        if (calls === 1) throw new StatsTimeoutError(30_000);
+        return '{"served":true}';
+      },
+      close: async () => {},
+    };
+    const t = await makeApp({ stats });
+    apps.push(t.app);
+    await t.login();
+    const res = await t.call('GET', '/api/stats?tz=UTC');
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      error: 'The stats took longer than 30 s to compute and were stopped. Try again, or choose a shorter date range.',
+    });
     expect(await t.call('GET', '/api/stats?tz=UTC')).toMatchObject({ status: 200, body: { served: true } });
   });
 

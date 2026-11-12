@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { D, Decimal } from '@sim/engine';
 import type { AccountValue, SimEvent } from '@sim/engine';
@@ -10,7 +11,14 @@ import type { Db } from '../src/db/db.ts';
 import { toJson } from '../src/db/store.ts';
 import { readStatsRows, statsBounds, statsJson } from '../src/stats/loadStats.ts';
 import type { StatsLive, StatsRequest } from '../src/stats/loadStats.ts';
-import { decodeStatsRequest, encodeStatsRequest, StatsWorkerStoppedError, WorkerStats } from '../src/stats/statsService.ts';
+import {
+  decodeStatsRequest,
+  encodeStatsRequest,
+  STATS_TIMEOUT_MS,
+  StatsTimeoutError,
+  StatsWorkerStoppedError,
+  WorkerStats,
+} from '../src/stats/statsService.ts';
 
 const T0 = 1_762_000_000_000;
 const MIN = 60_000;
@@ -53,6 +61,15 @@ const services: WorkerStats[] = [];
 
 function service(): WorkerStats {
   const s = new WorkerStats({ dbPath: file, logger });
+  services.push(s);
+  return s;
+}
+
+const HANGING = new URL('./fixtures/hangingStatsWorker.mjs', import.meta.url);
+
+/** A service whose worker spins on a request for the time zone Test/Hang. */
+function hangingService(timeoutMs: number): WorkerStats {
+  const s = new WorkerStats({ dbPath: file, logger, timeoutMs, workerUrl: HANGING });
   services.push(s);
   return s;
 }
@@ -228,4 +245,62 @@ describe('WorkerStats', () => {
     expect(took).toBeGreaterThan(500);
     expect(longest).toBeLessThan(200);
   }, 60_000);
+});
+
+describe('the time limit on a request', () => {
+  const HANG = { tz: 'Test/Hang' };
+  const workerOf = (s: WorkerStats) => (s as unknown as { worker: Worker | null }).worker;
+
+  it('the default limit is 30 000 ms, and the message names it in seconds', () => {
+    expect(STATS_TIMEOUT_MS).toBe(30_000);
+    expect(new StatsTimeoutError(STATS_TIMEOUT_MS).message).toBe(
+      'The stats took longer than 30 s to compute and were stopped. Try again, or choose a shorter date range.',
+    );
+  });
+
+  it('a hung request is stopped at the limit; the queued and later requests are served by a new worker', async () => {
+    const limit = 2000;
+    logged.length = 0;
+    const s = hangingService(limit);
+    const started = performance.now();
+    const hung = s.report(request(HANG));
+    const hungResult = hung.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    const queuedReq = request({ tz: 'Asia/Tokyo' });
+    const queued = s.report(queuedReq);
+    await new Promise((r) => setImmediate(r));
+    const old = workerOf(s)!;
+    const exited = new Promise<void>((r) => old.once('exit', () => r()));
+
+    const err = await hungResult;
+    expect(performance.now() - started).toBeGreaterThanOrEqual(limit - 50);
+    expect(err).toBeInstanceOf(StatsTimeoutError);
+    expect((err as Error).message).toBe(
+      'The stats took longer than 2 s to compute and were stopped. Try again, or choose a shorter date range.',
+    );
+    await exited;
+    expect(workerOf(s)).not.toBe(old);
+
+    // The old worker's exit arrived with the next request pending: it must not have touched it.
+    expect(await queued).toBe(statsJson(db, queuedReq));
+    const next = request({ tz: 'Europe/Istanbul' });
+    expect(await s.report(next)).toBe(statsJson(db, next));
+    expect(logged).toEqual([`Stats worker timed out after ${limit} ms; it was stopped and restarted`]);
+  }, 30_000);
+
+  it('closing during a running request fails it as stopped, and no timeout fires afterwards', async () => {
+    const limit = 1000;
+    logged.length = 0;
+    const s = hangingService(limit);
+    const running = s.report(request(HANG));
+    await new Promise((r) => setImmediate(r));
+    await s.close();
+    await expect(running).rejects.toThrow(StatsWorkerStoppedError);
+    await new Promise((r) => setTimeout(r, limit + 800));
+    expect(logged).toEqual([]);
+    expect(workerOf(s)).toBeNull();
+    await expect(s.report(request())).rejects.toThrow(StatsWorkerStoppedError);
+  }, 30_000);
 });
