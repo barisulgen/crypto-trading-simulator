@@ -346,9 +346,10 @@ function pick<P extends { time: number }>(line: P[], kept: number[], gaps: boole
  * MAX_POINTS points (see keptIndices), among them each bucket's deepest point below the peak and
  * the peak and trough of every drawdown period (the deepest periods first, while they fit). The
  * benchmark line keeps the series' times when it is drawn on them, else it is thinned on its own
- * values. Every drawdown figure was computed on the full series. On the account and wallet curves, which are snapshots, a kept point is marked `gap` where
- * they were interrupted before it (see pick). A coin's curve steps at its trades' times, so neither
- * it nor the benchmark beside it is ever marked.
+ * values. Every drawdown figure was computed on the full series. On the account and wallet
+ * curves, which are snapshots, a kept point is marked `gap` where they were interrupted before it
+ * (see pick). A coin's curve steps at its trades' times, so neither it nor the benchmark beside it
+ * is ever marked.
  */
 export function downsampleReport(report: StatsReport): StatsResponse {
   const { series, drawdown, benchmark } = report;
