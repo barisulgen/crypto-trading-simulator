@@ -431,7 +431,9 @@ describe('computeStats: filters', () => {
     expect(s(computeStats(input({ events, snapshots, account: acct }), ALL).headline.netPnl)).toBe('100');
   });
 
-  it('a coin with an open position never marked: counted at 0 and not live', () => {
+  // The server never sends live with a part unpriced (an unpriced holding sets pricesLoading), but
+  // the engine does not rely on it: a coin's live point is used only when every part is priced.
+  it('a coin with an open position never marked: no live point, and not live', () => {
     const p = position({ id: 'p1', openedAt: t(1) });
     const events = rows([deposit(T0, 'leverage', '1000', '1000'), opened(p), perpFill('p1', t(1))]);
     const acct = account({
@@ -457,7 +459,35 @@ describe('computeStats: filters', () => {
     const r = computeStats(input({ events, account: acct, positions: [p] }), { ...ALL, symbol: 'BTCUSDT' });
     expect(s(r.headline.netPnl)).toBe('-0.3');
     expect(r.headline.live).toBe(false);
+    expect(r.series.map((x) => [x.time, s(x.pnl)])).toEqual([
+      [T0, '0'],
+      [t(1), '-0.3'],
+    ]);
     expect(r.open).toEqual({ count: 1, unrealized: null, pastRange: false });
+  });
+
+  it('a coin held but never priced: no live point, and not live', () => {
+    const events = rows([
+      deposit(T0, 'spot', '1000', '1000'),
+      spotFill(t(1), { side: 'buy', qty: D(5), price: D(100), quote: D(500), fee: D('0.005'), feeAsset: 'SOL', feeUsd: D('0.5') }),
+    ]);
+    const acct = account({
+      totalDeposited: D(1000),
+      coins: [{ asset: 'SOL', qty: D('4.995'), bid: D(0), value: D(0), fresh: false, bidAt: null }],
+    });
+    const basis = { SOL: { qty: D('4.995'), cost: D(500), roundTripId: 'rt-1', openedAt: t(1), tripRealized: D(0) } };
+    const r = computeStats(input({ events, account: acct, basis }), { ...ALL, symbol: 'SOLUSDT' });
+    expect(r.headline.live).toBe(false);
+    expect(r.series.at(-1)!.time).not.toBe(t(60));
+    expect(s(r.headline.netPnl)).toBe('0');
+    const priced = account({
+      totalDeposited: D(1000),
+      coins: [{ asset: 'SOL', qty: D('4.995'), bid: D(110), value: D('549.45'), fresh: true, bidAt: t(59) }],
+    });
+    const live = computeStats(input({ events, account: priced, basis }), { ...ALL, symbol: 'SOLUSDT' });
+    expect(live.headline.live).toBe(true);
+    expect(live.series.at(-1)!.time).toBe(t(60));
+    expect(s(live.headline.netPnl)).toBe('49.45');
   });
 });
 

@@ -83,32 +83,29 @@ function perpUnrealized(input: StatsInput, symbol: string): Decimal | null {
 /**
  * The scope's point at `now`, from the current account value. A coin's is what it realised so far
  * plus what it holds now: the spot coins at the bid less their remaining cost and the open
- * position at the mark. An unpriced part counts as 0 and the point is then not fully priced.
+ * position at the mark. Null when a part of it has never been priced: a point that leaves out
+ * what it cannot value is not the coin's figure now.
  */
-function livePoint(
-  input: StatsInput,
-  scope: Scope,
-  walletCapital: Decimal | null,
-): { point: PnlPoint; priced: boolean } {
+function livePoint(input: StatsInput, scope: Scope, walletCapital: Decimal | null): PnlPoint | null {
   const { account: a, now } = input;
-  if (scope.kind === 'account') {
-    return { point: { time: now, pnl: a.total.minus(a.totalDeposited), value: a.total }, priced: true };
-  }
+  if (scope.kind === 'account') return { time: now, pnl: a.total.minus(a.totalDeposited), value: a.total };
   if (scope.kind === 'wallet') {
     const value = walletValue(a, scope.wallet);
-    return { point: { time: now, pnl: value.minus(walletCapital ?? 0), value }, priced: true };
+    return { time: now, pnl: value.minus(walletCapital ?? 0), value };
   }
   const realised = pnlSeries({ events: input.events, snapshots: [], live: null }, scope, null, null);
   let pnl = realised.at(-1)?.pnl ?? D(0);
-  let priced = true;
-  const parts: (Decimal | null)[] = [];
-  if (scope.market !== 'perp') parts.push(spotUnrealized(input, scope.symbol));
-  if (scope.market !== 'spot') parts.push(perpUnrealized(input, scope.symbol));
-  for (const u of parts) {
-    if (u === null) priced = false;
-    else pnl = pnl.plus(u);
+  if (scope.market !== 'perp') {
+    const u = spotUnrealized(input, scope.symbol);
+    if (u === null) return null;
+    pnl = pnl.plus(u);
   }
-  return { point: { time: now, pnl, value: a.totalDeposited.plus(pnl) }, priced };
+  if (scope.market !== 'spot') {
+    const u = perpUnrealized(input, scope.symbol);
+    if (u === null) return null;
+    pnl = pnl.plus(u);
+  }
+  return { time: now, pnl, value: a.totalDeposited.plus(pnl) };
 }
 
 /**
@@ -237,7 +234,7 @@ export function computeStats(input: StatsInput, filter: StatsFilter): StatsRepor
 
   const walletCapital = scope.kind === 'wallet' ? capitalAt(events, scope, now) : null;
   const live = input.live ? livePoint(input, scope, walletCapital) : null;
-  const series = pnlSeries({ events, snapshots, live: live?.point ?? null }, scope, from, to);
+  const series = pnlSeries({ events, snapshots, live }, scope, from, to);
   const range = rangePnl(series, events, scope, from, to);
   const headline = {
     scope,
@@ -246,7 +243,7 @@ export function computeStats(input: StatsInput, filter: StatsFilter): StatsRepor
     capitalMax: range.capitalMax,
     currentValue: scope.kind === 'wallet' ? walletValue(input.account, scope.wallet) : input.account.total,
     deposited: walletCapital ?? input.account.totalDeposited,
-    live: live !== null && live.priced,
+    live: live !== null,
   };
 
   const built = buildTrades(events);
@@ -273,8 +270,7 @@ export function computeStats(input: StatsInput, filter: StatsFilter): StatsRepor
     dustRealized = dustRealized.plus(r.event.fill.realizedPnl ?? 0);
   }
 
-  const accountLive =
-    scope.kind === 'account' ? (live?.point ?? null) : input.live ? livePoint(input, ACCOUNT, null).point : null;
+  const accountLive = scope.kind === 'account' ? live : input.live ? livePoint(input, ACCOUNT, null) : null;
   const accountSeries =
     scope.kind === 'account' ? series : pnlSeries({ events, snapshots, live: accountLive }, ACCOUNT, from, to);
   const accountCapitalMax =
