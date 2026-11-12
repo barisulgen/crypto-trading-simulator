@@ -196,9 +196,9 @@ function FilterBar({ filters, onRefresh }: { filters: HistoryFilters; onRefresh(
         <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 desk:flex desk:flex-wrap desk:items-end desk:gap-x-4">
           <FilterFields value={filters} onChange={set} markets={MARKET_FILTERS} allTitle="Both markets and every account event" />
         </div>
-        <BackwardsNote value={filters} what="no event can match" />
         <TypeChips types={filters.types} onChange={(types) => set({ types })} />
       </div>
+      <BackwardsNote value={filters} what="no event can match" />
     </section>
   );
 }

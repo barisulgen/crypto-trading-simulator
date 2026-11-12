@@ -47,7 +47,6 @@ export function StatsFilters({ filters, live, onRefresh }: { filters: StatsFilte
             allTitle="The whole account: both wallets and every trade"
           />
         </div>
-        <BackwardsNote value={filters} what="there is nothing to compute" />
         {notes.length > 0 && (
           <ul aria-label="What the filters do not narrow" className="flex flex-col gap-0.5 text-2xs text-muted">
             {notes.map((n) => (
@@ -56,6 +55,7 @@ export function StatsFilters({ filters, live, onRefresh }: { filters: StatsFilte
           </ul>
         )}
       </div>
+      <BackwardsNote value={filters} what="there is nothing to compute" />
     </section>
   );
 }

@@ -86,11 +86,14 @@ export function FilterFields({
   );
 }
 
-/** The note shown when the From date is after the To date; nothing otherwise. */
+/**
+ * The note shown when the From date is after the To date; nothing otherwise. It sits in the filter
+ * bar's own section, outside the part that folds on phones, so it is seen without opening Filters.
+ */
 export function BackwardsNote({ value, what }: { value: RangeFilter; what: string }) {
   if (!isBackwards(value)) return null;
   return (
-    <p role="status" className="text-xs text-down">
+    <p role="status" className="border-t border-line px-3 py-1.5 text-xs text-down">
       The From date is after the To date, so {what}.
     </p>
   );
