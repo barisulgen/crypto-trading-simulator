@@ -212,7 +212,8 @@ function benchmark(
     const v = valueOf(h, bidAt(p));
     return v === null ? null : v.minus(h.deposited);
   };
-  const startPnl = filter.from === null ? D(0) : pnlAt(first);
+  // A series that opens where the money arrived (after From, or with no From) starts at a zero P&L.
+  const startPnl = filter.from === null || first.time > filter.from ? D(0) : pnlAt(first);
   const endHolding = at(last.time);
   const value = valueOf(endHolding, bidAt(last));
   const endPnl = last === first ? startPnl : value === null ? null : value.minus(endHolding.deposited);

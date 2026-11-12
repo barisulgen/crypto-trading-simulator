@@ -160,8 +160,11 @@ function allPoints(events: StatsEvent[], snapshots: Snapshot[], scope: Scope): P
  *
  * Without `from` the series starts at a zero origin, at the scope's first deposit or transfer (or
  * its first point, whichever is earlier), valued at the capital then. With `from` set it starts at
- * the last point at or before `from` (at that point's own time), or at a zero point at `from`
- * valued at the capital then when there is none. Then come the points after `from` up to `to`.
+ * the last point at or before `from` (at that point's own time), or, when there is none, at a zero
+ * point at `from` valued at the capital then. When the scope has no capital at `from` either, it
+ * starts as without `from`: at the first capital step after `from` (or the first point in range,
+ * whichever is earlier), so no point is valued at zero before the money arrives. Then come the
+ * points after `from` up to `to`.
  * The live point, when given, closes the series if the range reaches it.
  */
 export function pnlSeries(
@@ -175,12 +178,13 @@ export function pnlSeries(
   const steps = capitalSteps(input.events, scope);
   const capitalThen = (t: number) => capitalCursor(steps)(t);
   const series: PnlPoint[] = [];
-  if (from !== null) {
-    const before = points.filter((p) => p.time <= from).at(-1);
-    series.push(before ?? { time: from, pnl: D(0), value: capitalThen(from) });
-  } else {
+  const before = from === null ? undefined : points.filter((p) => p.time <= from).at(-1);
+  if (before) series.push(before);
+  else if (from !== null && capitalThen(from).gt(0)) series.push({ time: from, pnl: D(0), value: capitalThen(from) });
+  else {
+    // No point to start from and no capital yet: the series opens where the money first arrives.
     const starts: number[] = [];
-    const firstCapital = steps[0];
+    const firstCapital = steps.find((s) => from === null || s.time > from);
     if (firstCapital && (to === null || firstCapital.time <= to)) starts.push(firstCapital.time);
     const firstPoint = inRange[0];
     if (firstPoint) starts.push(firstPoint.time);

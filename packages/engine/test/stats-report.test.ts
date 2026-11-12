@@ -665,6 +665,16 @@ describe('computeStats: benchmark', () => {
     expect(computeStats(input({ events: deposits, benchmarkBuys: buys }), ALL).benchmark.value).toBeNull();
   });
 
+  it('a range starting before the first deposit starts at that deposit, from a zero P&L', () => {
+    const snapshots = [snap(t(1), '1000', '1000', '80000'), snap(t(3), '1500', '1500', '90000')];
+    const base = input({ events: deposits, snapshots, benchmarkBuys: buys, btcBid: D(100000) });
+    const r = computeStats(base, { ...ALL, from: t(0) - 1, to: t(3) });
+    expect(r.series[0]).toMatchObject({ time: t(0) });
+    expect(s(r.series[0]!.value)).toBe('1000');
+    expect(s(r.benchmark.pnl)).toBe('223.1756');
+    expect(s(r.benchmark.value)).toBe('1723.1756');
+  });
+
   it('a range: measured at the btc_bid of the snapshots that give the start and the end', () => {
     const snapshots = [snap(t(1), '1000', '1000', '80000'), snap(t(3), '1500', '1500', '90000')];
     const base = input({ events: deposits, snapshots, benchmarkBuys: buys, btcBid: D(100000) });

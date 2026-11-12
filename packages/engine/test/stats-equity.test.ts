@@ -510,3 +510,57 @@ describe('capitalAt', () => {
     expect(capitalAt(events, ACCOUNT, t(2)).toString()).toBe('1000');
   });
 });
+
+describe('a From date before any money arrived', () => {
+  const events = rows([deposit(t(2), 'spot', '1000', '1000')]);
+  const snapshots = [snap(t(3), '1010', '1000'), snap(t(4), '1005', '1000')];
+  const input = { events, snapshots, live: null };
+
+  it('starts at the first deposit, valued at it, never at a zero-value point', () => {
+    const series = pnlSeries(input, ACCOUNT, t(0), null);
+    expect(str(series)).toEqual([
+      { time: t(2), pnl: '0', value: '1000' },
+      { time: t(3), pnl: '10', value: '1010' },
+      { time: t(4), pnl: '5', value: '1005' },
+    ]);
+    expect(series.some((p) => p.value.isZero())).toBe(false);
+    expect(drawdown(series).maxUsd.toString()).toBe('5');
+    const r = rangePnl(series, events, ACCOUNT, t(0), null);
+    expect(r.pnl.toString()).toBe('5');
+    expect(r.capitalMax.toString()).toBe('1000');
+    expect(r.returnPct?.toString()).toBe('0.005');
+  });
+
+  it('honours the To date when choosing where the money arrives', () => {
+    // The deposit is after To and no point is in range: nothing to draw.
+    expect(pnlSeries(input, ACCOUNT, t(0), t(1))).toEqual([]);
+  });
+
+  it('is unchanged when capital already exists at From and no point is before it', () => {
+    const series = pnlSeries(input, ACCOUNT, t(2) + 1, null);
+    expect(str(series)).toEqual([
+      { time: t(2) + 1, pnl: '0', value: '1000' },
+      { time: t(3), pnl: '10', value: '1010' },
+      { time: t(4), pnl: '5', value: '1005' },
+    ]);
+  });
+
+  it('is unchanged when a point is at or before From', () => {
+    const series = pnlSeries(input, ACCOUNT, t(3), null);
+    expect(str(series)).toEqual([
+      { time: t(3), pnl: '10', value: '1010' },
+      { time: t(4), pnl: '5', value: '1005' },
+    ]);
+  });
+
+  it("starts a wallet at the transfer that gives it capital after From", () => {
+    const wallet = rows([deposit(t(0), 'spot', '1000', '1000'), transfer(t(3), 'spot', 'leverage', '400')]);
+    const snaps = [snap(t(4), '1000', '1000', '600', '410'), snap(t(5), '1000', '1000', '600', '395')];
+    const series = pnlSeries({ events: wallet, snapshots: snaps, live: null }, LEVERAGE, t(1), null);
+    expect(str(series)).toEqual([
+      { time: t(3), pnl: '0', value: '400' },
+      { time: t(4), pnl: '10', value: '410' },
+      { time: t(5), pnl: '-5', value: '395' },
+    ]);
+  });
+});
